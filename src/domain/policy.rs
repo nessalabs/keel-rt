@@ -1,10 +1,16 @@
 use crate::domain::outcome::NodeOutcome;
 use std::time::Duration;
 
+/// Policy result consulted inside `apply_outcome` (sync, never in the scheduler).
+///
+/// - [`Accept`]: take the executor/resume outcome as written (including Waiting).
+/// - [`Retry`]: Failed/TimedOut only — node becomes `Ready { runnable_at }`, never Waiting.
+/// - [`Reject`]: fail the node (and fail-fast). Refuse Waiting without encoding "no" as Retry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PolicyDecision {
     Accept,
     Retry { delay: Duration },
+    Reject,
 }
 
 /// Consulted after an executor outcome or a resume Complete. Must stay sync:
@@ -55,19 +61,14 @@ impl Policy for RetryPolicy {
     }
 }
 
-/// Accepts terminal outcomes; treats Waiting as a policy-level refusal
-/// (the aggregate still fails the node if a policy returns Retry on Waiting).
+/// Accepts Succeeded / Failed / TimedOut. [`Reject`]s Waiting (node Failed + fail-fast).
 #[derive(Clone, Debug, Default)]
 pub struct NeverWaitPolicy;
 
 impl Policy for NeverWaitPolicy {
     fn decide(&self, outcome: &NodeOutcome, _attempt: u32) -> PolicyDecision {
         match outcome {
-            NodeOutcome::Waiting { .. } => {
-                // Waiting is first-class; this policy accepts it so the node
-                // stays Waiting. Illegal Retry-after-Waiting is enforced in apply.
-                PolicyDecision::Accept
-            }
+            NodeOutcome::Waiting { .. } => PolicyDecision::Reject,
             _ => PolicyDecision::Accept,
         }
     }

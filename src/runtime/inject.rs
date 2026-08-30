@@ -32,6 +32,9 @@ pub(crate) enum Event {
 #[derive(Debug)]
 pub(crate) enum JoinKind {
     Panic(String),
+    /// Aborted execute tasks are usually dropped without a join. Kept so a
+    /// late cancelled join is ignored when `Execution` already set `cancelled`.
+    #[allow(dead_code)]
     Cancelled,
 }
 

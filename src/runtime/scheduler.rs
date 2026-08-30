@@ -12,7 +12,7 @@ use crate::runtime::park::{ChannelPark, Park};
 use crate::runtime::sink::EventSink;
 use crate::runtime::spawn::SpawnSet;
 use crate::runtime::store::StateStore;
-use crate::runtime::time::{Clock, Timestamp};
+use crate::runtime::time::Clock;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +38,7 @@ pub(crate) struct Scheduler {
     cancel_bound: Duration,
     tx: EventTx,
     bound_armed: bool,
+    last_persisted: u64,
 }
 
 impl Scheduler {
@@ -57,7 +58,7 @@ impl Scheduler {
         cancel_bound: Duration,
     ) -> Self {
         let exec = Execution::new(definition);
-        let _ = state_tx.send(exec.state);
+        let _ = state_tx.send(exec.state());
         Self {
             spawn: SpawnSet::new(tx.clone()),
             exec,
@@ -76,12 +77,13 @@ impl Scheduler {
             cancel_bound,
             tx,
             bound_armed: false,
+            last_persisted: 0,
         }
     }
 
     pub(crate) async fn run(mut self) {
         loop {
-            let timer = self.next_timer();
+            let timer = self.exec.next_deadline();
             let Some(event) = self.park.recv(timer).await else {
                 break;
             };
@@ -94,8 +96,9 @@ impl Scheduler {
     async fn handle_event(&mut self, event: Event) -> bool {
         match event {
             Event::Start => {
-                self.apply(ApplyCmd::Start).await;
-                self.dispatch().await;
+                self.apply_cmd(ApplyCmd::Start);
+                self.dispatch();
+                self.persist_after_event().await;
             }
             Event::NodeFinished {
                 node_id,
@@ -106,82 +109,82 @@ impl Scheduler {
                 self.spawn.forget(&node_id);
                 match result {
                     Ok(outcome) => {
-                        self.apply(ApplyCmd::FinishNode {
+                        self.apply_cmd(ApplyCmd::FinishNode {
                             node_id,
                             attempt,
                             outcome: Ok(outcome),
-                        })
-                        .await;
+                        });
                     }
                     Err(JoinKind::Panic(msg)) => {
-                        self.apply(ApplyCmd::FinishNode {
+                        self.apply_cmd(ApplyCmd::FinishNode {
                             node_id,
                             attempt,
                             outcome: Err(msg),
-                        })
-                        .await;
+                        });
                     }
                     Err(JoinKind::Cancelled) => {
-                        // Domain already moved the node to Cancelled, or will.
-                        if !self.exec.cancelled {
-                            self.apply(ApplyCmd::FinishNode {
+                        if !self.exec.is_cancelled() {
+                            self.apply_cmd(ApplyCmd::FinishNode {
                                 node_id,
                                 attempt,
                                 outcome: Ok(NodeOutcome::failed("cancelled")),
-                            })
-                            .await;
+                            });
                         }
                     }
                 }
-                self.dispatch().await;
+                self.dispatch();
+                self.persist_after_event().await;
             }
             Event::Resume {
                 token,
                 resume,
                 reply,
             } => {
-                let r = self
-                    .apply_result(ApplyCmd::Resume { token, resume })
-                    .await;
+                let r = self.apply_cmd_result(ApplyCmd::Resume { token, resume });
                 let _ = reply.send(r);
-                self.dispatch().await;
+                self.dispatch();
+                self.persist_after_event().await;
             }
             Event::Cancel => {
                 self.cancel.cancel();
-                self.apply(ApplyCmd::Cancel).await;
+                self.apply_cmd(ApplyCmd::Cancel);
                 self.arm_cancel_bound();
+                self.persist_after_event().await;
             }
             Event::Inspect { reply } => {
                 let _ = reply.send(self.exec.snapshot());
             }
             Event::Timer { node_id } => {
-                self.apply(ApplyCmd::RetryDue { node_id }).await;
-                self.dispatch().await;
+                self.apply_cmd(ApplyCmd::RetryDue { node_id });
+                self.dispatch();
+                self.persist_after_event().await;
             }
             Event::ForceCancelBound => {
                 warn!(
-                    execution_id = %self.exec.id,
+                    execution_id = %self.exec.id(),
                     bound_ms = self.cancel_bound.as_millis() as u64,
                     "cancel bound elapsed; aborting remaining execute tasks"
                 );
                 self.spawn.abort_all();
-                self.apply(ApplyCmd::ForceCancelRunning).await;
+                self.apply_cmd(ApplyCmd::ForceCancelRunning);
+                self.persist_after_event().await;
             }
             Event::Shutdown => {
                 self.spawn.abort_all();
                 return true;
             }
         }
-        // Stay alive after terminal so resume-after-cancel can return a domain
-        // error instead of a dead-channel error. Exit on Shutdown (handle drop).
         false
     }
 
-    async fn apply(&mut self, cmd: ApplyCmd) {
-        let _ = self.apply_result(cmd).await;
+    fn apply_cmd(&mut self, cmd: ApplyCmd) {
+        let _ = self.apply_cmd_result(cmd);
     }
 
-    async fn apply_result(&mut self, cmd: ApplyCmd) -> Result<(), crate::domain::state::ApplyError> {
+    fn apply_cmd_result(
+        &mut self,
+        cmd: ApplyCmd,
+    ) -> Result<(), crate::domain::state::ApplyError> {
         let now = self.clock.now();
         let effect = self.exec.apply(cmd, self.policy.as_ref(), now)?;
         for ev in &effect.events {
@@ -194,38 +197,22 @@ impl Scheduler {
             self.release_permit(id);
             self.spawn.abort_node(id);
         }
-        let snap = self.exec.snapshot();
-        if let Err(e) = self.store.put(&snap).await {
-            // Persistence errors do not roll back in-memory apply.
-            debug!(error = %e, "StateStore::put failed; in-memory state kept");
-        }
-        let _ = self.state_tx.send(self.exec.state);
+        let _ = self.state_tx.send(self.exec.state());
         Ok(())
     }
 
-    fn enqueue(&mut self, id: NodeId) {
-        if self.queued.insert(id.clone()) {
-            self.ready.push_back(id);
-        }
-    }
-
-    async fn dispatch(&mut self) {
+    fn dispatch(&mut self) {
         while self.available > 0 {
             let Some(id) = self.ready.pop_front() else {
                 break;
             };
             self.queued.remove(&id);
             let now = self.clock.now();
-            let ready = self
-                .exec
-                .node(&id)
-                .map(|n| n.state.is_ready_now(now))
-                .unwrap_or(false);
-            if !ready {
+            if !self.exec.is_ready_now(&id, now) {
                 continue;
             }
-            if self.apply_result(ApplyCmd::StartNode { node_id: id.clone() })
-                .await
+            if self
+                .apply_cmd_result(ApplyCmd::StartNode { node_id: id.clone() })
                 .is_err()
             {
                 continue;
@@ -236,32 +223,49 @@ impl Scheduler {
         }
     }
 
+    async fn persist_after_event(&mut self) {
+        if self.store.is_noop() {
+            return;
+        }
+        if self.exec.revision() == self.last_persisted {
+            return;
+        }
+        let snap = self.exec.snapshot();
+        if let Err(e) = self.store.put(&snap).await {
+            debug!(error = %e, "StateStore::put failed; in-memory state kept");
+        }
+        self.last_persisted = self.exec.revision();
+    }
+
+    fn enqueue(&mut self, id: NodeId) {
+        if self.queued.insert(id.clone()) {
+            self.ready.push_back(id);
+        }
+    }
+
     fn launch(&mut self, id: &NodeId) {
-        let def = match self.exec.definition.node(id) {
-            Some(d) => d.clone(),
-            None => return,
+        let Some(executor_id) = self.exec.executor_id(id) else {
+            return;
         };
-        let Some(exec) = self.registry.get(&def.executor_id) else {
-            let attempt = self.exec.node(id).map(|n| n.attempt).unwrap_or(1);
+        let Some(exec) = self.registry.get(executor_id) else {
+            let attempt = self.exec.attempt(id).unwrap_or(1);
             let _ = self.tx.send(Event::NodeFinished {
                 node_id: id.clone(),
                 attempt,
                 result: Ok(NodeOutcome::failed(format!(
-                    "no executor registered for {}",
-                    def.executor_id
+                    "no executor registered for {executor_id}"
                 ))),
             });
             return;
         };
-        let n = self.exec.node(id).expect("dispatched node");
-        let token = n
-            .resume_token
-            .clone()
+        let token = self
+            .exec
+            .resume_token(id)
             .expect("dispatch issues a resume token");
         let ctx = ExecutionContext {
-            execution_id: self.exec.id.clone(),
+            execution_id: self.exec.id().clone(),
             node_id: id.clone(),
-            attempt: n.attempt,
+            attempt: self.exec.attempt(id).unwrap_or(1),
             inputs: self.exec.inputs_for(id),
             cancel: self.cancel.child_token(),
             resume_token: token,
@@ -276,33 +280,13 @@ impl Scheduler {
         }
     }
 
-    fn next_timer(&self) -> Option<(Timestamp, NodeId)> {
-        let mut best: Option<(Timestamp, NodeId)> = None;
-        for (id, n) in &self.exec.nodes {
-            if let crate::domain::state::NodeState::Ready {
-                runnable_at: Some(at),
-            } = n.state
-            {
-                match &best {
-                    None => best = Some((at, id.clone())),
-                    Some((t, _)) if at < *t => best = Some((at, id.clone())),
-                    _ => {}
-                }
-            }
-        }
-        best
-    }
-
     fn arm_cancel_bound(&mut self) {
         if self.bound_armed {
             return;
         }
         self.bound_armed = true;
         let tx = self.tx.clone();
-        let clock = self.clock.clone();
         let bound = self.cancel_bound;
-        // Real wall clock, not FakeClock: a paused test clock must not stall cancel.
-        let _ = clock;
         tokio::spawn(async move {
             tokio::time::sleep(bound).await;
             let _ = tx.send(Event::ForceCancelBound);

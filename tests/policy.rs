@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::time::Duration;
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
-use keel_rt::{AcceptPolicy, ExecutionState, NodeState, RetryPolicy};
+use keel_rt::{AcceptPolicy, ExecutionState, NeverWaitPolicy, NodeState, RetryPolicy};
 
 #[tokio::test(flavor = "current_thread")]
 async fn retry_policy_max_3_fail_twice_then_succeed() {
@@ -125,6 +125,18 @@ async fn accept_policy_on_fail_no_retry() {
         .await;
 
     assert_eq!(run.scripted("a").attempts(), vec![1]);
+    assert!(matches!(run.state("a").await, NodeState::Failed));
+    assert_eq!(run.execution_state().await, ExecutionState::Failed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn never_wait_policy_rejects_waiting() {
+    let run = WorkflowTest::new()
+        .node("a", ScriptedExecutor::new("a").wait())
+        .policy(NeverWaitPolicy)
+        .run()
+        .await;
+
     assert!(matches!(run.state("a").await, NodeState::Failed));
     assert_eq!(run.execution_state().await, ExecutionState::Failed);
 }

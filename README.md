@@ -55,10 +55,12 @@ definition ──► Runtime::start ──► ExecutionHandle
   become Cancelled. Dropping `ExecutionHandle` **cancels** (JoinSet semantics,
   not detach). Hung executors that ignore cancel are aborted after
   `DEFAULT_CANCEL_BOUND` (50ms, configurable).
-- **Persistence.** After each apply, `StateStore::put(snapshot)`. Errors do
-  **not** roll back in-memory apply. Phase 1 does not recover via `get()` on
-  start. Snapshots use `NodeId` (never petgraph indices), serde,
-  `schema_version` + `revision`.
+- **Persistence.** One `StateStore::put(snapshot)` per injected event, after
+  dispatch drains launches — not after every internal `ApplyCmd`. `NoopStore`
+  skips `snapshot()` entirely. Errors do **not** roll back in-memory apply.
+  Phase 1 does not recover via `get()` on start. Snapshots use `NodeId` (never
+  petgraph indices), serde, `schema_version` + `revision`. No-op apply does
+  not bump `revision` or persist.
 
 Node states: `Pending`, `Ready` (optional `runnable_at`), `Running`, `Waiting`,
 `Succeeded`, `Failed`, `Cancelled`, `TimedOut`.

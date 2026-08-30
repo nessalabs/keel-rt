@@ -1,6 +1,6 @@
 use crate::domain::ids::{ExecutionId, NodeId, ResumeToken};
 use crate::domain::outcome::NodeError;
-use crate::runtime::time::Timestamp;
+use crate::domain::time::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// Domain events as data. The kernel does not interpret payloads.

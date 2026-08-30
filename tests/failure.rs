@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
-use keel_rt::{ExecutionState, NodeState};
+use keel_rt::{DomainEvent, ExecutionState, NodeState};
 
 #[tokio::test(flavor = "current_thread")]
 async fn b_fails_d_depends_on_b_cancelled_never_started() {
@@ -21,6 +21,15 @@ async fn b_fails_d_depends_on_b_cancelled_never_started() {
     assert!(matches!(run.state("d").await, NodeState::Cancelled));
     assert!(run.scripted("d").attempts().is_empty(), "D must never start");
     assert_eq!(run.execution_state().await, ExecutionState::Failed);
+    let failed_events = run
+        .events()
+        .iter()
+        .filter(|e| matches!(e, DomainEvent::ExecutionFailed { .. }))
+        .count();
+    assert_eq!(
+        failed_events, 1,
+        "fail-fast emits one ExecutionFailed, not one per aborted sibling"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -1,7 +1,6 @@
-use crate::domain::ids::{ExecutorId, NodeId, WorkflowId};
-use petgraph::algo::{is_cyclic_directed, toposort};
-use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::visit::EdgeRef;
+use crate::domain::ids::{ExecutorId, NodeId, NodeSlot, WorkflowId};
+use petgraph::algo::is_cyclic_directed;
+use petgraph::graph::DiGraph;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -43,8 +42,11 @@ pub struct WorkflowDefinition {
     pub id: WorkflowId,
     nodes: Vec<NodeDef>,
     edges: Vec<Edge>,
-    graph: DiGraph<NodeId, EdgePredicate>,
-    index: HashMap<NodeId, NodeIndex>,
+    /// `NodeId` → dense slot (same order as `nodes`).
+    index: HashMap<NodeId, NodeSlot>,
+    preds: Vec<Vec<NodeSlot>>,
+    succs: Vec<Vec<NodeSlot>>,
+    sources: Vec<NodeSlot>,
 }
 
 impl WorkflowDefinition {
@@ -65,42 +67,62 @@ impl WorkflowDefinition {
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&NodeDef> {
-        self.nodes.iter().find(|n| n.id == *id)
+        let slot = self.slot(id)?;
+        self.nodes.get(slot.0)
+    }
+
+    pub(crate) fn slot(&self, id: &NodeId) -> Option<NodeSlot> {
+        self.index.get(id).copied()
+    }
+
+    pub(crate) fn id_at(&self, slot: NodeSlot) -> &NodeId {
+        &self.nodes[slot.0].id
+    }
+
+    pub(crate) fn executor_at(&self, slot: NodeSlot) -> &ExecutorId {
+        &self.nodes[slot.0].executor_id
+    }
+
+    pub(crate) fn pred_slots(&self, slot: NodeSlot) -> &[NodeSlot] {
+        &self.preds[slot.0]
+    }
+
+    pub(crate) fn succ_slots(&self, slot: NodeSlot) -> &[NodeSlot] {
+        &self.succs[slot.0]
+    }
+
+    pub(crate) fn source_slots(&self) -> &[NodeSlot] {
+        &self.sources
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.len()
     }
 
     pub fn predecessors(&self, id: &NodeId) -> Vec<NodeId> {
-        let Some(&ix) = self.index.get(id) else {
+        let Some(slot) = self.slot(id) else {
             return Vec::new();
         };
-        self.graph
-            .edges_directed(ix, petgraph::Direction::Incoming)
-            .map(|e| self.graph[e.source()].clone())
+        self.pred_slots(slot)
+            .iter()
+            .map(|s| self.id_at(*s).clone())
             .collect()
     }
 
     pub fn successors(&self, id: &NodeId) -> Vec<NodeId> {
-        let Some(&ix) = self.index.get(id) else {
+        let Some(slot) = self.slot(id) else {
             return Vec::new();
         };
-        self.graph
-            .edges_directed(ix, petgraph::Direction::Outgoing)
-            .map(|e| self.graph[e.target()].clone())
+        self.succ_slots(slot)
+            .iter()
+            .map(|s| self.id_at(*s).clone())
             .collect()
     }
 
     pub fn sources(&self) -> Vec<NodeId> {
-        self.nodes
+        self.sources
             .iter()
-            .filter(|n| self.predecessors(&n.id).is_empty())
-            .map(|n| n.id.clone())
-            .collect()
-    }
-
-    pub fn topo(&self) -> Vec<NodeId> {
-        toposort(&self.graph, None)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|ix| self.graph[ix].clone())
+            .map(|s| self.id_at(*s).clone())
             .collect()
     }
 }
@@ -144,16 +166,19 @@ impl WorkflowDefinitionBuilder {
 
         let mut graph = DiGraph::new();
         let mut index = HashMap::new();
-        for n in &self.nodes {
+        let mut pg_ix = HashMap::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            let slot = NodeSlot(i);
+            index.insert(n.id.clone(), slot);
             let ix = graph.add_node(n.id.clone());
-            index.insert(n.id.clone(), ix);
+            pg_ix.insert(n.id.clone(), ix);
         }
 
         for e in &self.edges {
-            let from = index
+            let from = pg_ix
                 .get(&e.from)
                 .ok_or_else(|| DefinitionError::DisconnectedNode(e.from.clone()))?;
-            let to = index
+            let to = pg_ix
                 .get(&e.to)
                 .ok_or_else(|| DefinitionError::DisconnectedNode(e.to.clone()))?;
             graph.add_edge(*from, *to, e.predicate.clone());
@@ -163,15 +188,29 @@ impl WorkflowDefinitionBuilder {
             return Err(DefinitionError::Cycle);
         }
 
-        // Isolated nodes are allowed (fan-out of independent sources).
-        // "Disconnected" means an edge to an undeclared NodeId (above).
+        let n = self.nodes.len();
+        let mut preds = vec![Vec::new(); n];
+        let mut succs = vec![Vec::new(); n];
+        for e in &self.edges {
+            let from = index[&e.from];
+            let to = index[&e.to];
+            succs[from.0].push(to);
+            preds[to.0].push(from);
+        }
+
+        let sources = (0..n)
+            .filter(|&i| preds[i].is_empty())
+            .map(NodeSlot)
+            .collect();
 
         Ok(WorkflowDefinition {
             id: self.id,
             nodes: self.nodes,
             edges: self.edges,
-            graph,
             index,
+            preds,
+            succs,
+            sources,
         })
     }
 }
@@ -216,5 +255,18 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(matches!(err, DefinitionError::DisconnectedNode(_)));
+    }
+
+    #[test]
+    fn node_lookup_uses_index() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "ea")
+            .node("b", "eb")
+            .edge("a", "b")
+            .build()
+            .unwrap();
+        assert_eq!(def.node(&NodeId::new("b")).unwrap().executor_id.as_str(), "eb");
+        assert_eq!(def.predecessors(&NodeId::new("b")).len(), 1);
+        assert!(def.predecessors(&NodeId::new("a")).is_empty());
     }
 }

@@ -2,9 +2,8 @@ use crate::domain::ids::ExecutionId;
 use crate::domain::snapshot::ExecutionSnapshot;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tokio::sync::RwLock;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -16,11 +15,16 @@ pub enum StoreError {
 pub trait StateStore: Send + Sync {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError>;
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError>;
+
+    /// Cheap skip for `snapshot()` + `put` on the apply path.
+    fn is_noop(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct MemoryStore {
-    inner: Arc<RwLock<HashMap<ExecutionId, ExecutionSnapshot>>>,
+    inner: Arc<Mutex<HashMap<ExecutionId, ExecutionSnapshot>>>,
 }
 
 impl MemoryStore {
@@ -33,14 +37,14 @@ impl MemoryStore {
 impl StateStore for MemoryStore {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
         self.inner
-            .write()
-            .await
+            .lock()
+            .expect("memory store")
             .insert(snapshot.execution_id.clone(), snapshot.clone());
         Ok(())
     }
 
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
-        Ok(self.inner.read().await.get(id).cloned())
+        Ok(self.inner.lock().expect("memory store").get(id).cloned())
     }
 }
 
@@ -56,6 +60,10 @@ impl StateStore for NoopStore {
     async fn get(&self, _id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         Ok(None)
     }
+
+    fn is_noop(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -66,5 +74,9 @@ impl StateStore for Arc<dyn StateStore> {
 
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         (**self).get(id).await
+    }
+
+    fn is_noop(&self) -> bool {
+        (**self).is_noop()
     }
 }

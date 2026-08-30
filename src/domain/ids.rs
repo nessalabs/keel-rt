@@ -1,14 +1,29 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-/// Stable node identity. Public API never exposes petgraph indices.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct NodeId(String);
+/// Stable node identity. Clones are refcount bumps (`Arc<str>`).
+/// Public API never exposes petgraph indices or aggregate slots.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(Arc<str>);
+
+impl Serialize for NodeId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for NodeId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::new(s))
+    }
+}
 
 impl NodeId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+    pub fn new(id: impl AsRef<str>) -> Self {
+        Self(Arc::from(id.as_ref()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -27,6 +42,11 @@ impl From<String> for NodeId {
         Self::new(s)
     }
 }
+
+/// Dense slot inside one validated definition / execution aggregate.
+/// Never part of the public API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct NodeSlot(pub usize);
 
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
