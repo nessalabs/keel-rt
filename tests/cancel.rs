@@ -1,6 +1,6 @@
 use std::time::Duration;
-use workflow_kernel::testing::{ScriptedExecutor, WorkflowTest};
-use workflow_kernel::{ExecutionState, NodeState, DEFAULT_CANCEL_BOUND};
+use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
+use keel_rt::{ExecutionState, NodeState, DEFAULT_CANCEL_BOUND};
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_mid_run_running_sees_token_pending_never_starts() {

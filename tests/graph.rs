@@ -1,4 +1,4 @@
-use workflow_kernel::{DefinitionError, WorkflowDefinition};
+use keel_rt::{DefinitionError, WorkflowDefinition};
 
 #[test]
 fn cycle_is_rejected() {

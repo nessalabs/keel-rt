@@ -1,4 +1,4 @@
-//! Local DAG workflow execution kernel (Phase 1).
+//! **Keel** runtime (`keel-rt`): small DAG workflow execution kernel (Phase 1).
 //!
 //! The runtime is a **bundle** (scheduler + optional store/sink + handle).
 //! The scheduler does not know resource types. Drivers only wake. This is a

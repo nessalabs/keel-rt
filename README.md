@@ -1,8 +1,11 @@
-# workflow-kernel
+# Keel (`keel-rt`)
 
-A small, local **DAG workflow execution kernel**. Phase 1: AND-join, fail-fast,
-opaque byte dataflow, first-class Waiting/resume, retry-as-Ready, and a
-Tokio-inspired failure-injection test harness.
+**Keel** is a small DAG workflow execution kernel. The crate is `keel-rt`
+(Tokio-style `-rt` = the runtime). In Rust: `use keel_rt::...`.
+
+Phase 1: AND-join, fail-fast, opaque byte dataflow, first-class
+Waiting/resume, retry-as-Ready, and a Tokio-inspired failure-injection
+test harness.
 
 The runtime is a **bundle** (scheduler + optional store/sink + handle). The
 scheduler does not know resource types. Drivers only wake. This is a
@@ -69,8 +72,8 @@ Enable the `test-util` feature (already on for this crate's own tests):
 
 ```rust
 use bytes::Bytes;
-use workflow_kernel::testing::{ScriptedExecutor, WorkflowTest};
-use workflow_kernel::ExecutionState;
+use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
+use keel_rt::ExecutionState;
 
 #[tokio::test(flavor = "current_thread")]
 async fn linear() {
@@ -95,7 +98,7 @@ resume). `.start()` returns immediately for mid-run inspect.
 ## Inject faults
 
 ```rust
-use workflow_kernel::testing::{enable, FailingStore, ScriptedExecutor};
+use keel_rt::testing::{enable, FailingStore, ScriptedExecutor};
 
 // Named failpoints (remaining-hit counter). Checked by test doubles.
 enable("store.put", 1);
@@ -115,7 +118,7 @@ timer. Park is channel + clock; tests do not need epoll.
 ## Swap StateStore
 
 ```rust
-use workflow_kernel::{MemoryStore, NoopStore, Runtime};
+use keel_rt::{MemoryStore, NoopStore, Runtime};
 
 let rt = Runtime::builder()
     .store(MemoryStore::new())   // default

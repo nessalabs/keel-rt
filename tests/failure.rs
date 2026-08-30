@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use workflow_kernel::testing::{ScriptedExecutor, WorkflowTest};
-use workflow_kernel::{ExecutionState, NodeState};
+use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
+use keel_rt::{ExecutionState, NodeState};
 
 #[tokio::test(flavor = "current_thread")]
 async fn b_fails_d_depends_on_b_cancelled_never_started() {

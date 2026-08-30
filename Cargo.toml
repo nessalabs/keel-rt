@@ -1,8 +1,8 @@
 [package]
-name = "workflow-kernel"
+name = "keel-rt"
 version = "0.1.0"
 edition = "2021"
-description = "Local DAG workflow execution kernel"
+description = "small DAG workflow execution kernel"
 license = "MIT"
 readme = "README.md"
 keywords = ["workflow", "dag", "runtime", "kernel"]
@@ -26,5 +26,5 @@ tracing = "0.1.41"
 indexmap = "=2.7.1"
 
 [dev-dependencies]
-workflow-kernel = { path = ".", features = ["test-util"] }
+keel-rt = { path = ".", features = ["test-util"] }
 tokio = { version = "1.43", features = ["full", "test-util"] }

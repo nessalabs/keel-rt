@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::sync::Arc;
-use workflow_kernel::testing::{FailingStore, ScriptedExecutor, WorkflowTest};
-use workflow_kernel::{ExecutionState, MemoryStore, NodeState, NoopStore, StateStore};
+use keel_rt::testing::{FailingStore, ScriptedExecutor, WorkflowTest};
+use keel_rt::{ExecutionState, MemoryStore, NodeState, NoopStore, StateStore};
 
 fn diamond(store: impl StateStore + 'static) -> WorkflowTest {
     WorkflowTest::new()
@@ -45,7 +45,7 @@ async fn memory_store_round_trip_waiting_has_token() {
         .await
         .unwrap()
         .expect("MemoryStore must retain the snapshot");
-    let node = stored.node(&workflow_kernel::NodeId::new("a")).unwrap();
+    let node = stored.node(&keel_rt::NodeId::new("a")).unwrap();
     assert!(matches!(node.state, NodeState::Waiting { .. }));
     assert!(node.resume_token.is_some());
 }

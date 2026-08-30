@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::time::Duration;
-use workflow_kernel::testing::{ScriptedExecutor, WorkflowTest};
-use workflow_kernel::{AcceptPolicy, ExecutionState, NodeState, RetryPolicy};
+use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
+use keel_rt::{AcceptPolicy, ExecutionState, NodeState, RetryPolicy};
 
 #[tokio::test(flavor = "current_thread")]
 async fn retry_policy_max_3_fail_twice_then_succeed() {

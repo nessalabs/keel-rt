@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::time::Duration;
-use workflow_kernel::testing::{ScriptedExecutor, WorkflowTest};
-use workflow_kernel::{ExecutionState, NodeId, NodeState};
+use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
+use keel_rt::{ExecutionState, NodeId, NodeState};
 
 #[tokio::test(flavor = "current_thread")]
 async fn linear_a_b_c_strict_order_c_sees_b_output() {

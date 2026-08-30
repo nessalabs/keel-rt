@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::time::Duration;
-use workflow_kernel::testing::{ScriptedExecutor, WorkflowTest};
-use workflow_kernel::{ApplyError, ExecutionState, NodeOutcome, NodeState, Resume};
+use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
+use keel_rt::{ApplyError, ExecutionState, NodeOutcome, NodeState, Resume};
 
 #[tokio::test(flavor = "current_thread")]
 async fn waiting_releases_permit_other_ready_node_runs() {
@@ -39,7 +39,7 @@ async fn resume_complete_succeeded_dependents_run_with_output() {
     assert!(matches!(run.state("a").await, NodeState::Succeeded));
     assert!(matches!(run.state("b").await, NodeState::Succeeded));
     assert_eq!(
-        run.inputs("b").await.get(&workflow_kernel::NodeId::new("a")),
+        run.inputs("b").await.get(&keel_rt::NodeId::new("a")),
         Some(&Bytes::from_static(b"A-out"))
     );
     assert_eq!(run.execution_state().await, ExecutionState::Succeeded);
