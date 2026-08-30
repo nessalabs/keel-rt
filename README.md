@@ -21,7 +21,18 @@ not belong in the kernel.
 ```bash
 cargo test
 cargo test --features test-util
+cargo test --test stress -- --nocapture
 cargo clippy --lib -- -D warnings
+```
+
+## Examples
+
+Library-user surface (`Runtime`, `WorkflowDefinition`, `FunctionExecutor`, `FnSink`). No test harness.
+
+```bash
+cargo run --example research_diamond
+cargo run --example fail_fast
+cargo run --example waiting
 ```
 
 Integration tests live in `tests/` and go through `WorkflowTest` (not ad-hoc
