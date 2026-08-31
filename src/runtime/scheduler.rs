@@ -156,6 +156,14 @@ impl Scheduler {
             }
             Event::Timer { node_id } => {
                 self.apply_cmd(ApplyCmd::RetryDue { node_id });
+                // Re-arm: fire every other due deadline (equal timestamps).
+                let now = self.clock.now();
+                while let Some((at, id)) = self.exec.next_deadline() {
+                    if at > now {
+                        break;
+                    }
+                    self.apply_cmd(ApplyCmd::RetryDue { node_id: id });
+                }
                 self.dispatch();
                 self.persist_after_event().await;
             }
@@ -188,7 +196,13 @@ impl Scheduler {
         let now = self.clock.now();
         let effect = self.exec.apply(cmd, self.policy.as_ref(), now)?;
         for ev in &effect.events {
-            self.sink.emit(ev);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.sink.emit(ev);
+            }))
+            .is_err()
+            {
+                debug!("EventSink::emit panicked; apply already progressed");
+            }
         }
         for id in effect.newly_runnable {
             self.enqueue(id);

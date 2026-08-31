@@ -381,12 +381,9 @@ impl Execution {
             .ok_or_else(|| ApplyError::UnknownNode(id.clone()))?;
         match &self.nodes[slot.0].state {
             NodeState::Running { attempt: a } if *a == attempt => {}
-            NodeState::Cancelled => return Ok(()),
-            other => {
-                return Err(ApplyError::Illegal(format!(
-                    "finish {id} from {other:?} attempt {attempt}"
-                )));
-            }
+            // Stale attempt, already terminal, or late join: ignore. Do not
+            // double-apply or bump revision.
+            _ => return Ok(()),
         }
 
         let outcome = match outcome {
@@ -410,7 +407,17 @@ impl Execution {
         use crate::domain::events::DomainEvent;
         let attempt = self.nodes[slot.0].attempt;
 
-        let decision = policy.decide(&outcome, attempt);
+        let decision = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            policy.decide(&outcome, attempt)
+        })) {
+            Ok(d) => d,
+            Err(_) => {
+                tracing::error!(node = %id, "Policy::decide panicked");
+                self.fail_node(slot, id, NodeError::new("policy panicked"), effect);
+                self.fail_fast(effect);
+                return Ok(());
+            }
+        };
         if matches!(decision, PolicyDecision::Retry { .. })
             && matches!(
                 outcome,

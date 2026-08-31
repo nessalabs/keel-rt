@@ -194,8 +194,12 @@ impl WorkflowDefinitionBuilder {
         for e in &self.edges {
             let from = index[&e.from];
             let to = index[&e.to];
-            succs[from.0].push(to);
-            preds[to.0].push(from);
+            if !succs[from.0].contains(&to) {
+                succs[from.0].push(to);
+            }
+            if !preds[to.0].contains(&from) {
+                preds[to.0].push(from);
+            }
         }
 
         let sources = (0..n)

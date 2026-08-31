@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 pub struct FailingStore {
     inner: MemoryStore,
     fail_on_nth_put: usize,
+    fail_all: bool,
     puts: AtomicUsize,
 }
 
@@ -18,6 +19,17 @@ impl FailingStore {
         Self {
             inner: MemoryStore::new(),
             fail_on_nth_put: n,
+            fail_all: false,
+            puts: AtomicUsize::new(0),
+        }
+    }
+
+    /// Every `put` fails. In-memory apply must still progress.
+    pub fn fail_all() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            fail_on_nth_put: 0,
+            fail_all: true,
             puts: AtomicUsize::new(0),
         }
     }
@@ -38,7 +50,7 @@ impl StateStore for FailingStore {
             return Err(StoreError::Message("failpoint store.put".into()));
         }
         let n = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
-        if n == self.fail_on_nth_put {
+        if self.fail_all || n == self.fail_on_nth_put {
             return Err(StoreError::Message(format!("failing store: put #{n}")));
         }
         self.inner.put(snapshot).await
