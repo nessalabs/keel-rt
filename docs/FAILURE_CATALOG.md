@@ -13,7 +13,7 @@ How to read a row:
 | Test | Named regression that fails without the handling |
 | Handling | typed error / cancel / no-op / default / documented panic |
 
-Kernel `src/` line coverage (python gate, OR-merged lcov): **2735/2735 = 100.00%**.
+Kernel `src/` line coverage (python gate, OR-merged lcov): **2925/2925 = 100.00%**.
 Empty allowlist. Floor 100.
 
 Hunt (this pass): inventory the packs first, then re-derive production paths.
