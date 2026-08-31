@@ -179,10 +179,7 @@ impl Scheduler {
         let _ = self.apply_cmd_result(cmd);
     }
 
-    fn apply_cmd_result(
-        &mut self,
-        cmd: ApplyCmd,
-    ) -> Result<(), crate::domain::state::ApplyError> {
+    fn apply_cmd_result(&mut self, cmd: ApplyCmd) -> Result<(), crate::domain::state::ApplyError> {
         let now = self.clock.now();
         let effect = self.exec.apply(cmd, self.policy.as_ref(), now)?;
         for ev in &effect.events {
@@ -215,7 +212,9 @@ impl Scheduler {
                 continue;
             }
             let id = self.exec.node_id_at(slot).clone();
-            self.apply_cmd(ApplyCmd::StartNode { node_id: id.clone() });
+            self.apply_cmd(ApplyCmd::StartNode {
+                node_id: id.clone(),
+            });
             self.available -= 1;
             self.held[slot.0] = 1;
             self.launch_slot(slot, id);
@@ -249,6 +248,10 @@ impl Scheduler {
     }
 
     fn launch_slot(&mut self, slot: NodeSlot, id: NodeId) {
+        // Documented invariant panics. Public `Runtime::start` rejects
+        // unregistered ids (`start_unknown_executor_errors_and_nothing_runs`);
+        // `dispatch_node` always issues a resume token. Do not add a dead
+        // defensive branch here — see `docs/FAILURE_CATALOG.md`.
         let exec = self.executors[slot.0]
             .clone()
             .expect("Runtime::start rejected unregistered executor ids");

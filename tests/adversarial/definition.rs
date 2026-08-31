@@ -25,7 +25,10 @@ async fn duplicate_edge_is_one_pred() {
         .edge("a", "b")
         .edge("a", "b")
         .build();
-    assert!(def.is_ok(), "duplicate edge accepted or we treat as one pred");
+    assert!(
+        def.is_ok(),
+        "duplicate edge accepted or we treat as one pred"
+    );
     let run = within(
         keel_rt::testing::WorkflowTest::new()
             .node("a", ok("a"))
@@ -53,9 +56,12 @@ fn two_disconnected_components_are_accepted() {
 }
 
 #[test]
-fn empty_node_id_does_not_panic() {
-    let built = WorkflowDefinition::builder("wf").node("", "e").build();
-    assert!(built.is_ok() || built.is_err());
+fn empty_node_id_rejected() {
+    let err = WorkflowDefinition::builder("wf")
+        .node("", "e")
+        .build()
+        .unwrap_err();
+    assert_eq!(err, keel_rt::DefinitionError::EmptyNodeId);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -105,4 +111,29 @@ async fn sequential_second_execution_does_not_mix_store() {
     assert_eq!(s1, ExecutionState::Succeeded);
     let stored = store.get(&id2).await.unwrap().expect("second snapshot");
     assert_eq!(stored.state, ExecutionState::Succeeded);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn two_starts_same_definition_distinct_execution_ids() {
+    let def = || {
+        WorkflowDefinition::builder("wf")
+            .node("a", "a")
+            .build()
+            .unwrap()
+    };
+    let rt = Runtime::builder()
+        .register(FunctionExecutor::new("a", |_ctx| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        }))
+        .build();
+    let h1 = rt.start(def()).expect("start 1");
+    let h2 = rt.start(def()).expect("start 2");
+    let id1 = h1.inspect().await.execution_id;
+    let id2 = h2.inspect().await.execution_id;
+    assert_ne!(
+        id1, id2,
+        "two starts of the same definition are two executions"
+    );
+    assert_eq!(within(h1.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(within(h2.wait()).await, ExecutionState::Succeeded);
 }

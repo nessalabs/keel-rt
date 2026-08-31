@@ -54,6 +54,8 @@ via `.node(id)` is unchanged.
 Module map and absences: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 PR rules (mermaid + behavior diffs): [`AGENTS.md`](AGENTS.md).
 Accepted leftovers: [`docs/adr/`](docs/adr/).
+Phase 1 failure catalog (every interrupt / retry / race / empty / drop):
+[`docs/FAILURE_CATALOG.md`](docs/FAILURE_CATALOG.md).
 
 ## Coverage
 

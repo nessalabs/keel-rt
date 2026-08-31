@@ -41,3 +41,30 @@ fn duplicate_node_id_rejected() {
         .unwrap_err();
     assert!(matches!(err, DefinitionError::DuplicateNode(id) if id.as_str() == "a"));
 }
+
+#[test]
+fn empty_workflow_id_rejected() {
+    let err = WorkflowDefinition::builder("")
+        .node("a", "e")
+        .build()
+        .unwrap_err();
+    assert_eq!(err, DefinitionError::EmptyWorkflowId);
+}
+
+#[test]
+fn empty_node_id_rejected() {
+    let err = WorkflowDefinition::builder("wf")
+        .node("", "e")
+        .build()
+        .unwrap_err();
+    assert_eq!(err, DefinitionError::EmptyNodeId);
+}
+
+#[test]
+fn empty_executor_id_rejected() {
+    let err = WorkflowDefinition::builder("wf")
+        .node("a", "")
+        .build()
+        .unwrap_err();
+    assert_eq!(err, DefinitionError::EmptyExecutorId);
+}

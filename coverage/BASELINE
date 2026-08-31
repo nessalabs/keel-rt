@@ -4,7 +4,7 @@
 #
 # Measured after 100% kernel line gate: every lcov DA executable line in
 # src/domain, src/runtime, and src/lib.rs is hit by the default suite
-# (lib + adversarial/consumer/graph/resilience/scenarios/stress/
+# (lib + adversarial/catalog/consumer/graph/resilience/scenarios/stress/
 # stress_uneven/structure/workloads; not stress_100k). Hits are OR-merged
 # across cargo test CGUs (lib tests vs integration tests). Native
 # `cargo llvm-cov report` can show a slightly lower % (closing-brace

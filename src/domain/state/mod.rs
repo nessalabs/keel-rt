@@ -6,6 +6,7 @@ use crate::domain::time::Timestamp;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +40,24 @@ impl NodeState {
     }
 }
 
+impl fmt::Display for NodeState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending => f.write_str("Pending"),
+            Self::Ready { runnable_at: None } => f.write_str("Ready"),
+            Self::Ready {
+                runnable_at: Some(at),
+            } => write!(f, "Ready({at})"),
+            Self::Running { attempt } => write!(f, "Running({attempt})"),
+            Self::Waiting { attempt, .. } => write!(f, "Waiting({attempt})"),
+            Self::Succeeded => f.write_str("Succeeded"),
+            Self::Failed => f.write_str("Failed"),
+            Self::Cancelled => f.write_str("Cancelled"),
+            Self::TimedOut => f.write_str("TimedOut"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionState {
     Created,
@@ -66,6 +85,20 @@ impl ExecutionState {
     /// Running, Created. Do not use `== Succeeded` to mean “the pipeline is done ok.”
     pub fn is_successful_finish(self) -> bool {
         matches!(self, Self::Succeeded | Self::Completed)
+    }
+}
+
+impl fmt::Display for ExecutionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Created => "Created",
+            Self::Running => "Running",
+            Self::Waiting => "Waiting",
+            Self::Succeeded => "Succeeded",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+            Self::Completed => "Completed",
+        })
     }
 }
 

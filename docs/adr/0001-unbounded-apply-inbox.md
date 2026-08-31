@@ -31,3 +31,7 @@ the channel type.
 A stuck apply loop can grow memory with completions. That is the same class
 of failure as a stuck current-thread scheduler. Persist errors are logged and
 skipped; they must not stall apply. Do not add a bound without a deadlock test.
+
+`inspect` / `resume` during a blocking `persist` wait for apply to drain —
+backpressure, not deadlock. Pinned by
+`inspect_during_blocking_persist_completes_after_persist` in `tests/catalog.rs`.

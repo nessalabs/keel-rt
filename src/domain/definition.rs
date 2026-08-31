@@ -54,6 +54,12 @@ pub struct Edge {
 pub enum DefinitionError {
     #[error("workflow graph is empty")]
     Empty,
+    #[error("workflow id must not be empty")]
+    EmptyWorkflowId,
+    #[error("node id must not be empty")]
+    EmptyNodeId,
+    #[error("executor id must not be empty")]
+    EmptyExecutorId,
     #[error("duplicate node id: {0}")]
     DuplicateNode(NodeId),
     #[error("edge references unknown node: {0}")]
@@ -222,9 +228,18 @@ impl WorkflowDefinitionBuilder {
         if self.nodes.is_empty() {
             return Err(DefinitionError::Empty);
         }
+        if self.id.as_str().is_empty() {
+            return Err(DefinitionError::EmptyWorkflowId);
+        }
 
         let mut seen = HashSet::new();
         for n in &self.nodes {
+            if n.id.as_str().is_empty() {
+                return Err(DefinitionError::EmptyNodeId);
+            }
+            if n.executor_id.as_str().is_empty() {
+                return Err(DefinitionError::EmptyExecutorId);
+            }
             if !seen.insert(n.id.clone()) {
                 return Err(DefinitionError::DuplicateNode(n.id.clone()));
             }
@@ -342,6 +357,62 @@ mod tests {
     }
 
     #[test]
+    fn empty_workflow_id_rejected() {
+        let err = WorkflowDefinition::builder("")
+            .node("a", "e")
+            .build()
+            .unwrap_err();
+        assert_eq!(err, DefinitionError::EmptyWorkflowId);
+        assert!(err.to_string().contains("workflow id"));
+    }
+
+    #[test]
+    fn empty_node_id_rejected() {
+        let err = WorkflowDefinition::builder("wf")
+            .node("", "e")
+            .build()
+            .unwrap_err();
+        assert_eq!(err, DefinitionError::EmptyNodeId);
+        assert!(err.to_string().contains("node id"));
+    }
+
+    #[test]
+    fn empty_executor_id_rejected() {
+        let err = WorkflowDefinition::builder("wf")
+            .node("a", "")
+            .build()
+            .unwrap_err();
+        assert_eq!(err, DefinitionError::EmptyExecutorId);
+        assert!(err.to_string().contains("executor id"));
+    }
+
+    #[test]
+    fn every_definition_error_variant_has_display() {
+        let cases = [
+            (DefinitionError::Empty, "empty"),
+            (DefinitionError::EmptyWorkflowId, "workflow id"),
+            (DefinitionError::EmptyNodeId, "node id"),
+            (DefinitionError::EmptyExecutorId, "executor id"),
+            (
+                DefinitionError::DuplicateNode(NodeId::new("a")),
+                "duplicate",
+            ),
+            (
+                DefinitionError::DisconnectedNode(NodeId::new("ghost")),
+                "unknown",
+            ),
+            (DefinitionError::Cycle, "cycle"),
+        ];
+        for (err, needle) in cases {
+            let s = err.to_string();
+            assert!(
+                s.to_lowercase().contains(needle),
+                "{s} should mention {needle}"
+            );
+        }
+    }
+
+    #[test]
     fn node_lookup_uses_index() {
         let def = WorkflowDefinition::builder("wf")
             .node("a", "ea")
@@ -349,7 +420,10 @@ mod tests {
             .edge("a", "b")
             .build()
             .unwrap();
-        assert_eq!(def.node(&NodeId::new("b")).unwrap().executor_id.as_str(), "eb");
+        assert_eq!(
+            def.node(&NodeId::new("b")).unwrap().executor_id.as_str(),
+            "eb"
+        );
         assert_eq!(def.predecessors(&NodeId::new("b")).len(), 1);
         assert!(def.predecessors(&NodeId::new("a")).is_empty());
     }

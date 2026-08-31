@@ -58,3 +58,28 @@ Unchanged (say so on PRs that only refactor):
   lines. Now it fails unless kernel `src/` (not `src/testing/`) is 100%
   executable lines. Wait / cancel / resume / fail / retry / inspect are
   unchanged.
+- When a caller builds a definition with an empty node id, empty workflow id,
+  or empty executor id, it used to succeed. Now `build` returns
+  `DefinitionError::EmptyNodeId` / `EmptyWorkflowId` / `EmptyExecutorId`.
+- When `MemoryStore`'s mutex is poisoned (a panic while a put/get/persist held
+  the lock), the next persist used to `expect` and tear down the scheduler.
+  Now it recovers with `Mutex::into_inner` and continues.
+- When a caller displays `NodeState` or `ExecutionState`, it used to only work
+  through snapshot formatting. Now both enums implement `Display` (every
+  variant).
+- When a caller inspects during a blocking `StateStore::persist`, it used to
+  wait behind persist (unbounded inbox, ADR 0001). Now it still does: that is
+  backpressure, not deadlock (`inspect_during_blocking_persist_completes_after_persist`).
+- When a caller drops `Runtime` after `start`, in-flight executions used to
+  keep running. Now they still do (`start_after_runtime_dropped_execution_still_runs`).
+- When a leaf node fails under opt-in `FailSubtree` (no children), the
+  execution used to become `Completed`. Now it still does — FailSubtree does
+  not fail-fast the execution.
+- When a caller resumes after cancel, it used to get `ApplyError::ResumeAfterCancel`.
+  Now it still does (not a panic).
+- Phase 1 failure catalog: [`docs/FAILURE_CATALOG.md`](FAILURE_CATALOG.md)
+  (zero MISSING rows).
+
+Architecture (this change): **after = before**. No module split. New public
+items: `DefinitionError::{EmptyNodeId,EmptyWorkflowId,EmptyExecutorId}`,
+`Display` for `NodeState` / `ExecutionState`.

@@ -28,6 +28,7 @@ IGNORE='src/testing/|\.cargo/|/tests/|/examples/'
 TESTS=(
   --lib
   --test adversarial
+  --test catalog
   --test consumer
   --test graph
   --test resilience
