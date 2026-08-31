@@ -30,5 +30,6 @@ pub use runtime::store::{MemoryStore, NoopStore, StateStore, StoreError};
 
 #[cfg(any(test, feature = "test-util"))]
 pub use testing::{
-    FakeClock, FailingStore, ScriptedAction, ScriptedExecutor, SequenceStore, TestRun, WorkflowTest,
+    FakeClock, FailingStore, FaultySink, FlakyThen, NetFault, ScriptedAction, ScriptedExecutor,
+    SequenceStore, TestRun, WorkflowTest,
 };

@@ -19,6 +19,8 @@ pub enum ScriptedAction {
     Panic,
     Hang { ignore_cancel: bool },
     Delay { delay: Duration, then: Box<ScriptedAction> },
+    /// I/O timeout analog — [`NodeOutcome::TimedOut`], not a Failed string.
+    TimedOut,
 }
 
 struct Inner {
@@ -157,6 +159,7 @@ impl ScriptedExecutor {
             match action {
                 ScriptedAction::Succeed(b) => NodeOutcome::Succeeded(b),
                 ScriptedAction::Fail(msg) => NodeOutcome::Failed(NodeError::new(msg)),
+                ScriptedAction::TimedOut => NodeOutcome::TimedOut,
                 ScriptedAction::Wait => NodeOutcome::Waiting {
                     token: ctx.resume_token.clone(),
                 },
@@ -180,8 +183,13 @@ impl ScriptedExecutor {
                     }
                 }
                 ScriptedAction::Delay { delay, then } => {
-                    ctx.clock.sleep(delay).await;
-                    self.eval(*then, ctx).await
+                    tokio::select! {
+                        biased;
+                        _ = ctx.cancel.cancelled() => {
+                            NodeOutcome::Failed(NodeError::new("cancelled"))
+                        }
+                        _ = ctx.clock.sleep(delay) => self.eval(*then, ctx).await,
+                    }
                 }
             }
         })

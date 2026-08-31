@@ -34,6 +34,9 @@ plus kernel microbenches). `tests/stress_100k.rs` is the 100k-node scale pack
 mixed fan-in, hourglass, fat payloads, FIFO vs timer, skewed retry.
 `tests/workloads.rs` is production-shaped graphs (agent farm, crawl-as-N-executions,
 map-reduce, HITL drain, flaky I/O, burst/idle/burst, many Runtime jobs).
+`tests/resilience.rs` is the I/O-fault harness matrix (`NetFault` + FakeClock): Timeout
+fail-fast, retry permit release, Delay AND-join, Reset+Retry, 100 sequential diamonds
+isolating one Timeout, mixed Delay/Timeout/Reset under concurrency 8.
 
 ```bash
 cargo test --test adversarial -- --test-threads=1
@@ -42,6 +45,7 @@ cargo test --test stress_100k -- --nocapture --test-threads=1
 cargo test --release --test stress_100k -- --nocapture --test-threads=1
 cargo test --test stress_uneven -- --nocapture --test-threads=1
 cargo test --test workloads -- --nocapture --test-threads=1
+cargo test --test resilience -- --nocapture --test-threads=1
 cargo test --test scenarios -- --test-threads=1
 ```
 
@@ -122,8 +126,26 @@ async fn linear() {
 ```
 
 Scripted actions: `Succeed`, `Fail`, `Wait`, `Panic`, `Hang { ignore_cancel }`,
-`Delay` then Succeed. Attempts are recorded. Hang is released with
+`Delay` then Succeed, `TimedOut`. Attempts are recorded. Hang is released with
 `run.release_hang("a")` or `executor.release()`.
+
+I/O faults (`NetFault`) compose onto `ScriptedExecutor` and sleep on
+`FakeClock` — no sockets in the kernel. `Delay` is cancelled if
+`CancellationToken` fires first.
+
+```rust
+use std::time::Duration;
+use keel_rt::testing::{NetFault, ScriptedExecutor};
+
+ScriptedExecutor::new("n").fault(NetFault::Delay(Duration::from_millis(50)));
+ScriptedExecutor::new("n").fault(NetFault::Timeout);           // TimedOut
+ScriptedExecutor::new("n").fault(NetFault::Reset);             // Failed("reset")
+ScriptedExecutor::new("n").fault(NetFault::TimeoutThenSucceed);
+ScriptedExecutor::new("n").timeout_after(Duration::from_millis(50)); // Running until clock
+```
+
+`FaultySink::panic_on_nth(n)` panics on emit (scheduler `catch_unwind`s).
+`FailingStore` still fails `put` without rolling back in-memory apply.
 
 `.run()` waits until the execution is terminal **or** `Waiting` (so you can
 resume). `.start()` returns immediately for mid-run inspect.
@@ -143,7 +165,15 @@ let store = FailingStore::fail_on_nth_put(2);
 // Executor that panics or hangs.
 ScriptedExecutor::new("x").panic();
 ScriptedExecutor::new("h").hang(true); // ignore CancellationToken
+
+// I/O faults (FakeClock; CancellationToken aborts Delay).
+use keel_rt::testing::NetFault;
+use std::time::Duration;
+ScriptedExecutor::new("n").fault(NetFault::Timeout);
+ScriptedExecutor::new("n").timeout_after(Duration::from_millis(50));
 ```
+
+`FaultySink::panic_on_nth(1)` panics on emit; the scheduler stays alive.
 
 `FakeClock::advance(Duration)` fires retry delays. Waiting tests do not need a
 timer. Park is channel + clock; tests do not need epoll.
