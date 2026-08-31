@@ -63,7 +63,7 @@ async fn main() -> ExitCode {
         .register(must_not_run("d"))
         .build();
 
-    let handle = runtime.start(def);
+    let handle = runtime.start(def).expect("executors registered");
     handle.wait_stable().await;
     let snap = handle.inspect().await;
 

@@ -16,6 +16,39 @@ snapshots are value objects. `Policy` and `Executor` are ports. `StateStore` is
 the repository port. Do not look for an Agent, HTTP, or SQL type here; they do
 not belong in the kernel.
 
+## Consumer happy path
+
+```rust
+use bytes::Bytes;
+use keel_rt::{DomainEvent, ExecutionContext, FnSink, NodeOutcome, Runtime, WorkflowDefinition};
+
+let def = WorkflowDefinition::builder(format!("job-{}", 1))
+    .node("fetch", "http")
+    .node("save", "store")
+    .edge("fetch", "save")
+    .build()?;
+
+let rt = Runtime::builder()
+    .concurrency(4)
+    .sink(FnSink(|e: &DomainEvent| println!("{e}")))
+    .register_fn("http", |ctx: ExecutionContext| async move {
+        ctx.sleep(std::time::Duration::ZERO).await; // execution clock
+        NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+    })
+    .register_fn("store", |_ctx| async { NodeOutcome::Succeeded(Bytes::new()) })
+    .build();
+
+let state = rt.run(def).await?;           // start + wait; no handle to drop-cancel
+assert!(state.is_successful_finish());    // Succeeded *or* Completed (FailSubtree)
+```
+
+`start` returns a handle when you need HITL (`wait_stable` + `resume`) or
+inspect. **Drop cancels.** `wait()` is terminal only; Waiting is not done.
+Unknown executor ids fail at `start` (named in the error) — nothing runs.
+
+`ExecutionSnapshot::iter_nodes()` walks **definition order**. `HashMap` lookup
+via `.node(id)` is unchanged.
+
 ## Build and test
 
 ```bash
@@ -49,6 +82,7 @@ cargo test --test stress_uneven -- --nocapture --test-threads=1
 cargo test --test workloads -- --nocapture --test-threads=1
 cargo test --test resilience -- --nocapture --test-threads=1
 cargo test --test scenarios -- --test-threads=1
+cargo test --test consumer -- --test-threads=1
 ```
 
 ## Examples
@@ -223,5 +257,7 @@ and ignored — the in-memory aggregate is the source of truth for the live run.
 ## Public API
 
 `Runtime`, `RuntimeBuilder`, `ExecutionHandle`, `WorkflowDefinition`,
-`OnFailure`, `Join`, `Executor`, `Policy`, `StateStore`, `ExecutionSnapshot`,
-`NodeOutcome`, `Resume`. Scheduler, park, and inject are crate-private.
+`OnFailure`, `Join`, `Executor`, `FunctionExecutor`, `Clock`, `Policy`,
+`StateStore`, `ExecutionSnapshot`, `NodeOutcome`, `Resume`, `StartError`.
+Scheduler, park, and inject are crate-private. `register_fn` is the usual
+way to attach node types; `register(impl Executor)` remains.

@@ -388,7 +388,7 @@ async fn sequential_executions_isolated() {
         .edge("c", "d")
         .build()
         .unwrap();
-    let h1 = rt.start(scoped);
+    let h1 = rt.start(scoped).expect("start");
     let id1 = h1.inspect().await.execution_id.clone();
     let s1 = tokio::time::timeout(BOUND, h1.wait())
         .await
@@ -406,7 +406,7 @@ async fn sequential_executions_isolated() {
         .edge("c", "d")
         .build()
         .unwrap();
-    let h2 = rt.start(happy);
+    let h2 = rt.start(happy).expect("start");
     let id2 = h2.inspect().await.execution_id.clone();
     let s2 = tokio::time::timeout(BOUND, h2.wait())
         .await

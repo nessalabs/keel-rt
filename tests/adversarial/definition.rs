@@ -65,9 +65,16 @@ async fn unregistered_executor_fails_node_no_hang() {
         .build()
         .unwrap();
     let rt = Runtime::builder().build();
-    let handle = rt.start(def);
-    let state = within(handle.wait()).await;
-    assert_eq!(state, ExecutionState::Failed);
+    let err = match rt.start(def) {
+        Ok(_) => panic!("unknown executor must fail at start"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing"),
+        "error must name the unknown id, got {msg}"
+    );
+    // Nothing ran — no handle, no Failed execution.
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -85,9 +92,9 @@ async fn sequential_second_execution_does_not_mix_store() {
             NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
         }))
         .build();
-    let h1 = rt.start(def());
+    let h1 = rt.start(def()).expect("start");
     let s1 = within(h1.wait()).await;
-    let h2 = rt.start(def());
+    let h2 = rt.start(def()).expect("start");
     let id2 = {
         let h2 = h2;
         let snap = h2.inspect().await;

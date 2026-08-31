@@ -59,6 +59,15 @@ impl ExecutionState {
             Self::Succeeded | Self::Failed | Self::Cancelled | Self::Completed
         )
     }
+
+    /// Dashboard helper: the job finished and was not Failed/Cancelled.
+    ///
+    /// True for [`Succeeded`](Self::Succeeded) **and** [`Completed`](Self::Completed)
+    /// (FailSubtree mixed terminals). False for Failed, Cancelled, Waiting,
+    /// Running, Created. Do not use `== Succeeded` to mean “the pipeline is done ok.”
+    pub fn is_successful_finish(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Completed)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -353,6 +362,9 @@ impl Execution {
             workflow_id: self.workflow_id.clone(),
             state: self.state,
             nodes,
+            node_order: (0..self.definition.len())
+                .map(|i| self.definition.id_at(NodeSlot(i)).clone())
+                .collect(),
         }
     }
 
@@ -985,6 +997,17 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, DomainEvent::ExecutionFailed { .. }))
             .count()
+    }
+
+    #[test]
+    fn successful_finish_is_succeeded_or_completed() {
+        assert!(ExecutionState::Succeeded.is_successful_finish());
+        assert!(ExecutionState::Completed.is_successful_finish());
+        assert!(!ExecutionState::Failed.is_successful_finish());
+        assert!(!ExecutionState::Cancelled.is_successful_finish());
+        assert!(!ExecutionState::Waiting.is_successful_finish());
+        assert!(!ExecutionState::Running.is_successful_finish());
+        assert!(!ExecutionState::Created.is_successful_finish());
     }
 
     #[test]

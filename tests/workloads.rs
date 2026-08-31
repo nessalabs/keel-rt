@@ -179,7 +179,7 @@ async fn crawl_as_many_executions() {
     let mut failed = 0usize;
     let mut succeeded = 0usize;
     for i in 0..n {
-        let h = rt.start(def());
+        let h = rt.start(def()).expect("start");
         let id = h.inspect().await.execution_id.clone();
         let state = tokio::time::timeout(BOUND, h.wait())
             .await
@@ -756,7 +756,7 @@ async fn many_executions_1000_sequential() {
         .build();
     let mut ids = Vec::with_capacity(n);
     for i in 0..n {
-        let h = rt.start(diamond_def());
+        let h = rt.start(diamond_def()).expect("start");
         let id = h.inspect().await.execution_id.clone();
         let state = tokio::time::timeout(BOUND, h.wait())
             .await
@@ -796,7 +796,9 @@ async fn many_executions_8_concurrent() {
         .register(payload_exec("critic"))
         .register(payload_exec("writer"))
         .build();
-    let handles: Vec<_> = (0..n).map(|_| rt.start(diamond_def())).collect();
+    let handles: Vec<_> = (0..n)
+        .map(|_| rt.start(diamond_def()).expect("start"))
+        .collect();
     let mut ids = Vec::new();
     for h in &handles {
         ids.push(h.inspect().await.execution_id.clone());

@@ -358,6 +358,15 @@ mod tests {
     }
 
     #[test]
+    fn builder_accepts_format_string() {
+        let def = WorkflowDefinition::builder(format!("burst-{}", 7))
+            .node("a", "e")
+            .build()
+            .unwrap();
+        assert_eq!(def.id.as_str(), "burst-7");
+    }
+
+    #[test]
     fn on_failure_library_default_is_fail_execution() {
         let def = WorkflowDefinition::builder("wf")
             .node("a", "e")

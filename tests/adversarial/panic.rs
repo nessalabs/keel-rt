@@ -53,7 +53,7 @@ async fn event_sink_panic_kernel_survives_and_progresses() {
             NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
         }))
         .build();
-    let handle = rt.start(def);
+    let handle = rt.start(def).expect("start");
     let state = within(handle.wait()).await;
     assert_eq!(state, ExecutionState::Succeeded);
     assert!(hits.load(Ordering::SeqCst) >= 1);

@@ -73,6 +73,12 @@ impl From<&str> for WorkflowId {
     }
 }
 
+impl From<String> for WorkflowId {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
 impl fmt::Display for WorkflowId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -126,6 +132,12 @@ impl ExecutorId {
 
 impl From<&str> for ExecutorId {
     fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for ExecutorId {
+    fn from(s: String) -> Self {
         Self::new(s)
     }
 }

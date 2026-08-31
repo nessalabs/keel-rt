@@ -1,11 +1,11 @@
 //! North-star diamond: Research → (Summarizer ∥ Critic) → Writer.
 //!
-//! Library-user surface only: `Runtime`, `WorkflowDefinition`, `FunctionExecutor`, `FnSink`.
+//! Consumer path: `register_fn` + `Runtime::run` (no handle to drop-cancel).
 
 use bytes::Bytes;
 use keel_rt::{
-    DomainEvent, ExecutionContext, ExecutionState, FnSink, FunctionExecutor, NodeId, NodeOutcome,
-    Runtime, WorkflowDefinition,
+    DomainEvent, ExecutionContext, ExecutionState, FnSink, NodeId, NodeOutcome, Runtime,
+    WorkflowDefinition,
 };
 use std::process::ExitCode;
 
@@ -23,13 +23,6 @@ fn payload(ctx: &ExecutionContext, body: &str) -> Bytes {
     }
     println!("  payload  {line}");
     Bytes::from(line)
-}
-
-fn exec(id: &'static str, body: &'static str) -> FunctionExecutor<impl Fn(ExecutionContext) -> std::future::Ready<NodeOutcome> + Send + Sync + 'static> {
-    FunctionExecutor::new(id, move |ctx: ExecutionContext| {
-        let out = NodeOutcome::Succeeded(payload(&ctx, body));
-        std::future::ready(out)
-    })
 }
 
 #[tokio::main]
@@ -53,16 +46,23 @@ async fn main() -> ExitCode {
     let runtime = Runtime::builder()
         .concurrency(2)
         .sink(sink)
-        .register(exec("research", "gathered notes on keel-rt"))
-        .register(exec("summarizer", "one-page digest"))
-        .register(exec("critic", "risks and gaps"))
-        .register(exec("writer", "combined draft"))
+        .register_fn("research", |ctx: ExecutionContext| async move {
+            NodeOutcome::Succeeded(payload(&ctx, "gathered notes on keel-rt"))
+        })
+        .register_fn("summarizer", |ctx: ExecutionContext| async move {
+            NodeOutcome::Succeeded(payload(&ctx, "one-page digest"))
+        })
+        .register_fn("critic", |ctx: ExecutionContext| async move {
+            NodeOutcome::Succeeded(payload(&ctx, "risks and gaps"))
+        })
+        .register_fn("writer", |ctx: ExecutionContext| async move {
+            NodeOutcome::Succeeded(payload(&ctx, "combined draft"))
+        })
         .build();
 
-    let handle = runtime.start(def);
-    let state = handle.wait().await;
+    let state = runtime.run(def).await.expect("executors registered");
     println!("final    {state:?}");
-    if state == ExecutionState::Succeeded {
+    if state.is_successful_finish() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

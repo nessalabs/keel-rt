@@ -197,7 +197,7 @@ impl WorkflowTest {
         let scripted = self.scripted.clone();
         let clock = self.clock.clone();
         let (runtime, sink, store, definition) = self.build_runtime();
-        let handle = runtime.start(definition);
+        let handle = runtime.start(definition).expect("test executors registered");
         let snap = handle.inspect().await;
         TestRun {
             execution_id: snap.execution_id.clone(),

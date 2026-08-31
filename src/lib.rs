@@ -11,6 +11,11 @@
 //! [`OnFailure::FailExecution`] is the library default (fail-fast). FailSubtree
 //! and AllDone are opt-in on [`WorkflowDefinition`] only — not a Runtime or
 //! process-wide switch.
+//!
+//! Consumer path: [`WorkflowDefinition::builder`] →
+//! [`RuntimeBuilder::register_fn`] → [`Runtime::run`] / [`Runtime::start`].
+//! Use [`ExecutionState::is_successful_finish`] (not `== Succeeded`) so
+//! FailSubtree [`Completed`](ExecutionState::Completed) counts as ok.
 
 pub mod domain;
 pub mod runtime;
@@ -29,8 +34,11 @@ pub use domain::time::Timestamp;
 pub use runtime::executor::{ExecutionContext, Executor, FunctionExecutor};
 pub use runtime::handle::ExecutionHandle;
 pub use runtime::sink::{EventSink, FnSink};
-pub use runtime::runtime::{Runtime, RuntimeBuilder, DEFAULT_CANCEL_BOUND};
+pub use runtime::runtime::{
+    Runtime, RuntimeBuilder, StartError, UnregisteredExecutors, DEFAULT_CANCEL_BOUND,
+};
 pub use runtime::store::{MemoryStore, NoopStore, StateStore, StoreError};
+pub use runtime::time::Clock;
 
 #[cfg(any(test, feature = "test-util"))]
 pub use testing::{

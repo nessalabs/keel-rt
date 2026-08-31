@@ -302,7 +302,7 @@ async fn timeout_isolates_one_of_100_executions() {
     let mut succeeded = 0usize;
     let mut ids = Vec::with_capacity(n);
     for i in 0..n {
-        let h = rt.start(diamond_def(i));
+        let h = rt.start(diamond_def(i)).expect("start");
         let id = h.inspect().await.execution_id.clone();
         let state = tokio::time::timeout(BOUND, h.wait())
             .await
@@ -376,7 +376,7 @@ async fn faulty_sink_panic_scheduler_lives() {
             NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
         }))
         .build();
-    let state = tokio::time::timeout(BOUND, rt.start(def).wait())
+    let state = tokio::time::timeout(BOUND, rt.start(def).expect("start").wait())
         .await
         .expect("faulty sink hang");
     assert_eq!(state, ExecutionState::Succeeded);

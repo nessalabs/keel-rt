@@ -6,8 +6,12 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// Per-invoke context. Sleep through [`ExecutionContext::sleep`] (or
+/// `ctx.clock.sleep` with [`crate::Clock`] in scope) — do not reach into
+/// `src/runtime`.
 pub struct ExecutionContext {
     pub execution_id: ExecutionId,
     pub node_id: NodeId,
@@ -16,6 +20,13 @@ pub struct ExecutionContext {
     pub cancel: CancellationToken,
     pub resume_token: ResumeToken,
     pub clock: SharedClock,
+}
+
+impl ExecutionContext {
+    /// Sleep on the execution clock (FakeClock in tests, system clock in apps).
+    pub async fn sleep(&self, duration: Duration) {
+        self.clock.sleep(duration).await;
+    }
 }
 
 pub trait Executor: Send + Sync {

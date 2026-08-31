@@ -1,7 +1,9 @@
 use crate::domain::definition::WorkflowDefinition;
+use crate::domain::ids::ExecutorId;
+use crate::domain::outcome::NodeOutcome;
 use crate::domain::policy::{AcceptPolicy, Policy};
 use crate::domain::state::ExecutionState;
-use crate::runtime::executor::{Executor, ExecutorRegistry};
+use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
 use crate::runtime::handle::ExecutionHandle;
 use crate::runtime::inject::{self, Event};
 use crate::runtime::park::ChannelPark;
@@ -9,11 +11,39 @@ use crate::runtime::scheduler::Scheduler;
 use crate::runtime::sink::{EventSink, NoopSink};
 use crate::runtime::store::{MemoryStore, StateStore};
 use crate::runtime::time::{Clock, SystemClock};
+use std::collections::HashSet;
+use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+/// `Runtime::start` / `run` rejected the definition before any node ran.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum StartError {
+    #[error("unregistered executor id(s): {0}")]
+    UnregisteredExecutors(UnregisteredExecutors),
+}
+
+/// Unknown [`ExecutorId`]s named by the definition. Display is a comma-separated list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnregisteredExecutors(pub Vec<ExecutorId>);
+
+impl std::fmt::Display for UnregisteredExecutors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        for id in &self.0 {
+            if !first {
+                f.write_str(", ")?;
+            }
+            first = false;
+            f.write_str(id.as_str())?;
+        }
+        Ok(())
+    }
+}
 
 /// Default time the scheduler waits before aborting execute tasks that ignore cancel.
 /// Tests should use a timeout at least this large; production can override.
@@ -37,7 +67,12 @@ impl Runtime {
         RuntimeBuilder::default()
     }
 
-    pub fn start(&self, definition: WorkflowDefinition) -> ExecutionHandle {
+    /// Start one execution. Fails **before** spawn if any node's executor id
+    /// is not registered — nothing runs.
+    pub fn start(&self, definition: WorkflowDefinition) -> Result<ExecutionHandle, StartError> {
+        if let Some(missing) = self.missing_executors(&definition) {
+            return Err(StartError::UnregisteredExecutors(missing));
+        }
         let (tx, rx) = inject::channel();
         let (state_tx, state_rx) = watch::channel(ExecutionState::Created);
         let cancel = CancellationToken::new();
@@ -58,12 +93,37 @@ impl Runtime {
         );
         let _ = tx.send(Event::Start);
         tokio::spawn(scheduler.run());
-        ExecutionHandle {
+        Ok(ExecutionHandle {
             tx,
             cancel,
             state: state_rx,
             dropped: Arc::new(AtomicBool::new(false)),
             consumed: false,
+        })
+    }
+
+    /// `start` + [`ExecutionHandle::wait`]. The simple path does not hold a handle
+    /// (and therefore cannot accidentally Drop-cancel).
+    pub async fn run(&self, definition: WorkflowDefinition) -> Result<ExecutionState, StartError> {
+        Ok(self.start(definition)?.wait().await)
+    }
+
+    fn missing_executors(&self, definition: &WorkflowDefinition) -> Option<UnregisteredExecutors> {
+        let mut seen = HashSet::new();
+        let mut missing = Vec::new();
+        for n in definition.nodes() {
+            if !seen.insert(n.executor_id.clone()) {
+                continue;
+            }
+            if self.registry.get(&n.executor_id).is_none() {
+                missing.push(n.executor_id.clone());
+            }
+        }
+        missing.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        if missing.is_empty() {
+            None
+        } else {
+            Some(UnregisteredExecutors(missing))
         }
     }
 }
@@ -131,6 +191,15 @@ impl RuntimeBuilder {
     pub fn register_arc(mut self, exec: Arc<dyn Executor>) -> Self {
         self.registry.register(exec);
         self
+    }
+
+    /// Register a function without naming [`FunctionExecutor`].
+    pub fn register_fn<F, Fut>(self, id: impl Into<crate::domain::ids::ExecutorId>, f: F) -> Self
+    where
+        F: Fn(ExecutionContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = NodeOutcome> + Send + 'static,
+    {
+        self.register(FunctionExecutor::new(id, f))
     }
 
     pub fn concurrency(mut self, n: usize) -> Self {

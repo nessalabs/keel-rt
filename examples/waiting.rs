@@ -52,7 +52,7 @@ async fn main() -> ExitCode {
         .register(succeed("join", b"joined"))
         .build();
 
-    let handle = runtime.start(def);
+    let handle = runtime.start(def).expect("executors registered");
     let stable = handle.wait_stable().await;
     println!("stable   {stable:?}");
 

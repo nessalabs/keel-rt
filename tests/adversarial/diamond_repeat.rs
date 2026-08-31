@@ -40,7 +40,7 @@ async fn research_diamond_50_times_event_order() {
                 NodeOutcome::Succeeded(Bytes::from(format!("w-{}", ctx.inputs.len())))
             }))
             .build();
-        let handle = rt.start(def);
+        let handle = rt.start(def).expect("start");
         let snap = handle.inspect().await;
         let state = within(handle.wait()).await;
         assert_eq!(state, ExecutionState::Succeeded, "iter {i}");
