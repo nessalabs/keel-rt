@@ -1,6 +1,7 @@
 use crate::domain::ids::{DefinitionHash, ExecutorId, NodeId, NodeSlot, WorkflowId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::OnceLock;
 use thiserror::Error;
 
 /// What happens after policy Accepts Failed or TimedOut.
@@ -86,6 +87,8 @@ pub struct WorkflowDefinition {
     preds: Vec<Vec<NodeSlot>>,
     succs: Vec<Vec<NodeSlot>>,
     sources: Vec<NodeSlot>,
+    /// Filled on first [`Self::content_hash`]. Build does not serialize.
+    hash: OnceLock<DefinitionHash>,
 }
 
 impl WorkflowDefinition {
@@ -196,8 +199,16 @@ impl WorkflowDefinition {
     }
 
     pub fn content_hash(&self) -> DefinitionHash {
-        DefinitionHash::parse(fnv1a64_hex(&self.durable_bytes()))
-            .expect("fnv hex is never empty")
+        self.hash
+            .get_or_init(|| {
+                DefinitionHash::parse(fnv1a64_hex(&self.durable_bytes()))
+                    .expect("fnv hex is never empty")
+            })
+            .clone()
+    }
+
+    pub(crate) fn hash_if_ready(&self) -> Option<DefinitionHash> {
+        self.hash.get().cloned()
     }
 
     /// Rebuild a validated DAG from stored bytes. Invalid graphs fail closed.
@@ -342,6 +353,7 @@ impl WorkflowDefinitionBuilder {
             preds,
             succs,
             sources,
+            hash: OnceLock::new(),
         })
     }
 }
@@ -522,6 +534,10 @@ mod tests {
             .on_failure(OnFailure::FailSubtree)
             .build()
             .unwrap();
+        assert!(def.hash_if_ready().is_none());
+        let h = def.content_hash();
+        assert_eq!(def.hash_if_ready().as_ref(), Some(&h));
+        assert_eq!(def.content_hash(), h);
         let bytes = def.durable_bytes();
         let back = WorkflowDefinition::from_durable_bytes(&bytes).unwrap();
         assert_eq!(back.id(), def.id());

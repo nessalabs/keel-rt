@@ -157,6 +157,7 @@ impl StateStore for SqliteStore {
     }
 
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        let _ = exec.definition().content_hash();
         let snap = exec.snapshot();
         let conn = self.lock()?;
         Self::write_snapshot(&conn, &snap, Some(exec.definition()))

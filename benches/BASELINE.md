@@ -8,6 +8,26 @@ Allocator experiment (not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
 This crate does not pick an allocator and has no `jemalloc` feature.
 current_thread sys vs jemalloc was noise — not recommended.
 
+## Phase 2 resume re-measure (2026-08-31)
+
+Persist-before-emit, CAS, `Runtime::resume`. Definition hash is lazy
+(`OnceLock`); MemoryStore first persist does not serialize the DAG.
+Gate: no MemoryStore median >10% vs RAII column.
+
+| bench | previous this run | this run | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 (debug median n=7) | 4.237 ms | 4.367 ms | +3.1% |
+| deep_chain_128 (debug median n=7) | 1.940 ms | 2.033 ms | +4.8% |
+| diamond_10k (debug median n=7) | 157.509 ms | 162.417 ms | +3.1% |
+| apply_only (debug median n=7) | 14.366 ms | 14.534 ms | +1.2% |
+
+All four inside the 10% band. **No revert.** Same machine class as Phase 1
+`main` (4.324 / 1.956 / 160.279 / 14.503 ms).
+
+Sqlite resume of a 256-wide Ready snapshot (debug, n=3, file adapter, not
+the MemoryStore gate): median **1.689 s**. Measured separately; do not tax
+the in-memory path.
+
 ## RAII re-measure (2026-08-31)
 
 SpawnSet/cancel-bound Drop, `ctx.sleep` park-until-abort, `running_count`.

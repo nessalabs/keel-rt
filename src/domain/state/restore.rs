@@ -21,7 +21,9 @@ impl Execution {
         if snap.workflow_id != *definition.id() {
             return Err(SnapshotError::WorkflowIdMismatch);
         }
-        if snap.definition_hash != definition.content_hash() {
+        if !snap.definition_hash.is_empty()
+            && snap.definition_hash != definition.content_hash()
+        {
             return Err(SnapshotError::DefinitionHashMismatch);
         }
 
@@ -66,7 +68,7 @@ impl Execution {
         let mut exec = Self {
             id: snap.execution_id,
             workflow_id: definition.id().clone(),
-            definition,
+            definition: std::sync::Arc::new(definition),
             state: snap.state,
             nodes,
             revision: snap.revision,

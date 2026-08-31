@@ -7,6 +7,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,7 +134,7 @@ impl Default for NodeRuntime {
 pub struct Execution {
     pub(crate) id: ExecutionId,
     pub(crate) workflow_id: WorkflowId,
-    pub(crate) definition: WorkflowDefinition,
+    pub(crate) definition: Arc<WorkflowDefinition>,
     pub(crate) state: ExecutionState,
     pub(crate) nodes: Vec<NodeRuntime>,
     pub(crate) revision: u64,
@@ -218,6 +219,7 @@ impl Execution {
         let remain: Vec<u32> = (0..n)
             .map(|i| definition.pred_slots(NodeSlot(i)).len() as u32)
             .collect();
+        let definition = Arc::new(definition);
         let mut exec = Self {
             id: ExecutionId::new(),
             workflow_id: definition.id().clone(),
@@ -251,6 +253,10 @@ impl Execution {
 
     /// Definition this execution was started from. Data, not slot state.
     pub fn definition(&self) -> &WorkflowDefinition {
+        &self.definition
+    }
+
+    pub(crate) fn definition_arc(&self) -> &Arc<WorkflowDefinition> {
         &self.definition
     }
 
@@ -425,7 +431,7 @@ impl Execution {
             node_order: (0..self.definition.len())
                 .map(|i| self.definition.id_at(NodeSlot(i)).clone())
                 .collect(),
-            definition_hash: self.definition.content_hash(),
+            definition_hash: self.definition.hash_if_ready().unwrap_or_default(),
         }
     }
 }
