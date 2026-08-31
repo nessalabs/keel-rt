@@ -1,12 +1,27 @@
-use crate::domain::ids::{ExecutionId, NodeId, ResumeToken, WorkflowId};
+use crate::domain::ids::{DefinitionHash, ExecutionId, NodeId, ResumeToken, WorkflowId};
 use crate::domain::outcome::NodeError;
 use crate::domain::state::{ExecutionState, NodeState};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use thiserror::Error;
 
 pub const SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SnapshotError {
+    #[error("schema version {found} does not match {expected}")]
+    SchemaMismatch { found: u32, expected: u32 },
+    #[error("snapshot workflow id does not match definition")]
+    WorkflowIdMismatch,
+    #[error("definition hash does not match snapshot")]
+    DefinitionHashMismatch,
+    #[error("snapshot missing node {0}")]
+    MissingNode(NodeId),
+    #[error("snapshot has unknown node {0}")]
+    UnknownNode(NodeId),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSnapshot {
@@ -32,6 +47,10 @@ pub struct ExecutionSnapshot {
     /// Same order as [`crate::WorkflowDefinition::nodes`]. Empty on old snapshots.
     #[serde(default)]
     pub node_order: Vec<NodeId>,
+    /// Identity of the definition body stored beside this snapshot. Empty on
+    /// pre-resume snapshots (fail closed on restore).
+    #[serde(default)]
+    pub definition_hash: DefinitionHash,
 }
 
 impl ExecutionSnapshot {
@@ -170,6 +189,7 @@ mod tests {
             state: ExecutionState::Running,
             nodes,
             node_order: order.clone(),
+            definition_hash: DefinitionHash::default(),
         };
         let got: Vec<&str> = snap.iter_nodes().map(|(id, _)| id.as_str()).collect();
         let want: Vec<&str> = order.iter().map(|i| i.as_str()).collect();
@@ -193,6 +213,7 @@ mod tests {
             state: ExecutionState::Failed,
             nodes,
             node_order: Vec::new(),
+            definition_hash: DefinitionHash::default(),
         };
         let got: Vec<&str> = snap.iter_nodes().map(|(id, _)| id.as_str()).collect();
         assert_eq!(got, vec!["a-first", "z-last"]);
@@ -212,6 +233,7 @@ mod tests {
             state: ExecutionState::Running,
             nodes,
             node_order: vec![NodeId::new("ghost"), a.clone(), NodeId::new("also-missing")],
+            definition_hash: DefinitionHash::default(),
         };
         let got: Vec<&str> = snap.iter_nodes().map(|(id, _)| id.as_str()).collect();
         assert_eq!(got, vec!["keep"]);
@@ -240,6 +262,7 @@ mod tests {
                 state,
                 nodes,
                 node_order: vec![id],
+                definition_hash: DefinitionHash::default(),
             }
             .to_string()
         }
@@ -298,6 +321,7 @@ mod tests {
             state: ExecutionState::Running,
             nodes,
             node_order: vec![NodeId::new("r"), NodeId::new("w"), NodeId::new("s")],
+            definition_hash: DefinitionHash::default(),
         };
         assert_eq!(snap.running_count(), 1);
         assert_eq!(snap.waiting_count(), 1);

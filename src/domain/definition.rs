@@ -1,4 +1,4 @@
-use crate::domain::ids::{ExecutorId, NodeId, NodeSlot, WorkflowId};
+use crate::domain::ids::{DefinitionHash, ExecutorId, NodeId, NodeSlot, WorkflowId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
@@ -66,6 +66,8 @@ pub enum DefinitionError {
     DisconnectedNode(NodeId),
     #[error("workflow graph contains a cycle")]
     Cycle,
+    #[error("stored definition bytes are not a valid workflow")]
+    CorruptDurableBytes,
 }
 
 /// Validated DAG. Indices stay private; callers use [`NodeId`].
@@ -181,6 +183,53 @@ impl WorkflowDefinition {
             .map(|s| self.id_at(*s).clone())
             .collect()
     }
+
+    /// Canonical body for durable store. Not a snapshot — definition stays data.
+    pub fn durable_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(&WorkflowDefinitionRecord {
+            id: self.id.clone(),
+            on_failure: self.on_failure,
+            nodes: self.nodes.clone(),
+            edges: self.edges.clone(),
+        })
+        .expect("WorkflowDefinitionRecord is always serializable")
+    }
+
+    pub fn content_hash(&self) -> DefinitionHash {
+        DefinitionHash::parse(fnv1a64_hex(&self.durable_bytes()))
+            .expect("fnv hex is never empty")
+    }
+
+    /// Rebuild a validated DAG from stored bytes. Invalid graphs fail closed.
+    pub fn from_durable_bytes(bytes: &[u8]) -> Result<Self, DefinitionError> {
+        let rec: WorkflowDefinitionRecord = serde_json::from_slice(bytes)
+            .map_err(|_| DefinitionError::CorruptDurableBytes)?;
+        let mut b = WorkflowDefinition::builder(rec.id).on_failure(rec.on_failure);
+        for n in rec.nodes {
+            b = b.node(n.id.clone(), n.executor_id).join(n.id, n.join);
+        }
+        for e in rec.edges {
+            b = b.edge(e.from, e.to);
+        }
+        b.build()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkflowDefinitionRecord {
+    id: WorkflowId,
+    on_failure: OnFailure,
+    nodes: Vec<NodeDef>,
+    edges: Vec<Edge>,
+}
+
+fn fnv1a64_hex(data: &[u8]) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in data {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
 }
 
 #[derive(Debug)]
@@ -402,6 +451,7 @@ mod tests {
                 "unknown",
             ),
             (DefinitionError::Cycle, "cycle"),
+            (DefinitionError::CorruptDurableBytes, "stored definition"),
         ];
         for (err, needle) in cases {
             let s = err.to_string();
@@ -460,5 +510,31 @@ mod tests {
         assert_eq!(def.on_failure(), OnFailure::FailSubtree);
         assert_eq!(def.join_of(&NodeId::new("a")), Some(Join::AllSucceeded));
         assert_eq!(def.join_of(&NodeId::new("b")), Some(Join::AllDone));
+    }
+
+    #[test]
+    fn durable_bytes_round_trip_preserves_join_and_failure_scope() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .node("b", "e")
+            .edge("a", "b")
+            .join("b", Join::AllDone)
+            .on_failure(OnFailure::FailSubtree)
+            .build()
+            .unwrap();
+        let bytes = def.durable_bytes();
+        let back = WorkflowDefinition::from_durable_bytes(&bytes).unwrap();
+        assert_eq!(back.id(), def.id());
+        assert_eq!(back.on_failure(), OnFailure::FailSubtree);
+        assert_eq!(back.join_of(&NodeId::new("b")), Some(Join::AllDone));
+        assert_eq!(back.content_hash(), def.content_hash());
+        let again = WorkflowDefinition::from_durable_bytes(&back.durable_bytes()).unwrap();
+        assert_eq!(again.content_hash(), def.content_hash());
+    }
+
+    #[test]
+    fn from_durable_bytes_rejects_corrupt_json() {
+        let err = WorkflowDefinition::from_durable_bytes(b"not-json").unwrap_err();
+        assert_eq!(err, DefinitionError::CorruptDurableBytes);
     }
 }

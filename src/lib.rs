@@ -28,10 +28,12 @@ pub mod testing;
 
 pub use domain::definition::{DefinitionError, Join, OnFailure, WorkflowDefinition};
 pub use domain::events::DomainEvent;
-pub use domain::ids::{ExecutionId, ExecutorId, NodeId, ResumeToken, WorkflowId};
+pub use domain::ids::{
+    DefinitionHash, ExecutionId, ExecutorId, InvalidId, NodeId, ResumeToken, WorkflowId,
+};
 pub use domain::outcome::{NodeError, NodeOutcome, Resume};
 pub use domain::policy::{AcceptPolicy, NeverWaitPolicy, Policy, PolicyDecision, RetryPolicy};
-pub use domain::snapshot::{ExecutionSnapshot, NodeSnapshot, SCHEMA_VERSION};
+pub use domain::snapshot::{ExecutionSnapshot, NodeSnapshot, SnapshotError, SCHEMA_VERSION};
 pub use domain::state::{
     ApplyCmd, ApplyEffect, ApplyError, Execution, ExecutionState, NodeState,
 };

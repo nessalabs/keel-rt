@@ -124,6 +124,7 @@ fn empty_snapshot() -> ExecutionSnapshot {
         state: ExecutionState::Cancelled,
         nodes: Default::default(),
         node_order: Vec::new(),
+        definition_hash: crate::domain::ids::DefinitionHash::default(),
     }
 }
 

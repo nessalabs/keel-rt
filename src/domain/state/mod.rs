@@ -420,11 +420,13 @@ impl Execution {
             node_order: (0..self.definition.len())
                 .map(|i| self.definition.id_at(NodeSlot(i)).clone())
                 .collect(),
+            definition_hash: self.definition.content_hash(),
         }
     }
 }
 
 mod apply;
+mod restore;
 
 fn count_kind(s: &NodeState) -> u8 {
     match s {
