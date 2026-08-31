@@ -105,6 +105,9 @@ pub struct Execution {
     n_failed: u32,
     #[allow(dead_code)]
     n_cancelled: u32,
+    /// Remaining unsatisfied AND-join predecessors per slot. Decremented
+    /// once when a predecessor becomes Succeeded. Zero + Pending ⇒ Ready.
+    remain: Vec<u32>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -148,6 +151,9 @@ impl Execution {
         let nodes = (0..n).map(|_| NodeRuntime::default()).collect();
         let dirty = vec![1u8; n];
         let dirty_list: Vec<NodeSlot> = (0..n).map(NodeSlot).collect();
+        let remain: Vec<u32> = (0..n)
+            .map(|i| definition.pred_slots(NodeSlot(i)).len() as u32)
+            .collect();
         Self {
             id: ExecutionId::new(),
             workflow_id: definition.id.clone(),
@@ -166,6 +172,7 @@ impl Execution {
             n_succeeded: 0,
             n_failed: 0,
             n_cancelled: 0,
+            remain,
         }
     }
 
@@ -673,18 +680,14 @@ impl Execution {
         let nsucc = self.definition.succ_slots(succeeded).len();
         for i in 0..nsucc {
             let succ = self.definition.succ_slots(succeeded)[i];
-            if self.all_preds_succeeded(succ) && matches!(self.nodes[succ.0].state, NodeState::Pending)
+            debug_assert!(self.remain[succ.0] > 0);
+            self.remain[succ.0] -= 1;
+            if self.remain[succ.0] == 0
+                && matches!(self.nodes[succ.0].state, NodeState::Pending)
             {
                 self.mark_ready(succ, None, effect);
             }
         }
-    }
-
-    fn all_preds_succeeded(&self, slot: NodeSlot) -> bool {
-        self.definition
-            .pred_slots(slot)
-            .iter()
-            .all(|p| matches!(self.nodes[p.0].state, NodeState::Succeeded))
     }
 
     fn resume(

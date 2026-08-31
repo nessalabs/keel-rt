@@ -8,7 +8,7 @@ use crate::domain::state::{ApplyError, ExecutionState, NodeState};
 use crate::runtime::executor::Executor;
 use crate::runtime::handle::ExecutionHandle;
 use crate::runtime::runtime::{Runtime, DEFAULT_CANCEL_BOUND};
-use crate::runtime::sink::RecordingSink;
+use crate::runtime::sink::{NoopSink, RecordingSink};
 use crate::runtime::store::{MemoryStore, StateStore};
 use crate::testing::clock::FakeClock;
 use crate::testing::scripted::ScriptedExecutor;
@@ -28,6 +28,9 @@ pub struct WorkflowTest {
     store: Option<Arc<dyn StateStore>>,
     clock: Arc<FakeClock>,
     cancel_bound: Duration,
+    /// When false, the runtime uses [`NoopSink`] so 100k-node runs do not
+    /// clone every DomainEvent into a recording buffer.
+    record_events: bool,
 }
 
 impl Default for WorkflowTest {
@@ -48,7 +51,16 @@ impl WorkflowTest {
             store: None,
             clock: Arc::new(FakeClock::new()),
             cancel_bound: DEFAULT_CANCEL_BOUND,
+            record_events: true,
         }
+    }
+
+    /// Pre-size node/edge vectors for large graphs.
+    pub fn with_graph_capacity(nodes: usize, edges: usize) -> Self {
+        let mut t = Self::new();
+        t.nodes.reserve(nodes);
+        t.edges.reserve(edges);
+        t
     }
 
     pub fn workflow_id(mut self, id: impl Into<String>) -> Self {
@@ -65,6 +77,18 @@ impl WorkflowTest {
 
     pub fn executor(mut self, id: impl Into<String>, executor: impl Executor + 'static) -> Self {
         self.nodes.push((id.into(), Arc::new(executor)));
+        self
+    }
+
+    /// Same `Arc<dyn Executor>` on many nodes (one registry entry when ids match).
+    pub fn node_arc(mut self, id: impl Into<String>, exec: Arc<dyn Executor>) -> Self {
+        self.nodes.push((id.into(), exec));
+        self
+    }
+
+    /// Skip `RecordingSink` (scale benches). Scripted `last_inputs` still work.
+    pub fn silent(mut self) -> Self {
+        self.record_events = false;
         self
     }
 
@@ -115,10 +139,14 @@ impl WorkflowTest {
             .unwrap_or_else(|| Arc::new(MemoryStore::new()));
         let mut builder = Runtime::builder()
             .store_arc(store.clone())
-            .sink(sink.clone())
             .concurrency(self.concurrency)
             .cancel_bound(self.cancel_bound)
             .clock(self.clock.clone());
+        if self.record_events {
+            builder = builder.sink(sink.clone());
+        } else {
+            builder = builder.sink(NoopSink);
+        }
         if let Some(p) = self.policy.clone() {
             builder = builder.policy_arc(p);
         }

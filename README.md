@@ -29,11 +29,16 @@ cargo clippy --lib -- -D warnings
 `tests/adversarial/` is the attack / regression pack (concurrency, AND-join,
 stale completions, timers, panic isolation, definition edges, inspect, diamond
 repeat). `tests/stress.rs` is the size pack (wide 256, deep 128, cancel-under-load,
-plus kernel microbenches).
+plus kernel microbenches). `tests/stress_100k.rs` is the 100k-node scale pack
+(debug finishes; `wide_100k` is ~57s). `tests/stress_uneven.rs` is stragglers,
+mixed fan-in, hourglass, fat payloads, FIFO vs timer, skewed retry.
 
 ```bash
 cargo test --test adversarial -- --test-threads=1
 cargo test --test stress -- --nocapture
+cargo test --test stress_100k -- --nocapture --test-threads=1
+cargo test --release --test stress_100k -- --nocapture --test-threads=1
+cargo test --test stress_uneven -- --nocapture --test-threads=1
 cargo test --test scenarios -- --test-threads=1
 ```
 
