@@ -70,6 +70,7 @@ PR rules (mermaid + behavior diffs): [`AGENTS.md`](AGENTS.md).
 Accepted leftovers: [`docs/adr/`](docs/adr/).
 Phase 1 failure catalog (every interrupt / retry / race / empty / drop):
 [`docs/FAILURE_CATALOG.md`](docs/FAILURE_CATALOG.md).
+Phase 2 resume / persist hunt: [`docs/RESUME_CATALOG.md`](docs/RESUME_CATALOG.md).
 
 ## Coverage
 

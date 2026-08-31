@@ -28,6 +28,21 @@ Sqlite resume of a 256-wide Ready snapshot (debug, n=3, file adapter, not
 the MemoryStore gate): median **1.689 s**. Measured separately; do not tax
 the in-memory path.
 
+## Phase 2 resume stress re-measure (2026-08-31)
+
+Same VM class. `cargo test -p keel-rt-sqlite --test resume_stress -- --test-threads=1 --nocapture`.
+Not the MemoryStore 10% gate.
+
+| bench | this run | bound |
+|---|---:|---|
+| sqlite resume 256-wide (debug median n=3) | 963 ms | 30 s |
+| sqlite 50 start-crash-resume diamonds, one file | 362 ms | 60 s |
+| sqlite 1000 sequential 1-node DAGs, resume last | last resume 168 µs (pack < 6 s) | 90 s |
+| MemoryStore wide_fan_out_256 (from Phase 2 re-measure) | 4.367 ms | ≤10% vs RAII |
+
+10k-node sqlite snapshot resume is **not** in `stress-resume` (debug budget;
+same split as `stress_100k`).
+
 ## RAII re-measure (2026-08-31)
 
 SpawnSet/cancel-bound Drop, `ctx.sleep` park-until-abort, `running_count`.

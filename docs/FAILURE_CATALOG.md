@@ -4,6 +4,9 @@ Every interrupt, retry, race, empty, illegal, drop, panic, and I/O-of-ports
 case the kernel handles. Rows are the production contract: if a test name is
 here, the handling is pinned. **Zero MISSING.**
 
+Phase 2 crash / CAS / file-store rows:
+[`RESUME_CATALOG.md`](RESUME_CATALOG.md).
+
 How to read a row:
 
 | column | meaning |

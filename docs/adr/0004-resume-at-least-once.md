@@ -56,3 +56,8 @@ to hide sqlite latency.
 
 Watch for: a second store that needs dirty-slot persist. Until then,
 sqlite writes the full snapshot JSON (ADR 0002 stays MemoryStore-only).
+
+**No process fence.** `AlreadyActive` is per `Runtime`. Two runtimes on
+one sqlite file can both resume and both re-invoke a Running node
+(`two_runtimes_same_file_are_not_fenced`). CAS still rejects a stale
+`put`. A distributed lease is out of scope.

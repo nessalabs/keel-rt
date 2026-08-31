@@ -284,4 +284,19 @@ fn ci_and_agents_name_phase2_review_jobs() {
     let rule = fs::read_to_string(root.join(".cursor/rules/pr-architecture.mdc")).unwrap();
     assert!(rule.contains("Phase 2+ review gate"));
     assert!(rule.contains("stress-resume"));
+
+    let catalog = fs::read_to_string(root.join("docs/RESUME_CATALOG.md")).unwrap();
+    assert!(catalog.contains("Zero MISSING"));
+    assert!(
+        !catalog.contains("| MISSING") && !catalog.contains("**MISSING**"),
+        "RESUME_CATALOG must not leave a hunt row MISSING"
+    );
+    for name in [
+        "crash_diamond_join_runs_writer_once",
+        "two_runtimes_same_file_are_not_fenced",
+        "crash_after_terminal_cas_before_emit_keeps_terminal",
+        "resume_256_wide_snapshot_within_bound",
+    ] {
+        assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
+    }
 }
