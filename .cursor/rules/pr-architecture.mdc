@@ -27,3 +27,13 @@ Required on **every** PR:
 Copy diagrams from `docs/ARCHITECTURE.md` only when they still match this
 branch; otherwise regenerate from `src/domain/mod.rs`, `src/runtime/mod.rs`,
 `src/testing/mod.rs`, `src/lib.rs`.
+
+## Phase 2+ review gate (blocking)
+
+Persist / resume / store changes also require:
+
+- A named crash-resume test on a **real sqlite file** (not a mock
+  `StateStore`). Kernel-side hunt lives in `tests/adversarial/resume.rs`.
+- CI jobs `test`, `adversarial`, `coverage`, `stress-resume` green.
+  `stress-100k` stays separate. Do not add `continue-on-error`.
+- `docs/RESUME_CATALOG.md` updated; every hunt row has a `test:` name.

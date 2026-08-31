@@ -21,7 +21,8 @@ keep implementing `put`/`get` on snapshots. `MemoryStore` overrides `persist`.
 ## Alternatives considered
 
 - **Dirty-patch value object.** Extra type, same information `Execution`
-  already has. Extract on second store that needs it.
+  already has. Not extracted: [`Execution::dirty_nodes`] is the list the
+  second store (`keel-rt-sqlite`) writes.
 - **Downcast MemoryStore in the scheduler.** Worse: scheduler would name an
   adapter.
 - **Revert incremental persist.** Costs the hot path we already paid to fix.
@@ -29,4 +30,6 @@ keep implementing `put`/`get` on snapshots. `MemoryStore` overrides `persist`.
 ## Consequences
 
 Implementors of `StateStore` see `Execution` in the trait. They can ignore
-`persist`. Do not add more live-aggregate methods to the port.
+`persist`. `MemoryStore` still walks `dirty_slots` (no extra public clone).
+`keel-rt-sqlite` uses `dirty_nodes()` after the first full snapshot write.
+Do not add more live-aggregate methods to the port.

@@ -3,9 +3,15 @@
 **Keel** is a small DAG workflow execution kernel. The crate is `keel-rt`
 (Tokio-style `-rt` = the runtime). In Rust: `use keel_rt::...`.
 
-Phase 1: AND-join, fail-fast, opaque byte dataflow, first-class
-Waiting/resume, retry-as-Ready, and a Tokio-inspired failure-injection
-test harness.
+Phase 2: at-least-once **snapshot resume**. If the process dies, call
+`Runtime::resume` with the `ExecutionId`. A node
+that was Running is re-invoked (side effects may run twice — make the
+executor idempotent if you need exactly-once). Succeeded nodes never re-run.
+Waiting keeps the same token. File persistence is a sibling crate
+(`keel-rt-sqlite`), not the kernel. Default sqlite open is
+`synchronous=FULL` (process kill and power loss of the last txn).
+`SqliteStore::open_fast` is `NORMAL` (process kill only; power loss may
+lose the last WAL frames). Details: [`crates/keel-rt-sqlite/README.md`](crates/keel-rt-sqlite/README.md).
 
 The runtime is a **bundle** (scheduler + optional store/sink + handle). The
 scheduler does not know resource types. Drivers only wake. This is a
@@ -42,9 +48,11 @@ let state = rt.run(def).await?;           // start + wait; no handle to drop-can
 assert!(state.is_successful_finish());    // Succeeded *or* Completed (FailSubtree)
 ```
 
-`start` returns a handle when you need `wait_stable` + `resume` or
+`start` returns a handle when you need `wait_stable` + token `resume` or
 inspect. **Drop cancels.** `wait()` is terminal only; Waiting is not done.
 Unknown executor ids fail at `start` (named in the error) — nothing runs.
+`start` always creates a **new** execution. After death, `rt.resume(&id)`
+loads the last durable snapshot (not event replay).
 
 `ExecutionSnapshot::iter_nodes()` walks **definition order**. `HashMap` lookup
 via `.node(id)` is unchanged. `running_count()` / `waiting_count()` are the
@@ -65,6 +73,7 @@ PR rules (mermaid + behavior diffs): [`AGENTS.md`](AGENTS.md).
 Accepted leftovers: [`docs/adr/`](docs/adr/).
 Phase 1 failure catalog (every interrupt / retry / race / empty / drop):
 [`docs/FAILURE_CATALOG.md`](docs/FAILURE_CATALOG.md).
+Phase 2 resume / persist hunt: [`docs/RESUME_CATALOG.md`](docs/RESUME_CATALOG.md).
 
 ## Coverage
 
@@ -93,10 +102,10 @@ CI (`.github/workflows/ci.yml`) fails the `coverage` job when:
 floor to make a refactor green.
 
 ```bash
-cargo test -- --test-threads=1
+cargo test --workspace -- --test-threads=1
 cargo test --test structure -- --test-threads=1
 cargo test --features test-util
-cargo clippy --lib -- -D warnings
+cargo clippy --workspace --lib -- -D warnings
 just coverage
 ```
 
@@ -115,6 +124,13 @@ fail-fast, retry permit release, Delay AND-join, Reset+Retry, 100 sequential dia
 isolating one Timeout, mixed Delay/Timeout/Reset under concurrency 8.
 `tests/scenarios/failure_scope.rs` locks `OnFailure::FailSubtree` + `Join::AllDone`
 without changing the default fail-fast tests.
+
+Sqlite file recovery and resume stress:
+
+```bash
+cargo test -p keel-rt-sqlite --lib --test resume -- --test-threads=1
+just stress-resume
+```
 
 ```bash
 cargo test --test adversarial -- --test-threads=1
@@ -145,13 +161,14 @@ mocks). Domain apply transitions are table-tested in `src/domain/state.rs`.
 
 ```
 definition ──► Runtime::start ──► ExecutionHandle
+store+id   ──► Runtime::resume ─┘
                     │
                     ▼
               scheduler apply loop     (sync; never awaits execute())
                     │
-          ┌─────────┼──────────┐
-          ▼         ▼          ▼
-       StateStore  EventSink  spawn(execute)  → Event::NodeFinished
+          persist snapshot (CAS)  then  EventSink.emit
+                    │
+              spawn(execute)  → Event::NodeFinished
 ```
 
 - **Join default is AND (`AllSucceeded`).** A node becomes Ready only when every

@@ -7,6 +7,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,7 +134,7 @@ impl Default for NodeRuntime {
 pub struct Execution {
     pub(crate) id: ExecutionId,
     pub(crate) workflow_id: WorkflowId,
-    pub(crate) definition: WorkflowDefinition,
+    pub(crate) definition: Arc<WorkflowDefinition>,
     pub(crate) state: ExecutionState,
     pub(crate) nodes: Vec<NodeRuntime>,
     pub(crate) revision: u64,
@@ -218,6 +219,7 @@ impl Execution {
         let remain: Vec<u32> = (0..n)
             .map(|i| definition.pred_slots(NodeSlot(i)).len() as u32)
             .collect();
+        let definition = Arc::new(definition);
         let mut exec = Self {
             id: ExecutionId::new(),
             workflow_id: definition.id().clone(),
@@ -247,6 +249,15 @@ impl Execution {
 
     pub fn id(&self) -> &ExecutionId {
         &self.id
+    }
+
+    /// Definition this execution was started from. Data, not slot state.
+    pub fn definition(&self) -> &WorkflowDefinition {
+        &self.definition
+    }
+
+    pub(crate) fn definition_arc(&self) -> &Arc<WorkflowDefinition> {
+        &self.definition
     }
 
     pub fn state(&self) -> ExecutionState {
@@ -288,6 +299,20 @@ impl Execution {
 
     pub(crate) fn dirty_slots(&self) -> &[NodeSlot] {
         &self.dirty_list
+    }
+
+    /// Nodes that changed since create or the last successful persist.
+    /// File adapters write these instead of cloning the whole graph (ADR 0002).
+    pub fn dirty_nodes(&self) -> Vec<(NodeId, NodeSnapshot)> {
+        self.dirty_list
+            .iter()
+            .map(|slot| {
+                (
+                    self.definition.id_at(*slot).clone(),
+                    self.node_snapshot_at(*slot),
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn clear_dirty(&mut self) {
@@ -420,11 +445,13 @@ impl Execution {
             node_order: (0..self.definition.len())
                 .map(|i| self.definition.id_at(NodeSlot(i)).clone())
                 .collect(),
+            definition_hash: self.definition.hash_if_ready().unwrap_or_default(),
         }
     }
 }
 
 mod apply;
+mod restore;
 
 fn count_kind(s: &NodeState) -> u8 {
     match s {
@@ -978,6 +1005,20 @@ mod tests {
             ex.node(&NodeId::new("a")).unwrap().state,
             NodeState::Cancelled
         ));
+    }
+
+    #[test]
+    fn dirty_nodes_lists_slots_changed_by_apply() {
+        let mut ex = linear();
+        assert_eq!(ex.dirty_nodes().len(), 2);
+        ex.clear_dirty();
+        assert!(ex.dirty_nodes().is_empty());
+        ex.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        let dirty = ex.dirty_nodes();
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0].0.as_str(), "a");
+        assert!(matches!(dirty[0].1.state, NodeState::Ready { .. }));
     }
 
     #[test]

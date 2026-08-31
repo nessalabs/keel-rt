@@ -204,6 +204,7 @@ async fn noop_store_put_get_are_empty() {
         state: ExecutionState::Succeeded,
         nodes: Default::default(),
         node_order: Vec::new(),
+        definition_hash: Default::default(),
     };
     store.put(&dummy).await.unwrap();
     assert!(store.get(&id).await.unwrap().is_none(), "NoopStore never retains");
@@ -447,6 +448,7 @@ fn ids_display_default_from_string_and_serde_round_trip() {
         state: ExecutionState::Succeeded,
         nodes: Default::default(),
         node_order: vec![id.clone()],
+        definition_hash: Default::default(),
     };
     let sjson = serde_json::to_string(&snap).unwrap();
     let restored: keel_rt::ExecutionSnapshot = serde_json::from_str(&sjson).unwrap();

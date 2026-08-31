@@ -1,5 +1,7 @@
+use crate::domain::definition::WorkflowDefinition;
 use crate::domain::ids::ExecutionId;
 use crate::domain::snapshot::ExecutionSnapshot;
+use crate::domain::state::Execution;
 use crate::runtime::store::{MemoryStore, StateStore, StoreError};
 use crate::testing::failpoint;
 use async_trait::async_trait;
@@ -59,9 +61,27 @@ impl StateStore for FailingStore {
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         self.inner.get(id).await
     }
+
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        if failpoint::take("store.put") {
+            return Err(StoreError::Message("failpoint store.put".into()));
+        }
+        let n = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_all || n == self.fail_on_nth_put {
+            return Err(StoreError::Message(format!("failing store: put #{n}")));
+        }
+        self.inner.persist(exec).await
+    }
+
+    async fn workflow_definition(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<WorkflowDefinition>, StoreError> {
+        self.inner.workflow_definition(id).await
+    }
 }
 
-/// Records every put in order. Optional get sequence for scripted reads.
+/// Records every persist in order. Optional get sequence for scripted reads.
 #[derive(Clone, Default)]
 pub struct SequenceStore {
     inner: MemoryStore,
@@ -87,5 +107,20 @@ impl StateStore for SequenceStore {
 
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         self.inner.get(id).await
+    }
+
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.puts
+            .lock()
+            .expect("sequence store")
+            .push(exec.snapshot());
+        self.inner.persist(exec).await
+    }
+
+    async fn workflow_definition(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<WorkflowDefinition>, StoreError> {
+        self.inner.workflow_definition(id).await
     }
 }

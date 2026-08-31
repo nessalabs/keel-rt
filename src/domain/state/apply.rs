@@ -511,7 +511,7 @@ impl Execution {
         }
     }
 
-    fn rebuild_deadline(&mut self) {
+    pub(super) fn rebuild_deadline(&mut self) {
         self.next_deadline = None;
         for (i, n) in self.nodes.iter().enumerate() {
             if let NodeState::Ready {
@@ -527,7 +527,7 @@ impl Execution {
         }
     }
 
-    fn derive_state(&self) -> ExecutionState {
+    pub(super) fn derive_state(&self) -> ExecutionState {
         if self.fail_execution {
             return ExecutionState::Failed;
         }

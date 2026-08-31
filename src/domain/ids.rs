@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use thiserror::Error;
 
 /// Stable node identity. Clones are refcount bumps (`Arc<str>`).
 /// Public API never exposes petgraph indices or aggregate slots.
@@ -103,11 +104,56 @@ impl ExecutionId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Restore an id from a snapshot. Empty is not an identity.
+    pub fn parse(s: impl AsRef<str>) -> Result<Self, InvalidId> {
+        let s = s.as_ref();
+        if s.is_empty() {
+            return Err(InvalidId::EmptyExecutionId);
+        }
+        Ok(Self(s.to_string()))
+    }
 }
 
 impl Default for ExecutionId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum InvalidId {
+    #[error("execution id must not be empty")]
+    EmptyExecutionId,
+    #[error("definition hash must not be empty")]
+    EmptyDefinitionHash,
+}
+
+/// Identity of a [`crate::WorkflowDefinition`] body. Snapshot holds this, not the DAG.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DefinitionHash(String);
+
+impl DefinitionHash {
+    pub fn parse(s: impl AsRef<str>) -> Result<Self, InvalidId> {
+        let s = s.as_ref();
+        if s.is_empty() {
+            return Err(InvalidId::EmptyDefinitionHash);
+        }
+        Ok(Self(s.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Display for DefinitionHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -183,5 +229,30 @@ impl ResumeToken {
 
     pub fn nonce(&self) -> u64 {
         self.nonce
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_id_parse_rejects_empty() {
+        assert_eq!(
+            ExecutionId::parse("").unwrap_err(),
+            InvalidId::EmptyExecutionId
+        );
+        assert_eq!(ExecutionId::parse("exec-1").unwrap().as_str(), "exec-1");
+    }
+
+    #[test]
+    fn definition_hash_parse_rejects_empty() {
+        assert_eq!(
+            DefinitionHash::parse("").unwrap_err(),
+            InvalidId::EmptyDefinitionHash
+        );
+        assert_eq!(DefinitionHash::parse("abc").unwrap().as_str(), "abc");
+        assert!(DefinitionHash::default().is_empty());
+        assert_eq!(DefinitionHash::parse("abc").unwrap().to_string(), "abc");
     }
 }

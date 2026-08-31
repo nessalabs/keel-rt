@@ -7,6 +7,8 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Debug)]
 pub(crate) enum Event {
     Start,
+    /// Rebuild from a snapshot. Does not apply [`ApplyCmd::Start`].
+    Restore,
     NodeFinished {
         slot: NodeSlot,
         node_id: NodeId,

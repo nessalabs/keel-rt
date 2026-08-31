@@ -2,6 +2,7 @@
 //! This module never awaits `execute()` and does not name resource types.
 
 use crate::domain::definition::WorkflowDefinition;
+use crate::domain::events::DomainEvent;
 use crate::domain::ids::{NodeId, NodeSlot};
 use crate::domain::policy::Policy;
 use crate::domain::state::{ApplyCmd, Execution, ExecutionState};
@@ -40,6 +41,7 @@ pub(crate) struct Scheduler {
     bound_armed: bool,
     cancel_bound_task: Option<tokio::task::AbortHandle>,
     last_persisted: u64,
+    pending_events: Vec<DomainEvent>,
 }
 
 impl Scheduler {
@@ -84,6 +86,65 @@ impl Scheduler {
             bound_armed: false,
             cancel_bound_task: None,
             last_persisted: 0,
+            pending_events: Vec::new(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_execution(
+        exec: Execution,
+        policy: Arc<dyn Policy>,
+        store: Arc<dyn StateStore>,
+        sink: Arc<dyn EventSink>,
+        registry: ExecutorRegistry,
+        clock: Arc<dyn Clock>,
+        park: ChannelPark,
+        tx: EventTx,
+        concurrency: usize,
+        cancel: CancellationToken,
+        state_tx: watch::Sender<ExecutionState>,
+        cancel_bound: Duration,
+    ) -> Self {
+        let n = exec.definition().len();
+        let executors: Vec<Option<Arc<dyn Executor>>> = (0..n)
+            .map(|i| registry.get(exec.definition().executor_at(NodeSlot(i))))
+            .collect();
+        let _ = state_tx.send(exec.state());
+        Self {
+            spawn: SpawnSet::new(tx.clone(), n),
+            exec,
+            policy,
+            store,
+            sink,
+            clock,
+            park,
+            ready: VecDeque::new(),
+            queued: vec![0u8; n],
+            available: concurrency.max(1),
+            held: vec![0u8; n],
+            executors,
+            cancel,
+            state_tx,
+            cancel_bound,
+            tx,
+            bound_armed: false,
+            cancel_bound_task: None,
+            last_persisted: 0,
+            pending_events: Vec::new(),
+        }
+    }
+
+    pub(crate) fn execution_id(&self) -> crate::domain::ids::ExecutionId {
+        self.exec.id().clone()
+    }
+
+    fn enqueue_dispatchable(&mut self) {
+        let n = self.exec.definition().len();
+        for i in 0..n {
+            let slot = NodeSlot(i);
+            if self.exec.is_dispatchable_slot(slot) {
+                self.enqueue_slot(slot);
+            }
         }
     }
 
@@ -102,7 +163,16 @@ impl Scheduler {
             Event::Start => {
                 self.apply_cmd(ApplyCmd::Start);
                 self.dispatch();
-                self.persist_after_event().await;
+                self.persist_then_emit().await;
+            }
+            Event::Restore => {
+                if self.exec.state() == ExecutionState::Created {
+                    self.apply_cmd(ApplyCmd::Start);
+                } else {
+                    self.enqueue_dispatchable();
+                }
+                self.dispatch();
+                self.persist_then_emit().await;
             }
             Event::NodeFinished {
                 slot,
@@ -129,7 +199,7 @@ impl Scheduler {
                     }
                 }
                 self.dispatch();
-                self.persist_after_event().await;
+                self.persist_then_emit().await;
             }
             Event::Resume {
                 token,
@@ -139,13 +209,13 @@ impl Scheduler {
                 let r = self.apply_cmd_result(ApplyCmd::Resume { token, resume });
                 let _ = reply.send(r);
                 self.dispatch();
-                self.persist_after_event().await;
+                self.persist_then_emit().await;
             }
             Event::Cancel => {
                 self.cancel.cancel();
                 self.arm_cancel_bound();
                 self.apply_cmd(ApplyCmd::Cancel);
-                self.persist_after_event().await;
+                self.persist_then_emit().await;
             }
             Event::Inspect { reply } => {
                 let _ = reply.send(self.exec.snapshot());
@@ -161,13 +231,13 @@ impl Scheduler {
                     self.apply_cmd(ApplyCmd::RetryDue { node_id: id });
                 }
                 self.dispatch();
-                self.persist_after_event().await;
+                self.persist_then_emit().await;
             }
             Event::ForceCancelBound => {
                 warn!("cancel bound elapsed; aborting remaining execute tasks");
                 self.spawn.abort_all();
                 self.apply_cmd(ApplyCmd::ForceCancelRunning);
-                self.persist_after_event().await;
+                self.persist_then_emit().await;
             }
             Event::Shutdown => {
                 self.spawn.abort_all();
@@ -185,15 +255,7 @@ impl Scheduler {
     fn apply_cmd_result(&mut self, cmd: ApplyCmd) -> Result<(), crate::domain::state::ApplyError> {
         let now = self.clock.now();
         let effect = self.exec.apply(cmd, self.policy.as_ref(), now)?;
-        for ev in &effect.events {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.sink.emit(ev);
-            }))
-            .is_err()
-            {
-                debug!("EventSink::emit panicked; apply already progressed");
-            }
-        }
+        self.pending_events.extend(effect.events);
         for slot in effect.newly_runnable {
             self.enqueue_slot(slot);
         }
@@ -224,23 +286,53 @@ impl Scheduler {
         }
     }
 
-    async fn persist_after_event(&mut self) {
+    /// Persist the durable snapshot, then announce. A failed persist keeps
+    /// in-memory apply and does not emit (do not announce a non-durable fact).
+    /// No persist queue — ADR 0001 still applies.
+    async fn persist_then_emit(&mut self) {
+        let events = std::mem::take(&mut self.pending_events);
         if self.store.is_noop() {
+            self.emit_events(&events);
             return;
         }
+        if self.persist_snapshot().await {
+            self.emit_events(&events);
+        }
+    }
+
+    async fn persist_snapshot(&mut self) -> bool {
         if self.exec.revision() == self.last_persisted {
-            return;
+            return true;
         }
         match CatchUnwind(AssertUnwindSafe(self.store.persist(&self.exec))).await {
-            Ok(Ok(())) => self.exec.clear_dirty(),
+            Ok(Ok(())) => {
+                self.exec.clear_dirty();
+                self.last_persisted = self.exec.revision();
+                true
+            }
             Ok(Err(e)) => {
                 debug!(error = %e, "StateStore::put failed; in-memory state kept");
+                self.last_persisted = self.exec.revision();
+                false
             }
             Err(_) => {
                 debug!("StateStore::persist panicked; in-memory state kept");
+                self.last_persisted = self.exec.revision();
+                false
             }
         }
-        self.last_persisted = self.exec.revision();
+    }
+
+    fn emit_events(&self, events: &[DomainEvent]) {
+        for ev in events {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.sink.emit(ev);
+            }))
+            .is_err()
+            {
+                debug!("EventSink::emit panicked; apply already progressed");
+            }
+        }
     }
 
     fn enqueue_slot(&mut self, slot: NodeSlot) {

@@ -32,6 +32,7 @@ TESTS=(
   --test consumer
   --test graph
   --test resilience
+  --test resume
   --test scenarios
   --test stress
   --test stress_uneven

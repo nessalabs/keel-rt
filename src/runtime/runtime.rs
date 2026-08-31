@@ -1,20 +1,21 @@
 use crate::domain::definition::WorkflowDefinition;
-use crate::domain::ids::ExecutorId;
+use crate::domain::ids::{ExecutionId, ExecutorId};
 use crate::domain::outcome::NodeOutcome;
 use crate::domain::policy::{AcceptPolicy, Policy};
-use crate::domain::state::ExecutionState;
+use crate::domain::snapshot::SnapshotError;
+use crate::domain::state::{Execution, ExecutionState};
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
-use crate::runtime::handle::ExecutionHandle;
+use crate::runtime::handle::{ActiveGuard, ExecutionHandle};
 use crate::runtime::inject::{self, Event};
 use crate::runtime::park::ChannelPark;
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::sink::{EventSink, NoopSink};
-use crate::runtime::store::{MemoryStore, StateStore};
+use crate::runtime::store::{MemoryStore, StateStore, StoreError};
 use crate::runtime::time::{Clock, SystemClock};
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::watch;
@@ -25,6 +26,23 @@ use tokio_util::sync::CancellationToken;
 pub enum StartError {
     #[error("unregistered executor id(s): {0}")]
     UnregisteredExecutors(UnregisteredExecutors),
+}
+
+/// `Runtime::resume` rejected the snapshot before any node ran.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ResumeError {
+    #[error("unknown execution")]
+    UnknownExecution,
+    #[error("execution is already active on this runtime")]
+    AlreadyActive,
+    #[error("workflow definition missing for snapshot")]
+    DefinitionMissing,
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+    #[error("unregistered executor id(s): {0}")]
+    UnregisteredExecutors(UnregisteredExecutors),
+    #[error(transparent)]
+    Store(#[from] StoreError),
 }
 
 /// Unknown [`ExecutorId`]s named by the definition. Display is a comma-separated list.
@@ -62,6 +80,8 @@ pub struct Runtime {
     clock: Arc<dyn Clock>,
     concurrency: usize,
     cancel_bound: Duration,
+    /// Live execution ids on this Runtime. Handle Drop unregisters.
+    active: Arc<Mutex<HashSet<ExecutionId>>>,
 }
 
 impl Runtime {
@@ -93,14 +113,22 @@ impl Runtime {
             state_tx,
             self.cancel_bound,
         );
+        let execution_id = scheduler.execution_id();
+        // Documented invariant: `ExecutionId::new` is unique on this Runtime.
+        // `start_two_executions_claim_distinct_ids` pins it.
+        let active = self
+            .claim_active(&execution_id)
+            .expect("ExecutionId::new is unique on this Runtime");
         let _ = tx.send(Event::Start);
         tokio::spawn(scheduler.run());
         Ok(ExecutionHandle {
+            execution_id,
             tx,
             cancel,
             state: state_rx,
             dropped: Arc::new(AtomicBool::new(false)),
             consumed: false,
+            _active: active,
         })
     }
 
@@ -108,6 +136,80 @@ impl Runtime {
     /// (and therefore cannot accidentally Drop-cancel).
     pub async fn run(&self, definition: WorkflowDefinition) -> Result<ExecutionState, StartError> {
         Ok(self.start(definition)?.wait().await)
+    }
+
+    /// Rebuild from the store snapshot. At-least-once: a node that was Running
+    /// is restored Ready and re-invoked (attempt + 1 at dispatch). Succeeded
+    /// nodes never re-run. `start` still always creates a new execution.
+    pub async fn resume(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> Result<ExecutionHandle, ResumeError> {
+        let Some(active) = self.claim_active(execution_id) else {
+            return Err(ResumeError::AlreadyActive);
+        };
+        match self.spawn_resume(execution_id, active).await {
+            Ok(handle) => Ok(handle),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn spawn_resume(
+        &self,
+        execution_id: &ExecutionId,
+        active: ActiveGuard,
+    ) -> Result<ExecutionHandle, ResumeError> {
+        let snap = self
+            .store
+            .get(execution_id)
+            .await?
+            .ok_or(ResumeError::UnknownExecution)?;
+        let definition = self
+            .store
+            .workflow_definition(execution_id)
+            .await?
+            .ok_or(ResumeError::DefinitionMissing)?;
+        let exec = Execution::from_snapshot(definition, snap)?;
+        if let Some(missing) = self.missing_executors(exec.definition()) {
+            return Err(ResumeError::UnregisteredExecutors(missing));
+        }
+        let (tx, rx) = inject::channel();
+        let (state_tx, state_rx) = watch::channel(exec.state());
+        let cancel = CancellationToken::new();
+        let park = ChannelPark::new(rx, self.clock.clone());
+        let scheduler = Scheduler::from_execution(
+            exec,
+            self.policy.clone(),
+            self.store.clone(),
+            self.sink.clone(),
+            self.registry.clone(),
+            self.clock.clone(),
+            park,
+            tx.clone(),
+            self.concurrency,
+            cancel.clone(),
+            state_tx,
+            self.cancel_bound,
+        );
+        let _ = tx.send(Event::Restore);
+        tokio::spawn(scheduler.run());
+        Ok(ExecutionHandle {
+            execution_id: execution_id.clone(),
+            tx,
+            cancel,
+            state: state_rx,
+            dropped: Arc::new(AtomicBool::new(false)),
+            consumed: false,
+            _active: active,
+        })
+    }
+
+    fn claim_active(&self, id: &ExecutionId) -> Option<ActiveGuard> {
+        let mut g = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        if !g.insert(id.clone()) {
+            return None;
+        }
+        Some(ActiveGuard::new(id.clone(), self.active.clone()))
     }
 
     fn missing_executors(&self, definition: &WorkflowDefinition) -> Option<UnregisteredExecutors> {
@@ -232,6 +334,51 @@ impl RuntimeBuilder {
             clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
             concurrency: self.concurrency,
             cancel_bound: self.cancel_bound,
+            active: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn tiny() -> WorkflowDefinition {
+        WorkflowDefinition::builder("wf")
+            .node("a", "a")
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn start_two_executions_claim_distinct_ids() {
+        let rt = Runtime::builder()
+            .register_fn("a", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let a = rt.start(tiny()).unwrap();
+        let b = rt.start(tiny()).unwrap();
+        assert_ne!(a.execution_id(), b.execution_id());
+        assert_eq!(a.wait().await, ExecutionState::Succeeded);
+        assert_eq!(b.wait().await, ExecutionState::Succeeded);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_mutex_poison_recovers_on_start() {
+        let rt = Runtime::builder()
+            .register_fn("a", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            let _g = rt.active.lock().unwrap();
+            panic!("poison runtime active set");
+        }));
+        assert!(poisoned.is_err());
+        let handle = rt.start(tiny()).expect("poisoned active set must recover");
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
     }
 }
