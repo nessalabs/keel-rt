@@ -18,7 +18,7 @@ src/domain/          rules. No tokio, no runtime, no std::net.
   time.rs            Timestamp value object
 
 src/runtime/         bundle. May import domain. Never imported by domain.
-  runtime.rs         Runtime / RuntimeBuilder / StartError
+  runtime.rs         Runtime / RuntimeBuilder / StartError / ResumeError
   scheduler.rs       event loop: apply → dispatch → persist → emit. No policy rules.
   spawn.rs           one tokio::spawn per execute; completions are Events
   park.rs            wait for Event or retry deadline (Clock)
@@ -49,7 +49,7 @@ or types.
 ```mermaid
 flowchart TB
   subgraph crate["keel-rt  lib.rs re-exports"]
-    ROOT["pub use: WorkflowDefinition Runtime RuntimeBuilder<br/>ExecutionHandle Execution Executor Policy<br/>StateStore EventSink Clock NodeOutcome ExecutionState"]
+    ROOT["pub use: WorkflowDefinition Runtime RuntimeBuilder<br/>ExecutionHandle Execution Executor Policy<br/>StateStore EventSink Clock NodeOutcome ExecutionState<br/>ResumeError"]
   end
 
   subgraph testing["src/testing/  feature test-util"]
@@ -81,7 +81,7 @@ flowchart TB
     Dout[outcome]
     Dpol[policy]
     Dsnap[snapshot]
-    Dstate["state/  mod.rs + apply.rs"]
+    Dstate["state/  mod.rs + apply.rs + restore.rs"]
     Dev[events]
     Dtime[time]
   end
@@ -115,9 +115,11 @@ classDiagram
   class Runtime {
     +start(WorkflowDefinition) Result~ExecutionHandle, StartError~
     +run(WorkflowDefinition) Result~ExecutionState, StartError~
+    +resume(ExecutionId) Result~ExecutionHandle, ResumeError~
   }
   class ExecutionHandle {
     <<must_use Drop cancels>>
+    +execution_id() ExecutionId
     +wait() ExecutionState
     +wait_stable() ExecutionState
     +cancel()
@@ -126,7 +128,9 @@ classDiagram
   }
   class Execution {
     +apply(ApplyCmd, Policy, Timestamp) Result~ApplyEffect, ApplyError~
+    +from_snapshot(WorkflowDefinition, ExecutionSnapshot) Result
     +snapshot() ExecutionSnapshot
+    +definition() WorkflowDefinition
   }
   class WorkflowDefinition {
     +builder(id) WorkflowDefinitionBuilder
@@ -146,6 +150,7 @@ classDiagram
     +put(ExecutionSnapshot)
     +get(ExecutionId)
     +persist(Execution)
+    +workflow_definition(ExecutionId)
   }
   class EventSink {
     <<trait>>
@@ -170,11 +175,17 @@ classDiagram
     +is_terminal() bool
     +is_successful_finish() bool
   }
+  class ResumeError {
+    <<enum>>
+    UnknownExecution AlreadyActive DefinitionMissing
+    Snapshot UnregisteredExecutors Store
+  }
   class FunctionExecutor
   FunctionExecutor ..|> Executor
   RuntimeBuilder --> Runtime : build
-  Runtime --> ExecutionHandle : start
-  Runtime ..> WorkflowDefinition : start/run
+  Runtime --> ExecutionHandle : start / resume
+  Runtime ..> WorkflowDefinition : start/run/resume
+  Runtime ..> ResumeError : resume
   Runtime --> Executor
   Runtime --> Policy
   Runtime --> StateStore
@@ -191,10 +202,16 @@ classDiagram
 ## Absences (structure tests hold these)
 
 - No Agent, HTTP, SQL, crawl, or HITL **types** in `src/`.
+- No `rusqlite` / `postgres` / `sqlx` in the kernel crate or `src/`.
 - No `utils` / `common` / `helpers` / `shared`.
 - No Runtime-wide FailSubtree or AllDone switch.
 - No test-only constructor that builds an illegal `WorkflowDefinition`.
 - Waiting is a node state. Retry delay is `Ready { runnable_at }`.
+- Snapshot is execution state. Definition is data (hash on the snapshot).
+
+File store lives in sibling `crates/keel-rt-sqlite`. It depends on `keel-rt`.
+The kernel does not depend on it. Cheap to delete: remove the crate, do not
+edit `scheduler.rs`.
 
 ## Where to change
 
@@ -205,7 +222,9 @@ classDiagram
 | Retry / reject Waiting                       | a `Policy` impl                            | readiness / park          |
 | User work / sleep                            | `Executor` / `ExecutionContext`            | `apply`                   |
 | Persist / dirty slots                        | `StateStore` / `MemoryStore`               | scheduler policy          |
-| Cancel, wait, resume, inspect                | `handle` + `inject::Event`                 | domain types              |
+| File-backed store                            | `crates/keel-rt-sqlite`                    | `scheduler.rs` / kernel `Cargo.toml` |
+| Snapshot resume / CAS                        | `restore.rs` + `Runtime::resume`           | event replay              |
+| Cancel, wait, token-resume, inspect          | `handle` + `inject::Event`                 | domain types              |
 | Ready-queue / permits / spawn                | `scheduler` + `spawn`                      | `Policy`                  |
 | Test graph construction                      | `WorkflowTest`                             | private scheduler fields  |
 | Snapshot walk order                          | `ExecutionSnapshot::iter_nodes`            | HashMap `.node(id)`       |
@@ -219,6 +238,10 @@ classDiagram
   and aborts by slot. Public `inputs_for` stays `HashMap<NodeId, Bytes>`.
 - **`Runtime::start` / `run`** — fail-fast if an executor id is missing, then
   spawn the apply loop. Drop `ExecutionHandle` cancels (`#[must_use]`).
+  `start` always creates a new `ExecutionId`.
+- **`Runtime::resume`** — load snapshot + definition, rebuild, re-dispatch
+  Ready nodes. Running-at-crash is re-invoked (at-least-once, keyed by
+  attempt). See `docs/adr/0004-resume-at-least-once.md`.
 - Default `OnFailure` = `FailExecution`. Default `Join` = `AllSucceeded`.
 
 ## Bounds
@@ -226,7 +249,7 @@ classDiagram
 - **Concurrency:** `RuntimeBuilder::concurrency` (permits). In-flight execute
   tasks ≤ that number.
 - **Apply inbox:** unbounded mpsc (ADR 0001). Producers are execute tasks +
-  handle ops; they must not block on apply.
+  handle ops; they must not block on apply. Persist is inline, not a queue.
 - **Retry:** `RetryPolicy::max_attempts` is the only retry bound. Delay is a
   deadline on `Ready`, not a wait state.
 - **Cancel hang:** `cancel_bound` is **wall** time (`tokio::time::sleep`), not
@@ -259,4 +282,4 @@ unpublished bench binary (`benches/jemalloc_compare`).
 `just coverage` / `./scripts/coverage.sh` runs `cargo llvm-cov` on the default
 suite (not `stress_100k`). CI fails unless kernel `src/` line coverage is
 **100%** (`coverage/BASELINE` allowlist is empty). `src/testing/` does not
-count. Architecture diagrams are unchanged (after = before; see this file).
+count. The sibling store crate is not kernel `src/`.

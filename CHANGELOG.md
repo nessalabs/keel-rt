@@ -1,5 +1,12 @@
 # Changelog
 
+## Phase 2 snapshot resume
+
+At-least-once resume from the last CAS snapshot. `Runtime::resume(&id)`.
+Running-at-crash is re-invoked (attempt + 1). File adapter is
+`keel-rt-sqlite` (sibling crate). ADR 0004. Kernel still has no Agent/HTTP
+and does not pick an allocator.
+
 ## Phase 1 freeze
 
 Local DAG kernel (`keel-rt`) is frozen on `main` at

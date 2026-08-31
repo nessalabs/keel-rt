@@ -1,4 +1,4 @@
-//! **Keel** runtime (`keel-rt`): small DAG workflow execution kernel (Phase 1).
+//! **Keel** runtime (`keel-rt`): small DAG workflow execution kernel.
 //!
 //! The runtime is a **bundle** (scheduler + optional store/sink + handle).
 //! The scheduler does not know resource types. Drivers only wake. This is a
@@ -14,6 +14,7 @@
 //!
 //! Consumer path: [`WorkflowDefinition::builder`] →
 //! [`RuntimeBuilder::register_fn`] → [`Runtime::run`] / [`Runtime::start`].
+//! After process death, [`Runtime::resume`] loads the snapshot (at-least-once).
 //! Use [`ExecutionState::is_successful_finish`] (not `== Succeeded`) so
 //! FailSubtree [`Completed`](ExecutionState::Completed) counts as ok.
 //!
