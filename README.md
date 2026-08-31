@@ -53,9 +53,10 @@ in-flight observability (Running holds a permit; Waiting does not).
 ## Allocator
 
 This crate does not pick an allocator and has no `jemalloc` feature.
-See [`benches/JEMALLOC.md`](benches/JEMALLOC.md) for a sys vs jemalloc
-comparison (jemalloc only in an unpublished bench binary). Recommendation
-for production binaries follows those numbers.
+On Phase 1 `current_thread`, jemalloc vs the system allocator was **noise**
+on this machine (single-digit, sign flipped across runs) — **do not
+recommend it** for production binaries from those numbers. Details:
+[`benches/JEMALLOC.md`](benches/JEMALLOC.md).
 
 ## Build and test
 

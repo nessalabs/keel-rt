@@ -17,7 +17,8 @@
 //! Use [`ExecutionState::is_successful_finish`] (not `== Succeeded`) so
 //! FailSubtree [`Completed`](ExecutionState::Completed) counts as ok.
 //!
-//! This crate does not pick an allocator. See `benches/JEMALLOC.md`.
+//! This crate does not pick an allocator and has no `jemalloc` feature.
+//! See `benches/JEMALLOC.md` (jemalloc was not a stable win on current_thread).
 
 pub(crate) mod domain;
 pub(crate) mod runtime;

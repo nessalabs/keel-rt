@@ -250,8 +250,9 @@ Numbers live in `benches/BASELINE.md`. A hot-path change that regresses those
 medians is a bug: fix or revert and ADR.
 
 This crate does not pick an allocator and has no `jemalloc` feature.
-See `benches/JEMALLOC.md` (jemalloc lives only in a separate unpublished
-bench binary).
+See `benches/JEMALLOC.md` — jemalloc vs sys on `current_thread` was noise;
+do not recommend it from those numbers. Jemalloc lives only in a separate
+unpublished bench binary (`benches/jemalloc_compare`).
 
 ## Coverage gate
 

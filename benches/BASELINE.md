@@ -6,6 +6,7 @@ Median of 7 iterations unless noted.
 
 Allocator experiment (not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
 This crate does not pick an allocator and has no `jemalloc` feature.
+current_thread sys vs jemalloc was noise — not recommended.
 
 ## RAII re-measure (2026-08-31)
 
