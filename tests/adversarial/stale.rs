@@ -75,7 +75,7 @@ fn resume_wrong_node_wrong_execution_wrong_nonce() {
     )
     .unwrap();
 
-    let wrong_node = ResumeToken::issue(good.execution_id.clone(), NodeId::new("b"), 1);
+    let wrong_node = ResumeToken::issue(good.execution_id().clone(), NodeId::new("b"), 1);
     assert!(ex
         .apply(
             ApplyCmd::Resume {
@@ -99,7 +99,7 @@ fn resume_wrong_node_wrong_execution_wrong_nonce() {
         )
         .is_err());
 
-    let wrong_nonce = ResumeToken::issue(good.execution_id.clone(), NodeId::new("a"), 1);
+    let wrong_nonce = ResumeToken::issue(good.execution_id().clone(), NodeId::new("a"), 1);
     assert_ne!(wrong_nonce.nonce(), good.nonce());
     assert!(ex
         .apply(
