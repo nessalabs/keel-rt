@@ -6,8 +6,9 @@
 use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
-    ExecutionContext, ExecutionId, ExecutionState, Join, NodeId, NodeOutcome, NodeState,
-    OnFailure, Resume, ResumeError, RetryPolicy, Runtime, StateStore, WorkflowDefinition,
+    Execution, ExecutionContext, ExecutionId, ExecutionSnapshot, ExecutionState, Join, NodeId,
+    NodeOutcome, NodeState, OnFailure, Resume, ResumeError, RetryPolicy, Runtime, StateStore,
+    StoreError, WorkflowDefinition,
 };
 use keel_rt_sqlite::SqliteStore;
 use std::path::PathBuf;
@@ -1085,6 +1086,208 @@ fn incremental_persist_256_wide_succeeded_does_not_drop_pending() {
         assert_eq!(worker_runs.load(Ordering::SeqCst), 0);
         assert_eq!(hold_runs.load(Ordering::SeqCst), 1);
         std::mem::forget(handle);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+struct FailFirstTerminal {
+    inner: SqliteStore,
+    n: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl StateStore for FailFirstTerminal {
+    async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+        self.inner.put(snapshot).await
+    }
+    async fn get(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<ExecutionSnapshot>, StoreError> {
+        self.inner.get(id).await
+    }
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        if exec.state().is_terminal() {
+            let k = self.n.fetch_add(1, Ordering::SeqCst) + 1;
+            if k == 1 {
+                return Err(StoreError::Message("busy terminal".into()));
+            }
+        }
+        self.inner.persist(exec).await
+    }
+    async fn workflow_definition(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<WorkflowDefinition>, StoreError> {
+        self.inner.workflow_definition(id).await
+    }
+}
+
+/// `wait()` Succeeded after a transient terminal persist Err used to leave the
+/// sqlite file Running (last_persisted advanced on Err; Shutdown did not flush).
+/// Resume then re-invoked a job the caller already observed as done.
+#[test]
+fn transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded() {
+    for fast in [false, true] {
+        let path = tmp();
+        let inner = if fast {
+            SqliteStore::open_fast(&path).unwrap()
+        } else {
+            SqliteStore::open(&path).unwrap()
+        };
+        let id = {
+            let store = FailFirstTerminal {
+                inner: inner.clone(),
+                n: std::sync::atomic::AtomicU32::new(0),
+            };
+            let rt = current_rt();
+            let id = rt.block_on(async {
+                let runtime = Runtime::builder()
+                    .store(store)
+                    .register_fn("a", |_c: ExecutionContext| async {
+                        NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+                    })
+                    .build();
+                let handle = runtime.start(
+                    WorkflowDefinition::builder("wf")
+                        .node("a", "a")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+                let id = handle.execution_id().clone();
+                assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+                drop(runtime);
+                tokio::time::timeout(BOUND, async {
+                    loop {
+                        if let Some(s) = inner.get(&id).await.unwrap() {
+                            if s.state == ExecutionState::Succeeded {
+                                return;
+                            }
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("Shutdown must flush Succeeded to sqlite after transient persist Err");
+                id
+            });
+            drop(rt);
+            id
+        };
+        let store = if fast {
+            SqliteStore::open_fast(&path).unwrap()
+        } else {
+            SqliteStore::open(&path).unwrap()
+        };
+        let rt = current_rt();
+        rt.block_on(async {
+            assert_eq!(
+                store.get(&id).await.unwrap().unwrap().state,
+                ExecutionState::Succeeded
+            );
+            let runtime = Runtime::builder()
+                .store(store)
+                .register_fn("a", |_c: ExecutionContext| async {
+                    panic!("succeeded must not re-run after shutdown flush")
+                })
+                .build();
+            let handle = runtime.resume(&id).await.unwrap();
+            assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        });
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+struct FailFirstCancel {
+    inner: SqliteStore,
+    n: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl StateStore for FailFirstCancel {
+    async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+        self.inner.put(snapshot).await
+    }
+    async fn get(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<ExecutionSnapshot>, StoreError> {
+        self.inner.get(id).await
+    }
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        if exec.state() == ExecutionState::Cancelled {
+            let k = self.n.fetch_add(1, Ordering::SeqCst) + 1;
+            if k == 1 {
+                return Err(StoreError::Message("busy cancel".into()));
+            }
+        }
+        self.inner.persist(exec).await
+    }
+    async fn workflow_definition(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<WorkflowDefinition>, StoreError> {
+        self.inner.workflow_definition(id).await
+    }
+}
+
+/// Drop-cancel persist Err once used to leave sqlite Running; resume re-invoked
+/// work the handle cancelled. Shutdown must flush Cancelled.
+#[test]
+fn transient_cancel_persist_err_shutdown_flushes_sqlite_cancelled() {
+    let path = tmp();
+    let inner = SqliteStore::open(&path).unwrap();
+    let id = {
+        let store = FailFirstCancel {
+            inner: inner.clone(),
+            n: std::sync::atomic::AtomicU32::new(0),
+        };
+        let rt = current_rt();
+        let id = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store)
+                .register(ScriptedExecutor::new("a").hang(false))
+                .build();
+            let handle = runtime.start(
+                WorkflowDefinition::builder("wf")
+                    .node("a", "a")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+            let id = handle.execution_id().clone();
+            wait_node(&inner, &id, "a", |s| matches!(s, NodeState::Running { .. })).await;
+            drop(handle);
+            tokio::time::timeout(BOUND, async {
+                loop {
+                    if let Some(s) = inner.get(&id).await.unwrap() {
+                        if s.state == ExecutionState::Cancelled {
+                            return;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancel persist retry on Shutdown");
+            drop(runtime);
+            id
+        });
+        drop(rt);
+        id
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store)
+            .register_fn("a", |_c: ExecutionContext| async {
+                panic!("cancelled must not re-invoke")
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Cancelled);
     });
     let _ = std::fs::remove_file(&path);
 }
