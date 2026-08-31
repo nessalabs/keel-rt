@@ -1,5 +1,6 @@
 use crate::domain::ids::ExecutionId;
 use crate::domain::snapshot::ExecutionSnapshot;
+use crate::domain::state::Execution;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,11 +21,21 @@ pub trait StateStore: Send + Sync {
     fn is_noop(&self) -> bool {
         false
     }
+
+    /// Persist the live aggregate. Default builds a full snapshot and `put`s it.
+    /// [`MemoryStore`] updates only dirty node slots after the first write.
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.put(&exec.snapshot()).await
+    }
+}
+
+struct Stored {
+    snap: ExecutionSnapshot,
 }
 
 #[derive(Clone, Default)]
 pub struct MemoryStore {
-    inner: Arc<Mutex<HashMap<ExecutionId, ExecutionSnapshot>>>,
+    inner: Arc<Mutex<HashMap<ExecutionId, Stored>>>,
 }
 
 impl MemoryStore {
@@ -36,15 +47,48 @@ impl MemoryStore {
 #[async_trait]
 impl StateStore for MemoryStore {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
-        self.inner
-            .lock()
-            .expect("memory store")
-            .insert(snapshot.execution_id.clone(), snapshot.clone());
+        self.inner.lock().expect("memory store").insert(
+            snapshot.execution_id.clone(),
+            Stored {
+                snap: snapshot.clone(),
+            },
+        );
         Ok(())
     }
 
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
-        Ok(self.inner.lock().expect("memory store").get(id).cloned())
+        Ok(self
+            .inner
+            .lock()
+            .expect("memory store")
+            .get(id)
+            .map(|s| s.snap.clone()))
+    }
+
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        let mut g = self.inner.lock().expect("memory store");
+        match g.get_mut(exec.id()) {
+            Some(stored) => {
+                stored.snap.revision = exec.revision();
+                stored.snap.state = exec.state();
+                for slot in exec.dirty_slots() {
+                    let id = exec.node_id_at(*slot).clone();
+                    stored
+                        .snap
+                        .nodes
+                        .insert(id, exec.node_snapshot_at(*slot));
+                }
+            }
+            None => {
+                g.insert(
+                    exec.id().clone(),
+                    Stored {
+                        snap: exec.snapshot(),
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -78,5 +122,9 @@ impl StateStore for Arc<dyn StateStore> {
 
     fn is_noop(&self) -> bool {
         (**self).is_noop()
+    }
+
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        (**self).persist(exec).await
     }
 }

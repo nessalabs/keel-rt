@@ -2,7 +2,7 @@
 
 #[test]
 fn scheduler_has_no_foreign_resource_types() {
-    let src = include_str!("../src/runtime/scheduler.rs");
+    let src = include_str!("../../src/runtime/scheduler.rs");
     assert!(
         !src.contains("Agent"),
         "scheduler.rs must not mention Agent"

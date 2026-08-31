@@ -93,6 +93,18 @@ pub struct Execution {
     pub(crate) revision: u64,
     pub(crate) cancelled: bool,
     next_deadline: Option<(Timestamp, NodeSlot)>,
+    /// Slots mutated since last persist / snapshot cache flush.
+    dirty: Vec<u8>,
+    dirty_list: Vec<NodeSlot>,
+    #[allow(dead_code)]
+    n_pending: u32,
+    n_ready: u32,
+    n_running: u32,
+    n_waiting: u32,
+    n_succeeded: u32,
+    n_failed: u32,
+    #[allow(dead_code)]
+    n_cancelled: u32,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -132,7 +144,10 @@ pub struct ApplyEffect {
 
 impl Execution {
     pub fn new(definition: WorkflowDefinition) -> Self {
-        let nodes = (0..definition.len()).map(|_| NodeRuntime::default()).collect();
+        let n = definition.len();
+        let nodes = (0..n).map(|_| NodeRuntime::default()).collect();
+        let dirty = vec![1u8; n];
+        let dirty_list: Vec<NodeSlot> = (0..n).map(NodeSlot).collect();
         Self {
             id: ExecutionId::new(),
             workflow_id: definition.id.clone(),
@@ -142,6 +157,15 @@ impl Execution {
             revision: 0,
             cancelled: false,
             next_deadline: None,
+            dirty,
+            dirty_list,
+            n_pending: n as u32,
+            n_ready: 0,
+            n_running: 0,
+            n_waiting: 0,
+            n_succeeded: 0,
+            n_failed: 0,
+            n_cancelled: 0,
         }
     }
 
@@ -172,6 +196,77 @@ impl Execution {
             .unwrap_or(false)
     }
 
+    pub(crate) fn is_ready_now_slot(&self, slot: NodeSlot, now: Timestamp) -> bool {
+        self.nodes
+            .get(slot.0)
+            .map(|n| n.state.is_ready_now(now))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn mark_dirty(&mut self, slot: NodeSlot) {
+        if self.dirty[slot.0] == 0 {
+            self.dirty[slot.0] = 1;
+            self.dirty_list.push(slot);
+        }
+    }
+
+    pub(crate) fn dirty_slots(&self) -> &[NodeSlot] {
+        &self.dirty_list
+    }
+
+    pub(crate) fn clear_dirty(&mut self) {
+        for s in self.dirty_list.drain(..) {
+            self.dirty[s.0] = 0;
+        }
+    }
+
+    pub(crate) fn node_snapshot_at(&self, slot: NodeSlot) -> NodeSnapshot {
+        let n = &self.nodes[slot.0];
+        NodeSnapshot {
+            state: n.state.clone(),
+            output: n.output.clone(),
+            attempt: n.attempt,
+            resume_token: n.resume_token.clone(),
+            last_error: n.last_error.clone(),
+        }
+    }
+
+    pub(crate) fn node_id_at(&self, slot: NodeSlot) -> &NodeId {
+        self.definition.id_at(slot)
+    }
+
+    fn set_state(&mut self, slot: NodeSlot, new: NodeState) {
+        let new_kind = count_kind(&new);
+        let old = std::mem::replace(&mut self.nodes[slot.0].state, new);
+        self.dec_count(&old);
+        self.inc_kind(new_kind);
+        self.mark_dirty(slot);
+    }
+
+    fn dec_count(&mut self, s: &NodeState) {
+        match s {
+            NodeState::Pending => self.n_pending -= 1,
+            NodeState::Ready { .. } => self.n_ready -= 1,
+            NodeState::Running { .. } => self.n_running -= 1,
+            NodeState::Waiting { .. } => self.n_waiting -= 1,
+            NodeState::Succeeded => self.n_succeeded -= 1,
+            NodeState::Failed | NodeState::TimedOut => self.n_failed -= 1,
+            NodeState::Cancelled => self.n_cancelled -= 1,
+        }
+    }
+
+    fn inc_kind(&mut self, kind: u8) {
+        match kind {
+            0 => self.n_pending += 1,
+            1 => self.n_ready += 1,
+            2 => self.n_running += 1,
+            3 => self.n_waiting += 1,
+            4 => self.n_succeeded += 1,
+            5 => self.n_failed += 1,
+            _ => self.n_cancelled += 1,
+        }
+    }
+
     pub fn executor_id(&self, id: &NodeId) -> Option<&ExecutorId> {
         let slot = self.definition.slot(id)?;
         Some(self.definition.executor_at(slot))
@@ -181,8 +276,16 @@ impl Execution {
         self.node(id).map(|n| n.attempt)
     }
 
+    pub(crate) fn attempt_at(&self, slot: NodeSlot) -> u32 {
+        self.nodes[slot.0].attempt
+    }
+
     pub fn resume_token(&self, id: &NodeId) -> Option<ResumeToken> {
         self.node(id).and_then(|n| n.resume_token.clone())
+    }
+
+    pub(crate) fn resume_token_at(&self, slot: NodeSlot) -> Option<ResumeToken> {
+        self.nodes[slot.0].resume_token.clone()
     }
 
     /// Next retry deadline. Maintained when a node enters `Ready { runnable_at: Some }`.
@@ -195,8 +298,13 @@ impl Execution {
         let Some(slot) = self.definition.slot(id) else {
             return HashMap::new();
         };
-        let mut out = HashMap::new();
-        for pred in self.definition.pred_slots(slot) {
+        self.inputs_for_slot(slot)
+    }
+
+    pub(crate) fn inputs_for_slot(&self, slot: NodeSlot) -> HashMap<NodeId, Bytes> {
+        let preds = self.definition.pred_slots(slot);
+        let mut out = HashMap::with_capacity(preds.len());
+        for pred in preds {
             let n = &self.nodes[pred.0];
             if matches!(n.state, NodeState::Succeeded) {
                 if let Some(bytes) = &n.output {
@@ -293,7 +401,7 @@ impl Execution {
                 if !due {
                     return Ok(effect);
                 }
-                self.nodes[slot.0].state = NodeState::Ready { runnable_at: None };
+                self.set_state(slot, NodeState::Ready { runnable_at: None });
                 self.clear_deadline_if(slot);
                 effect.newly_runnable.push(node_id);
                 effect.changed = true;
@@ -316,11 +424,11 @@ impl Execution {
 
     fn mark_ready(&mut self, slot: NodeSlot, runnable_at: Option<Timestamp>, effect: &mut ApplyEffect) {
         use crate::domain::events::DomainEvent;
-        let n = &mut self.nodes[slot.0];
-        if n.state.is_terminal() || matches!(n.state, NodeState::Running { .. }) {
+        let st = &self.nodes[slot.0].state;
+        if st.is_terminal() || matches!(st, NodeState::Running { .. }) {
             return;
         }
-        n.state = NodeState::Ready { runnable_at };
+        self.set_state(slot, NodeState::Ready { runnable_at });
         let id = self.definition.id_at(slot).clone();
         effect.events.push(DomainEvent::NodeReady {
             node_id: id.clone(),
@@ -339,8 +447,7 @@ impl Execution {
             .definition
             .slot(id)
             .ok_or_else(|| ApplyError::UnknownNode(id.clone()))?;
-        let n = &mut self.nodes[slot.0];
-        match &n.state {
+        match &self.nodes[slot.0].state {
             NodeState::Ready { runnable_at } if runnable_at.is_none() => {}
             other => {
                 return Err(ApplyError::Illegal(format!(
@@ -348,14 +455,18 @@ impl Execution {
                 )));
             }
         }
-        if !n.reinvoke {
-            n.attempt = n.attempt.saturating_add(1);
-        }
-        n.reinvoke = false;
-        let attempt = n.attempt;
-        let token = ResumeToken::issue(self.id.clone(), id.clone(), attempt);
-        n.resume_token = Some(token);
-        n.state = NodeState::Running { attempt };
+        let attempt = {
+            let n = &mut self.nodes[slot.0];
+            if !n.reinvoke {
+                n.attempt = n.attempt.saturating_add(1);
+            }
+            n.reinvoke = false;
+            let attempt = n.attempt;
+            let token = ResumeToken::issue(self.id.clone(), id.clone(), attempt);
+            n.resume_token = Some(token);
+            attempt
+        };
+        self.set_state(slot, NodeState::Running { attempt });
         effect.events.push(DomainEvent::NodeStarted {
             node_id: id.clone(),
             attempt,
@@ -431,27 +542,35 @@ impl Execution {
 
         match (&outcome, decision) {
             (NodeOutcome::Succeeded(bytes), PolicyDecision::Accept) => {
-                let n = &mut self.nodes[slot.0];
-                n.output = Some(bytes.clone());
-                n.last_outcome = Some(outcome.clone());
-                n.state = NodeState::Succeeded;
-                n.last_error = None;
+                {
+                    let n = &mut self.nodes[slot.0];
+                    n.output = Some(bytes.clone());
+                    n.last_outcome = Some(outcome.clone());
+                    n.last_error = None;
+                }
+                self.set_state(slot, NodeState::Succeeded);
                 effect.events.push(DomainEvent::NodeSucceeded {
                     node_id: id.clone(),
                 });
                 self.ready_successors(slot, effect);
             }
             (NodeOutcome::Waiting { token }, PolicyDecision::Accept) => {
-                let n = &mut self.nodes[slot.0];
-                let token = n.resume_token.clone().unwrap_or_else(|| token.clone());
-                n.state = NodeState::Waiting {
-                    token: token.clone(),
-                    attempt,
+                let token = {
+                    let n = &mut self.nodes[slot.0];
+                    let token = n.resume_token.clone().unwrap_or_else(|| token.clone());
+                    n.resume_token = Some(token.clone());
+                    n.last_outcome = Some(NodeOutcome::Waiting {
+                        token: token.clone(),
+                    });
+                    token
                 };
-                n.resume_token = Some(token.clone());
-                n.last_outcome = Some(NodeOutcome::Waiting {
-                    token: token.clone(),
-                });
+                self.set_state(
+                    slot,
+                    NodeState::Waiting {
+                        token: token.clone(),
+                        attempt,
+                    },
+                );
                 effect.events.push(DomainEvent::NodeWaiting {
                     node_id: id.clone(),
                     token,
@@ -462,28 +581,32 @@ impl Execution {
                 self.fail_fast(effect);
             }
             (NodeOutcome::TimedOut, PolicyDecision::Accept) => {
-                let n = &mut self.nodes[slot.0];
-                n.state = NodeState::TimedOut;
-                n.last_error = Some(NodeError::new("timed out"));
-                n.last_outcome = Some(outcome);
+                {
+                    let n = &mut self.nodes[slot.0];
+                    n.last_error = Some(NodeError::new("timed out"));
+                    n.last_outcome = Some(outcome);
+                }
+                self.set_state(slot, NodeState::TimedOut);
                 effect.events.push(DomainEvent::NodeTimedOut {
                     node_id: id.clone(),
                 });
                 self.fail_fast(effect);
             }
             (NodeOutcome::Failed(_) | NodeOutcome::TimedOut, PolicyDecision::Retry { delay }) => {
-                let n = &mut self.nodes[slot.0];
-                n.last_error = match &outcome {
-                    NodeOutcome::Failed(e) => Some(e.clone()),
-                    _ => Some(NodeError::new("timed out")),
-                };
-                n.last_outcome = Some(outcome);
                 let at = if delay.is_zero() {
                     None
                 } else {
                     Some(now.saturating_add(delay))
                 };
-                n.state = NodeState::Ready { runnable_at: at };
+                {
+                    let n = &mut self.nodes[slot.0];
+                    n.last_error = match &outcome {
+                        NodeOutcome::Failed(e) => Some(e.clone()),
+                        _ => Some(NodeError::new("timed out")),
+                    };
+                    n.last_outcome = Some(outcome);
+                }
+                self.set_state(slot, NodeState::Ready { runnable_at: at });
                 effect.events.push(DomainEvent::NodeReady {
                     node_id: id.clone(),
                     runnable_at: at,
@@ -512,10 +635,12 @@ impl Execution {
 
     fn fail_node(&mut self, slot: NodeSlot, id: &NodeId, err: NodeError, effect: &mut ApplyEffect) {
         use crate::domain::events::DomainEvent;
-        let n = &mut self.nodes[slot.0];
-        n.state = NodeState::Failed;
-        n.last_error = Some(err.clone());
-        n.last_outcome = Some(NodeOutcome::Failed(err.clone()));
+        {
+            let n = &mut self.nodes[slot.0];
+            n.last_error = Some(err.clone());
+            n.last_outcome = Some(NodeOutcome::Failed(err.clone()));
+        }
+        self.set_state(slot, NodeState::Failed);
         self.clear_deadline_if(slot);
         effect.events.push(DomainEvent::NodeFailed {
             node_id: id.clone(),
@@ -533,7 +658,7 @@ impl Execution {
                 continue;
             }
             let running = matches!(self.nodes[i].state, NodeState::Running { .. });
-            self.nodes[i].state = NodeState::Cancelled;
+            self.set_state(NodeSlot(i), NodeState::Cancelled);
             let id = self.definition.id_at(NodeSlot(i)).clone();
             if running {
                 effect.to_abort.push(id.clone());
@@ -618,15 +743,18 @@ impl Execution {
 
         match resume {
             Resume::Complete(outcome) => {
-                self.nodes[slot.0].state = NodeState::Running {
-                    attempt: token.attempt,
-                };
+                self.set_state(
+                    slot,
+                    NodeState::Running {
+                        attempt: token.attempt,
+                    },
+                );
                 effect.changed = true;
                 self.apply_outcome(slot, &token.node_id, outcome, policy, now, effect)?;
             }
             Resume::Reinvoke => {
                 self.nodes[slot.0].reinvoke = true;
-                self.nodes[slot.0].state = NodeState::Ready { runnable_at: None };
+                self.set_state(slot, NodeState::Ready { runnable_at: None });
                 effect.newly_runnable.push(token.node_id);
                 effect.changed = true;
             }
@@ -642,7 +770,7 @@ impl Execution {
                 continue;
             }
             let running = matches!(self.nodes[i].state, NodeState::Running { .. });
-            self.nodes[i].state = NodeState::Cancelled;
+            self.set_state(NodeSlot(i), NodeState::Cancelled);
             let id = self.definition.id_at(NodeSlot(i)).clone();
             if running {
                 effect.to_abort.push(id.clone());
@@ -657,7 +785,7 @@ impl Execution {
         use crate::domain::events::DomainEvent;
         for i in 0..self.nodes.len() {
             if matches!(self.nodes[i].state, NodeState::Running { .. }) {
-                self.nodes[i].state = NodeState::Cancelled;
+                self.set_state(NodeSlot(i), NodeState::Cancelled);
                 let id = self.definition.id_at(NodeSlot(i)).clone();
                 effect.to_abort.push(id.clone());
                 effect.events.push(DomainEvent::NodeCancelled { node_id: id });
@@ -701,56 +829,15 @@ impl Execution {
     }
 
     fn derive_state(&self) -> ExecutionState {
-        let mut any_running = false;
-        let mut any_ready_now = false;
-        let mut any_ready_later = false;
-        let mut any_waiting = false;
-        let mut all_succeeded = true;
-        let mut any_failed = false;
-
-        for n in &self.nodes {
-            match &n.state {
-                NodeState::Running { .. } => {
-                    any_running = true;
-                    all_succeeded = false;
-                }
-                NodeState::Ready { runnable_at: None } => {
-                    any_ready_now = true;
-                    all_succeeded = false;
-                }
-                NodeState::Ready {
-                    runnable_at: Some(_),
-                } => {
-                    any_ready_later = true;
-                    all_succeeded = false;
-                }
-                NodeState::Waiting { .. } => {
-                    any_waiting = true;
-                    all_succeeded = false;
-                }
-                NodeState::Pending => {
-                    all_succeeded = false;
-                }
-                NodeState::Succeeded => {}
-                NodeState::Failed | NodeState::TimedOut => {
-                    any_failed = true;
-                    all_succeeded = false;
-                }
-                NodeState::Cancelled => {
-                    all_succeeded = false;
-                }
-            }
-        }
-
-        if any_failed {
+        if self.n_failed > 0 {
             ExecutionState::Failed
-        } else if all_succeeded {
+        } else if self.n_succeeded == self.nodes.len() as u32 {
             ExecutionState::Succeeded
         } else if self.cancelled {
             ExecutionState::Cancelled
-        } else if any_running || any_ready_now || any_ready_later {
+        } else if self.n_running > 0 || self.n_ready > 0 {
             ExecutionState::Running
-        } else if any_waiting {
+        } else if self.n_waiting > 0 {
             ExecutionState::Waiting
         } else {
             self.state
@@ -786,6 +873,18 @@ impl Execution {
             }
         }
         self.state = next;
+    }
+}
+
+fn count_kind(s: &NodeState) -> u8 {
+    match s {
+        NodeState::Pending => 0,
+        NodeState::Ready { .. } => 1,
+        NodeState::Running { .. } => 2,
+        NodeState::Waiting { .. } => 3,
+        NodeState::Succeeded => 4,
+        NodeState::Failed | NodeState::TimedOut => 5,
+        NodeState::Cancelled => 6,
     }
 }
 

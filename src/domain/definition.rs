@@ -1,8 +1,6 @@
 use crate::domain::ids::{ExecutorId, NodeId, NodeSlot, WorkflowId};
-use petgraph::algo::is_cyclic_directed;
-use petgraph::graph::DiGraph;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 
 /// Phase 1 only: an edge is a hard AND-join predecessor.
@@ -164,42 +162,32 @@ impl WorkflowDefinitionBuilder {
             }
         }
 
-        let mut graph = DiGraph::new();
-        let mut index = HashMap::new();
-        let mut pg_ix = HashMap::new();
+        let mut index = HashMap::with_capacity(self.nodes.len());
         for (i, n) in self.nodes.iter().enumerate() {
-            let slot = NodeSlot(i);
-            index.insert(n.id.clone(), slot);
-            let ix = graph.add_node(n.id.clone());
-            pg_ix.insert(n.id.clone(), ix);
-        }
-
-        for e in &self.edges {
-            let from = pg_ix
-                .get(&e.from)
-                .ok_or_else(|| DefinitionError::DisconnectedNode(e.from.clone()))?;
-            let to = pg_ix
-                .get(&e.to)
-                .ok_or_else(|| DefinitionError::DisconnectedNode(e.to.clone()))?;
-            graph.add_edge(*from, *to, e.predicate.clone());
-        }
-
-        if is_cyclic_directed(&graph) {
-            return Err(DefinitionError::Cycle);
+            index.insert(n.id.clone(), NodeSlot(i));
         }
 
         let n = self.nodes.len();
         let mut preds = vec![Vec::new(); n];
         let mut succs = vec![Vec::new(); n];
         for e in &self.edges {
-            let from = index[&e.from];
-            let to = index[&e.to];
+            let from = *index
+                .get(&e.from)
+                .ok_or_else(|| DefinitionError::DisconnectedNode(e.from.clone()))?;
+            let to = *index
+                .get(&e.to)
+                .ok_or_else(|| DefinitionError::DisconnectedNode(e.to.clone()))?;
             if !succs[from.0].contains(&to) {
                 succs[from.0].push(to);
             }
             if !preds[to.0].contains(&from) {
                 preds[to.0].push(from);
             }
+        }
+
+        // Iterative Kahn topological count — no recursive DFS (deep DAGs).
+        if has_cycle(&preds, &succs) {
+            return Err(DefinitionError::Cycle);
         }
 
         let sources = (0..n)
@@ -217,6 +205,23 @@ impl WorkflowDefinitionBuilder {
             sources,
         })
     }
+}
+
+fn has_cycle(preds: &[Vec<NodeSlot>], succs: &[Vec<NodeSlot>]) -> bool {
+    let n = preds.len();
+    let mut indeg: Vec<usize> = preds.iter().map(|p| p.len()).collect();
+    let mut q: VecDeque<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut seen = 0usize;
+    while let Some(i) = q.pop_front() {
+        seen += 1;
+        for s in &succs[i] {
+            indeg[s.0] -= 1;
+            if indeg[s.0] == 0 {
+                q.push_back(s.0);
+            }
+        }
+    }
+    seen != n
 }
 
 #[cfg(test)]

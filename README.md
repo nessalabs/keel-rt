@@ -19,10 +19,22 @@ not belong in the kernel.
 ## Build and test
 
 ```bash
-cargo test
+cargo test -- --test-threads=1
 cargo test --features test-util
-cargo test --test stress -- --nocapture
 cargo clippy --lib -- -D warnings
+```
+
+### Regression packs
+
+`tests/adversarial/` is the attack / regression pack (concurrency, AND-join,
+stale completions, timers, panic isolation, definition edges, inspect, diamond
+repeat). `tests/stress.rs` is the size pack (wide 256, deep 128, cancel-under-load,
+plus kernel microbenches).
+
+```bash
+cargo test --test adversarial -- --test-threads=1
+cargo test --test stress -- --nocapture
+cargo test --test scenarios -- --test-threads=1
 ```
 
 ## Examples

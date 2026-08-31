@@ -2,18 +2,18 @@
 //! This module never awaits `execute()` and does not name resource types.
 
 use crate::domain::definition::WorkflowDefinition;
-use crate::domain::ids::NodeId;
+use crate::domain::ids::{NodeId, NodeSlot};
 use crate::domain::outcome::NodeOutcome;
 use crate::domain::policy::Policy;
 use crate::domain::state::{ApplyCmd, Execution, ExecutionState};
-use crate::runtime::executor::{ExecutionContext, ExecutorRegistry};
+use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry};
 use crate::runtime::inject::{Event, EventTx, JoinKind};
 use crate::runtime::park::{ChannelPark, Park};
 use crate::runtime::sink::EventSink;
 use crate::runtime::spawn::SpawnSet;
 use crate::runtime::store::StateStore;
 use crate::runtime::time::Clock;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -25,14 +25,14 @@ pub(crate) struct Scheduler {
     policy: Arc<dyn Policy>,
     store: Arc<dyn StateStore>,
     sink: Arc<dyn EventSink>,
-    registry: ExecutorRegistry,
     clock: Arc<dyn Clock>,
     park: ChannelPark,
     spawn: SpawnSet,
-    ready: VecDeque<NodeId>,
-    queued: HashSet<NodeId>,
+    ready: VecDeque<NodeSlot>,
+    queued: Vec<u8>,
     available: usize,
-    held: HashSet<NodeId>,
+    held: Vec<u8>,
+    executors: Vec<Option<Arc<dyn Executor>>>,
     cancel: CancellationToken,
     state_tx: watch::Sender<ExecutionState>,
     cancel_bound: Duration,
@@ -57,6 +57,10 @@ impl Scheduler {
         state_tx: watch::Sender<ExecutionState>,
         cancel_bound: Duration,
     ) -> Self {
+        let n = definition.len();
+        let executors: Vec<Option<Arc<dyn Executor>>> = (0..n)
+            .map(|i| registry.get(definition.executor_at(NodeSlot(i))))
+            .collect();
         let exec = Execution::new(definition);
         let _ = state_tx.send(exec.state());
         Self {
@@ -65,13 +69,13 @@ impl Scheduler {
             policy,
             store,
             sink,
-            registry,
             clock,
             park,
             ready: VecDeque::new(),
-            queued: HashSet::new(),
+            queued: vec![0u8; n],
             available: concurrency.max(1),
-            held: HashSet::new(),
+            held: vec![0u8; n],
+            executors,
             cancel,
             state_tx,
             cancel_bound,
@@ -205,7 +209,7 @@ impl Scheduler {
             }
         }
         for id in effect.newly_runnable {
-            self.enqueue(id);
+            self.enqueue_id(id);
         }
         for id in &effect.to_abort {
             self.release_permit(id);
@@ -217,14 +221,15 @@ impl Scheduler {
 
     fn dispatch(&mut self) {
         while self.available > 0 {
-            let Some(id) = self.ready.pop_front() else {
+            let Some(slot) = self.ready.pop_front() else {
                 break;
             };
-            self.queued.remove(&id);
+            self.queued[slot.0] = 0;
             let now = self.clock.now();
-            if !self.exec.is_ready_now(&id, now) {
+            if !self.exec.is_ready_now_slot(slot, now) {
                 continue;
             }
+            let id = self.exec.node_id_at(slot).clone();
             if self
                 .apply_cmd_result(ApplyCmd::StartNode { node_id: id.clone() })
                 .is_err()
@@ -232,8 +237,8 @@ impl Scheduler {
                 continue;
             }
             self.available -= 1;
-            self.held.insert(id.clone());
-            self.launch(&id);
+            self.held[slot.0] = 1;
+            self.launch_slot(slot, id);
         }
     }
 
@@ -244,27 +249,33 @@ impl Scheduler {
         if self.exec.revision() == self.last_persisted {
             return;
         }
-        let snap = self.exec.snapshot();
-        if let Err(e) = self.store.put(&snap).await {
+        if let Err(e) = self.store.persist(&self.exec).await {
             debug!(error = %e, "StateStore::put failed; in-memory state kept");
+        } else {
+            self.exec.clear_dirty();
         }
         self.last_persisted = self.exec.revision();
     }
 
-    fn enqueue(&mut self, id: NodeId) {
-        if self.queued.insert(id.clone()) {
-            self.ready.push_back(id);
+    fn enqueue_id(&mut self, id: NodeId) {
+        if let Some(slot) = self.exec.definition.slot(&id) {
+            self.enqueue_slot(slot);
         }
     }
 
-    fn launch(&mut self, id: &NodeId) {
-        let Some(executor_id) = self.exec.executor_id(id) else {
-            return;
-        };
-        let Some(exec) = self.registry.get(executor_id) else {
-            let attempt = self.exec.attempt(id).unwrap_or(1);
+    fn enqueue_slot(&mut self, slot: NodeSlot) {
+        if self.queued[slot.0] == 0 {
+            self.queued[slot.0] = 1;
+            self.ready.push_back(slot);
+        }
+    }
+
+    fn launch_slot(&mut self, slot: NodeSlot, id: NodeId) {
+        let Some(exec) = self.executors[slot.0].clone() else {
+            let executor_id = self.exec.definition.executor_at(slot);
+            let attempt = self.exec.attempt_at(slot);
             let _ = self.tx.send(Event::NodeFinished {
-                node_id: id.clone(),
+                node_id: id,
                 attempt,
                 result: Ok(NodeOutcome::failed(format!(
                     "no executor registered for {executor_id}"
@@ -274,13 +285,13 @@ impl Scheduler {
         };
         let token = self
             .exec
-            .resume_token(id)
+            .resume_token_at(slot)
             .expect("dispatch issues a resume token");
         let ctx = ExecutionContext {
             execution_id: self.exec.id().clone(),
-            node_id: id.clone(),
-            attempt: self.exec.attempt(id).unwrap_or(1),
-            inputs: self.exec.inputs_for(id),
+            node_id: id,
+            attempt: self.exec.attempt_at(slot),
+            inputs: self.exec.inputs_for_slot(slot),
             cancel: self.cancel.child_token(),
             resume_token: token,
             clock: self.clock.clone(),
@@ -289,8 +300,11 @@ impl Scheduler {
     }
 
     fn release_permit(&mut self, id: &NodeId) {
-        if self.held.remove(id) {
-            self.available += 1;
+        if let Some(slot) = self.exec.definition.slot(id) {
+            if self.held[slot.0] == 1 {
+                self.held[slot.0] = 0;
+                self.available += 1;
+            }
         }
     }
 

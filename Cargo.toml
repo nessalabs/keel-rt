@@ -15,7 +15,6 @@ test-util = []
 [dependencies]
 async-trait = "0.1"
 bytes = { version = "1.9", features = ["serde"] }
-petgraph = "0.6.5"
 serde = { version = "1.0.216", features = ["derive"] }
 serde_json = "1.0.134"
 thiserror = "2.0.9"
