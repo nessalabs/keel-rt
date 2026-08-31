@@ -305,6 +305,7 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "two_runtimes_same_file_are_not_fenced",
         "crash_after_terminal_cas_before_emit_keeps_terminal",
         "resume_256_wide_snapshot_within_bound",
+        "transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }

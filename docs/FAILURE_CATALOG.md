@@ -145,6 +145,7 @@ Dropping the handle is pinned by `dropping_execution_handle_cancels_graph_not_de
 | Store persist panic | in-memory Succeeded; no DomainEvent | `persist_panic_does_not_kill_execution` / `persist_panic_after_write_keeps_terminal_and_does_not_emit` | catch_unwind; no emit |
 | Store persist `Err` (mid-apply) | in-memory Succeeded; no DomainEvent | `failing_store_put_does_not_roll_back_in_memory` / `failing_store_every_put_diamond_still_succeeds` | log + skip emit |
 | Store persist `Err` on **terminal** write | in-memory Succeeded; terminal persist attempted; no emit | **gap-closed-by:** `store_error_on_terminal_write_keeps_in_memory_succeeded` | skip emit; no rollback |
+| Transient persist `Err` of terminal / cancel, then clean Shutdown | store matches `wait` / Drop (Succeeded / Cancelled); resume does not re-invoke | **gap-closed-by:** `transient_terminal_persist_err_shutdown_flushes_succeeded` `transient_cancel_persist_err_shutdown_flushes_cancelled` | do not advance `last_persisted` on Err; Shutdown `persist_then_emit` |
 | MemoryStore mutex poison | next persist recovers | `poisoned_mutex_recovers_on_next_persist` | `into_inner` |
 | Clock `now` panic (scheduler death) | inspect stopped snapshot; wait `Cancelled` | `panicking_clock_inspect_is_stopped_and_wait_is_cancelled` | Cancelled |
 

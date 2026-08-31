@@ -1,5 +1,13 @@
 # Changelog
 
+## Shutdown flushes a transient last persist (`chaos/load-p2`)
+
+`wait()` / Drop-cancel used to leave sqlite at **Running** when the terminal
+or Cancel persist returned `Err` once (`last_persisted` advanced on failure;
+Shutdown did not persist). Resume re-invoked work the caller already saw as
+Succeeded or Cancelled. Fix: persist `Ok` only advances `last_persisted`;
+Shutdown retries `persist_then_emit`. Fail-fast / AND-join unchanged.
+
 ## Standing sqlite chaos pack (`chaos/load-p2`)
 
 `crates/keel-rt-sqlite/tests/chaos.rs` is the standing breaker: thousands of

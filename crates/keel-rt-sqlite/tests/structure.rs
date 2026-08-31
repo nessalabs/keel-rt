@@ -42,6 +42,7 @@ fn chaos_log_names_the_standing_pack() {
         "and_join_1pm_waiting_4pm_delay_crash_resume",
         "drop_handle_mid_persist_cancels_not_succeed",
         "two_runtimes_diamond_no_silent_wrong_terminal",
+        "transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded",
     ] {
         assert!(log.contains(name), "CHAOS_LOG missing {name}");
     }

@@ -1,67 +1,104 @@
 # Sqlite chaos log (standing breaker)
 
-Standing attack log against **one local sqlite file**. Fail-fast
-(`OnFailure::FailExecution`) and AND-join (`Join::AllSucceeded`) stay the
-library defaults. Two `Runtime`s on one file are **unfenced** (ADR 0004) —
-hunt silent wrong terminals, not Phase 7 leases.
+Standing attack log against **one local sqlite file**. Fail-fast and AND-join
+stay the library defaults. Two `Runtime`s on one file are unfenced (ADR 0004).
 
-When an attack **breaks**: fix production + a named test. Do not weaken
-fail-fast or AND-join. Kernel `src/` is not touched here (adapter tests only).
+When an attack **breaks**: fix production + a named test. A green load pack
+is not a hunt.
 
-When it **holds**: this file, attack → test name, numbers.
+## Defect: persist `Err` treated as durable; Shutdown did not flush
 
-Pack: `cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture`
-(CI job `chaos-sqlite`, `just chaos-sqlite`). Not coverage.
+**Broke.** Kernel `src/runtime/scheduler.rs`. Named tests (failing before the
+fix, then kept):
 
-The 50-diamond start-crash-resume loop is start/drop bound (~−32% vs a naive
-headline). Sqlite-bound proof is large-snapshot resume (idle and under
-concurrent `start` on the same file).
+- `transient_terminal_persist_err_shutdown_flushes_succeeded` (catalog / coverage)
+- `transient_cancel_persist_err_shutdown_flushes_cancelled`
+- `transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded` (`open` and `open_fast`)
+- `transient_cancel_persist_err_shutdown_flushes_sqlite_cancelled`
 
-## This pass (debug, this machine)
+### Mechanism
 
-**Broke:** nothing. No production sqlite/kernel change.
+`persist_snapshot` on `Ok(Err(_))` / persist panic set `last_persisted =
+exec.revision()` anyway, and `Event::Shutdown` returned without persisting.
 
-**Held:** every named attack below. Join-once, fail-fast, and Cancelled-vs-Succeeded
-invariants stayed honest.
+`apply` sends the watch (`wait` / `inspect`) **before** persist. `persist_then_emit`
+skips the sink on persist `Err` (that half was already correct). The last
+apply of a run is terminal Succeeded/Failed/Cancelled, or Drop-cancel. There
+is no later `NodeFinished` to carry dirty rows forward. Treating persist `Err`
+as “already persisted” meant Shutdown saw `revision == last_persisted` and
+skipped the retry.
 
-| Attack | Result | Test | Number |
-|---|---|---|---|
-| 2000 sequential 1-node jobs, one file; resume last | held | `two_thousand_short_jobs_one_file` | **2.690 s** (bound 30 s) |
-| 256-wide AND-join, hang one worker, crash, resume; join once | held | `wide_256_and_join_crash_resume` | join runs = 1 |
-| 256-wide Ready resume idle vs under 32 concurrent starts (sqlite-bound) | held | `wide_256_resume_under_concurrent_starts_is_sqlite_bound` | idle **474 ms**; +32 starts **473 ms** (bound 15 s). Concurrent 1-node starts overlap the snapshot resume; this is not the 50-diamond start/drop loop. |
-| 2k-wide Ready snapshot crash/reopen/resume; join once | held | `wide_2k_and_join_crash_resume_of_ready` | **15.993 s** (bound 120 s). Same path as `resume_2k_wide_snapshot_debug_within_bound`. Live hang-one-of-2k is start/drop bound; not used. |
-| Two OS threads: 256-wide resume vs start storm; no panic; no silent wrong terminal | held | `two_threads_wide_resume_and_starts_no_wrong_terminal` | — |
-| 8 diamonds, retry then HITL Waiting, crash, reverse-order token resume | held | `diamond_farm_retry_hitl_shuffled_resume` | writer runs = 8 |
-| Burst 32-wide / idle Waiting gate / crash / resume / wave B | held | `burst_idle_burst_crash_resume_sqlite` | wave B = 32 after token; 0 before |
-| 64 KiB + 1-byte payloads, hang, crash, AND-join | held | `mixed_fat_and_tiny_payloads_crash_resume` | bytes round-trip |
-| Start-crash-resume storm (24 mixed 1-node/diamond), WAL after terminals | held | `start_crash_resume_storm_one_file` | **150 ms**, WAL **0** (TRUNCATE on terminal; bound 20 s / 8 MiB) |
-| 1pm Waiting + 4pm delay (`FakeClock`), crash, token then clock; AND-join writer once | held | `and_join_1pm_waiting_4pm_delay_crash_resume` | writer = 1 after 4pm, 0 at 1pm |
-| Drop handle mid persist of Cancel (gated yield) | held | `drop_handle_mid_persist_cancels_not_succeed` | file Cancelled; resume does not succeed |
-| Executor panic; sqlite resume stays Failed | held | `executor_panic_sqlite_resume_stays_failed` | Failed |
-| Sink panic after sqlite persist; snapshot still Succeeded | held | `sink_panic_during_sqlite_persist_still_durable` | Succeeded |
-| Persist panics after COMMIT of terminal; file keeps Succeeded | held | `persist_panic_after_sqlite_commit_keeps_succeeded` | Succeeded; executor not re-run |
-| Policy `decide` panic fail-fast; sqlite resume stays Failed | held | `policy_panic_during_sqlite_put_stays_failed` | Failed; no resurrect |
-| Two Runtimes, one file, same diamond; unfenced; no writer Succeeded with live pred | held | `two_runtimes_diamond_no_silent_wrong_terminal` | snapshot restores; terminal |
+Sqlite `SQLITE_BUSY` / a one-shot wrapper `Err` on the terminal write is the
+same shape: COMMIT did not happen, watch already said Succeeded/Cancelled,
+process then does a **clean** Drop (`wait` consumes the handle so Drop is
+Shutdown only, not Cancel). File still Running. `Runtime::resume` restores
+Running as Ready and re-invokes.
 
-## Already proven (catalog) — still un-weakened
+### Preconditions
 
-These attacks were already in `docs/RESUME_CATALOG.md` / `keel-rt-sqlite` lib
-tests. This pass did not drop them.
+1. At least one persist of the execution already succeeded (Running is in the
+   file).
+2. The **next** persist is the last apply (terminal or Cancel) and returns
+   `Err` (or panics before COMMIT).
+3. Caller observes in-memory terminal via `wait` / `wait_stable` / inspect.
+4. Clean Drop of the handle/runtime (Shutdown), not `mem::forget` crash.
+
+### Blast radius
+
+- `wait()` returned **Succeeded**, resume re-ran the executor (duplicate
+  side effects; at-least-once of a job the product already treated as done).
+- Drop-cancel returned **Cancelled** in-memory, file stayed **Running**,
+  resume resurrected work the handle cancelled.
+- Fail-fast / AND-join unchanged. Live-process “in-memory wins” when persist
+  **never** succeeds is still Phase 1
+  (`store_error_on_terminal_write_keeps_in_memory_succeeded`).
+
+### Fix
+
+- Advance `last_persisted` only on persist `Ok(())`.
+- `Event::Shutdown` calls `persist_then_emit` after aborting execute tasks.
+
+Process kill (`mem::forget` + drop tokio) still does not flush — that is
+crash-at-Running and stays at-least-once per ADR 0004 / the resume catalog.
+
+## Hunt refutations (from the code, not a passing stress table)
+
+| Suspicion | Verdict | Why it cannot happen / what it is |
+|---|---|---|
+| Dirty set incomplete (`runnable_at`, token, attempt) | **impossible without `set_state` skip** | Every node mutation that must hit the file goes through `set_state` → `mark_dirty`, or mutates fields then `set_state` on that slot (`dispatch_node` attempt/token, retry `last_error`, Waiting token). `remain[]` is **not** persisted; `from_snapshot` rebuilds it from definition join + node states (`remain_for`). |
+| `Join::AllDone` vs `AllSucceeded` restored wrong | **impossible if definition bytes match** | Join lives on `WorkflowDefinition`, stored beside the snapshot (`INSERT OR IGNORE` by `content_hash`). Restore uses `definition.join_at`, not the snapshot. Hash mismatch is `DefinitionHashMismatch`. Same hash ⇒ same `durable_bytes` (joins included). |
+| Persist-before-announce lie (sink) | **held** | `persist_then_emit` takes events, persist, emit only on `Ok`. Catalog: `persist_succeeds_before_execution_succeeded_is_emitted`. **Watch** still updates in `apply_cmd_result` before persist (live `wait` can return before the file). After this fix, **clean Shutdown** retries so the file catches up when persist can succeed. |
+| `AlreadyActive` TOCTOU two apply tasks | **impossible on one Runtime** | `claim_active` is `HashSet::insert` under the mutex **before** `store.get` / spawn. Second `resume` gets `AlreadyActive`. Failed `spawn_resume` drops `ActiveGuard` and unregisters. Two Runtimes are the documented no-fence. |
+| WAL TRUNCATE vs in-flight `put` | **same connection, after COMMIT** | `checkpoint_wal` runs only if `committed && terminal` on that connection, `debug_assert!(is_autocommit)`. Another `SqliteStore` is another connection; `TRUNCATE` of in-flight frames is sqlite’s busy/locked, mapped to `StoreError`, not an empty resume (`truncated_wal_does_not_invent_a_terminal`). |
+| Crash between Running persist and cancel persist | **documented at-least-once** | Catalog: crash while Running re-invokes. Drop is Cancel **if Shutdown/Cancel persist**. A **process kill** before cancel persist leaves Running — not a Drop-cancel. The bug above was clean Drop + persist `Err`, not crash. |
+| Attempt not bumped on sqlite resume of Running | **impossible** | `from_snapshot` converts Running → Ready with `reinvoke: false`; `dispatch_node` does `attempt += 1`. Stale `FinishNode` for attempt 1 is a no-op (`finish_node` match). `crash_during_b_running_reinvokes_b_not_a` asserts attempt 2. |
+| Resume with a different definition, same hash | **fail-closed or identical DAG** | Non-empty `definition_hash` must equal `content_hash()`. Collision of SHA body is identical `durable_bytes`. Empty hash is only `Default` / unhashed; sqlite persist always writes `content_hash()`. |
+| Clock: SystemClock after FakeClock deadlines | **caller clock port** | `runnable_at` is an opaque `Timestamp`. Resume uses the **new** Runtime’s `Clock`. Mixing FakeClock(0) deadlines with `SystemClock` fires immediately (`at <= now`). Not a sqlite restore bug; do not mix clocks. |
+| Id serde `/` `.` unicode | **round-trip as TEXT** | `NodeId` / `ExecutionId` serialize as strings; sqlite binds `?1` TEXT. `ExecutionId::parse` rejects only empty. No SQL concatenation. |
+| First persist full, second dirty, execution-level Waiting/Failed lost | **meta always written** | Incremental persist `upsert_execution_meta` writes `exec.state()` whenever `found < exec.revision()`. Execution-level change always bumps revision (`apply` if `effect.changed`). |
+| `open_fast` vs `open` hiding FULL bugs | **same `persist_exec`** | Only `PRAGMA synchronous` differs. Defect tests run both opens. |
+| Permit leak after resume Waiting then Complete | **Waiting never holds a permit** | `NodeFinished` `release_permit_slot` before apply; Waiting is a finished execute. Restore `held` is all zeros. Complete dispatches successors and takes permits. `waiting_releases_permit_sibling_runs`. |
+| Revision 0 reuse / u64 wrap | **impossible in practice** | `Execution::new` revision 0; first `apply` sets 1. Sqlite stores `revision as i64`; wrap would require `> i64::MAX` applies. Reopen loads stored revision; `from_snapshot` keeps it (or +1 if converting Running). Equal revision persist is a no-op, not a clobber. |
+
+## Previous load pack (not a hunt)
+
+Those tests still exist (`just chaos-sqlite`). They did not find this defect.
 
 | Attack | Test |
 |---|---|
-| `SQLITE_BUSY` / locked file is typed, not a panic | `locked_file_is_typed_error_not_panic` `persist_under_lock_returns_within_busy_bound` `concurrent_persist_two_executions_same_file_no_panic` |
-| Torn / truncated WAL does not invent a terminal | `truncated_wal_does_not_invent_a_terminal` `crash_mid_put_rolls_back_uncommitted_and_does_not_invent_terminal` |
-| WAL `TRUNCATE` only after COMMIT of a terminal | `checkpoint_runs_only_after_commit_of_terminal` `two_hundred_start_crash_resume_wal_bounded` |
-| Two Runtimes, one file, no process fence | `two_runtimes_same_file_are_not_fenced` |
-| Default `synchronous=FULL`; `open_fast` is NORMAL | `open_default_is_synchronous_full` `resume_256_wide_full_vs_normal` |
+| 2000 short jobs | `two_thousand_short_jobs_one_file` |
+| 256-wide AND-join crash/resume | `wide_256_and_join_crash_resume` |
+| 256-wide sqlite-bound resume + concurrent starts | `wide_256_resume_under_concurrent_starts_is_sqlite_bound` |
+| 2k-wide Ready crash/resume | `wide_2k_and_join_crash_resume_of_ready` |
+| Diamond farm retry+HITL | `diamond_farm_retry_hitl_shuffled_resume` |
+| Burst/idle/burst | `burst_idle_burst_crash_resume_sqlite` |
+| 1pm/4pm FakeClock AND-join | `and_join_1pm_waiting_4pm_delay_crash_resume` |
+| Drop handle mid-persist | `drop_handle_mid_persist_cancels_not_succeed` |
+| Two Runtimes one diamond | `two_runtimes_diamond_no_silent_wrong_terminal` |
 
-## Rules for the next loop
+## Rules
 
-1. Add a named attack, run it, record hold/break + a number.
-2. If it breaks: production fix in `keel-rt-sqlite` (or kernel, with 100%
-   `src/` coverage). Do not donate fail-fast or AND-join.
-3. No HTTP/Agent in kernel. No persist queue (ADR 0001). Failpoints stay out
-   of the scheduler (ADR 0003). `PersistGate` is test-only.
-4. Crash recipe stays `mem::forget(handle)` + drop Runtime + drop tokio +
-   reopen file. Ban `mem::forget` in kernel `src/`.
+1. Construct the interleaving, write a test you expect to fail, then fix or
+   refute from the code.
+2. Do not weaken fail-fast or AND-join.
+3. Kernel `src/` changes: coverage 100%. No HTTP/Agent. No persist queue.
