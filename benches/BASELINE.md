@@ -4,6 +4,23 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Hunt re-measure (2026-08-31)
+
+Tests + catalog only. No scheduler / apply / persist change. Gate: no median
+>10% worse than the previous “Failure-catalog re-measure” column.
+
+First pass ran beside `cargo llvm-cov` (`diamond_10k` 164.237 ms, +9.9%).
+Repeat after coverage:
+
+| bench | previous this run | this run | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 (debug median n=7) | 4.141 ms | 4.160 ms | +0.5% |
+| deep_chain_128 (debug median n=7) | 1.851 ms | 1.839 ms | −0.6% |
+| diamond_10k (debug median n=7) | 149.460 ms | 149.718 ms | +0.2% |
+| apply_only (debug median n=7) | 15.062 ms | 15.080 ms | +0.1% |
+
+All four inside the noise band. **No revert.**
+
 ## Failure-catalog re-measure (2026-08-31)
 
 Empty-id rejection, MemoryStore poison recovery, Display impls, cancel-after-terminal
