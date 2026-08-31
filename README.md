@@ -23,19 +23,19 @@ use bytes::Bytes;
 use keel_rt::{DomainEvent, ExecutionContext, FnSink, NodeOutcome, Runtime, WorkflowDefinition};
 
 let def = WorkflowDefinition::builder(format!("job-{}", 1))
-    .node("fetch", "http")
-    .node("save", "store")
+    .node("fetch", "fetch")
+    .node("save", "save")
     .edge("fetch", "save")
     .build()?;
 
 let rt = Runtime::builder()
     .concurrency(4)
     .sink(FnSink(|e: &DomainEvent| println!("{e}")))
-    .register_fn("http", |ctx: ExecutionContext| async move {
+    .register_fn("fetch", |ctx: ExecutionContext| async move {
         ctx.sleep(std::time::Duration::ZERO).await; // execution clock
         NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
     })
-    .register_fn("store", |_ctx| async { NodeOutcome::Succeeded(Bytes::new()) })
+    .register_fn("save", |_ctx| async { NodeOutcome::Succeeded(Bytes::new()) })
     .build();
 
 let state = rt.run(def).await?;           // start + wait; no handle to drop-cancel
@@ -51,8 +51,12 @@ via `.node(id)` is unchanged.
 
 ## Build and test
 
+Module map and absences: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Accepted leftovers: [`docs/adr/`](docs/adr/).
+
 ```bash
 cargo test -- --test-threads=1
+cargo test --test structure -- --test-threads=1
 cargo test --features test-util
 cargo clippy --lib -- -D warnings
 ```

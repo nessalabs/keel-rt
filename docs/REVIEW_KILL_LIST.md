@@ -1,55 +1,41 @@
-# Review kill list (Pass A)
+# Review kill list — Pass D
 
-Adversarial read of `src/` against `skills/engineering/coding` +
-`system-architect` (structure, review, patterns, rust) + `method`.
-Frozen product contract is out of scope for deletion.
+Pass A findings vs what landed. Frozen product contract unchanged.
+DX APIs (`register_fn`, `Clock`, `builder(String)`, start fail-fast,
+`iter_nodes`, `is_successful_finish`, `Runtime::run`) kept.
 
-Severity: **block** (must fix or ADR) · **fix** (do this pass) · **nit** (may skip).
+| # | After | Evidence |
+|---|--------|----------|
+| 1 | **fixed** | `pub(crate) mod domain` / `runtime`; root re-exports. `tests/structure.rs` `lib_does_not_export_module_trees` |
+| 2 | **fixed** | `EdgePredicate` deleted; `Edge` is `from`/`to` |
+| 3 | **fixed** | `iter_ordered` deleted; `iter_nodes` owns the iterator |
+| 4 | **fixed** | `Park` / `FakePark` deleted; `ChannelPark::recv` |
+| 5 | **fixed** | `JoinKind` deleted; `Event::NodeFinished` is `Result<NodeOutcome, String>` |
+| 6 | **fixed** | `launch_slot` `expect`s the executor cache |
+| 7 | **fixed** | Handle rustdoc says Waiting / resume |
+| 8 | **fixed** | `RecordingSink` lives in `src/testing/recording.rs` |
+| 9 | **fixed** | `WorkflowDefinition::id()`; field private |
+| 10 | **ADR’d** | [0001](adr/0001-unbounded-apply-inbox.md) |
+| 11 | **ADR’d** | [0002](adr/0002-store-persist-live-aggregate.md) |
+| 12 | **fixed** | `src/domain/state/{mod.rs,apply.rs}`; `cancel_non_terminals` |
+| 13 | **fixed** | `serde_json` dropped from `Cargo.toml` |
+| 14 | **fixed** | `ResumeToken` getters |
+| 15 | **fixed** | `tests/structure.rs` |
+| 16 | **fixed** | rustdoc on `DEFAULT_CANCEL_BOUND` + comment in `arm_cancel_bound`; pinned by `hang_ignore_cancel_ends_within_documented_bound` |
+| 17 | **ADR’d** | [0003](adr/0003-test-util-failpoints.md) |
+| 18 | **not-a-problem** | process id counters; noted in ARCHITECTURE |
+| 19 | **fixed** | Safety comment on `CatchUnwind` pin projection |
+| 20 | **fixed** | `cancel_non_terminals` |
+| 21 | **fixed** | `src/` has no Agent/HTTP/HITL/Sql/crawl words (`src_has_no_product_resource_identifiers`) |
+| 22 | **fixed** | Harness-as-gate documented; `benches/BASELINE.md` re-measured |
 
-| # | File | Principle | Sev | Finding | Proposed |
-|---|------|-----------|-----|---------|----------|
-| 1 | `src/lib.rs` | rust.md: minimise `pub`; structure: contracts only | block | `pub mod domain` / `pub mod runtime` leak `NodeRuntime`, `ExecutorRegistry`, `RecordingSink`, module paths | `pub(crate) mod`; re-export the real surface at the crate root |
-| 2 | `src/domain/definition.rs` | patterns: speculative abstraction | fix | `EdgePredicate::Always` is the only variant; unused policy hook | Delete the enum; `Edge` is `from`/`to` |
-| 3 | `src/domain/snapshot.rs` | coding: forwarding layer | fix | `iter_nodes` only forwards to `iter_ordered` | Keep `iter_nodes`; delete `iter_ordered` |
-| 4 | `src/runtime/park.rs` | patterns: trait for one impl | fix | `Park` has one impl; `FakePark` is a dead alias | Delete trait + alias; keep `ChannelPark` |
-| 5 | `src/runtime/inject.rs` | rust.md: dead; coding: extract on second use | fix | `JoinKind::Cancelled` is `#[allow(dead_code)]` | Delete the variant and the scheduler branch |
-| 6 | `src/runtime/scheduler.rs` | coding: leftover after DX fail-fast | fix | `launch_slot` still fabricates “no executor registered” | `expect` the slot cache; start already rejected missing ids |
-| 7 | `src/runtime/handle.rs` | structure: product vocab out of kernel | fix | Docs say HITL | Say Waiting / resume |
-| 8 | `src/runtime/sink.rs` | structure: test double in adapter | fix | `RecordingSink` is a test log in the production module | Move to `testing/` |
-| 9 | `src/domain/definition.rs` | rust.md: invariant field private | fix | `WorkflowDefinition.id` is `pub` — post-build mutation | Private + `id()` |
-| 10 | `src/runtime/inject.rs` | structure: unbounded without a documented bound | block | `mpsc::unbounded_channel` for apply events | Document + ADR 0001 (bound would deadlock handle ops) |
-| 11 | `src/runtime/store.rs` | structure: port knows the aggregate | block | `StateStore::persist(&Execution)` | Keep: incremental MemoryStore is a measured win. ADR 0002 |
-| 12 | `src/domain/state.rs` | structure: god file; local reasoning gone | block | ~1410 lines: types + apply + fail + join + tests | Split `apply.rs`; extract shared cancel loop |
-| 13 | `Cargo.toml` | coding: dead code | fix | `serde_json` unused | Drop the dep |
-| 14 | `src/domain/ids.rs` | rust.md: field with invariant private | fix | `ResumeToken` identity fields are `pub` | Private + getters |
-| 15 | `src/` | method: artefact that holds absences | block | No structure test over import graph / product vocab | `tests/structure.rs` |
-| 16 | `src/runtime/scheduler.rs` | rust.md: undocumented cancel | fix | `cancel_bound` uses wall `tokio::time::sleep`, not `Clock` | Document in ARCHITECTURE + rustdoc |
-| 17 | `src/testing/failpoint.rs` | structure: ambient singleton | block | Process-wide `OnceLock<Mutex<…>>` | Accept in test-util only. ADR 0003 |
-| 18 | `src/domain/ids.rs` | structure: global mutable | nit | `EXEC_SEQ` / `TOKEN_SEQ` process counters | Keep (id issuance). Note in ARCHITECTURE |
-| 19 | `src/runtime/spawn.rs` | rust.md: unsafe needs a safety comment | fix | `CatchUnwind` `map_unchecked_mut` | Document the pin projection |
-| 20 | `src/domain/state.rs` | coding: extract on second use | fix | `fail_fast` / `cancel_graph` duplicate the cancel scan | One `cancel_non_terminals` |
-| 21 | `src/testing/faults.rs` + comments | structure: prefer zero product words in `src/` | fix | Comments name HTTP / Agent / HITL | Rephrase absences without those words |
-| 22 | `benches/` | method: measurement as a record | fix | Gate is implicit (stress tests, no Criterion) | Document harness-as-gate; re-measure after refactors |
+## Still accepted (not smells)
 
-## Not a problem (evidence)
+`Execution` / `ApplyCmd` public (apply-only + stale/timer packs). Policy
+inside `apply`. DX builder methods. `#[must_use]` handle. No `utils/`.
+`examples/studio` not merged.
 
-| Item | Why it stays |
-|------|----------------|
-| `Execution` / `ApplyCmd` public | Apply-only benches + stale/timer packs are public-API tests against the aggregate. Hiding them would invent a test door. |
-| Policy consulted inside `apply` | Correct: mechanism (scheduler) does not own retry rules. |
-| `Execution` holds `WorkflowDefinition` | Aggregate contains the definition; types stay separate (`NodeDef` vs `NodeRuntime`). |
-| `store_arc` / `policy_arc` / `register_fn` | DX follow-up on `main`. Keep. |
-| `#[must_use]` on `ExecutionHandle` | Already present; Drop cancels; not Clone. |
-| No `utils` / `common` | Confirmed. |
-| Domain has no `tokio` / `std::net` | Confirmed (Pass B will lock it). |
-| Scheduler does not name node “kinds” | Dispatches by slot + `Executor` cache. |
-| Workload test names (`agent_farm`, crawl) | `tests/` product-shaped graphs, not kernel types. Out of `src/`. |
-| `examples/studio` | Other branch. Do not merge. |
+## New smells introduced?
 
-## Leftovers that need an ADR if still true after Pass C
-
-- Unbounded apply inbox (0001).
-- `StateStore::persist(&Execution)` (0002).
-- Test-util failpoint map (0003).
-
-Update this table in Pass D: each row **fixed**, **deleted as not-a-problem**, or **ADR’d**.
+None that remain. `pub(crate)` fields on `Execution` after the split are
+crate-visible only. Structure tests fail if the module arrow reverses.

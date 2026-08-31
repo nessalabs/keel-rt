@@ -1,8 +1,34 @@
 # Kernel microbench baseline (this run)
 
-Machine: Cloud Agent VM. Profile: `cargo test` (debug), Tokio `current_thread`,
+Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug), Tokio `current_thread`,
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
+
+## Architecture review re-measure (2026-08-31)
+
+Same harness, same VM class. Structural work only (visibility, dead layers,
+`apply.rs` split). No scheduler algorithm change. Gate: no hot-path median
+worse than 10% vs the previous “after” column.
+
+| bench | previous after | this run | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 (debug median n=7) | 4.581 ms | 4.403 ms | −3.9% |
+| deep_chain_128 (debug median n=7) | 1.870 ms | 1.965 ms | +5.1% |
+| diamond_10k (debug median n=7) | 148.668 ms | 157.950 ms | +6.2% |
+| apply_only (debug median n=7) | 14.479 ms | 14.731 ms | +1.7% |
+| wide_100k debug | 57354 ms | 54646 ms | −4.7% |
+| chain_100k debug | 1332 ms | 1348 ms | +1.2% |
+| diamonds_100k debug | 1302 ms | 1309 ms | +0.5% |
+| wide_100k release (repeat) | 4079 ms | 2939 ms | −28.0% |
+| chain_100k release (repeat) | 329 ms | 317 ms | −3.6% |
+| diamonds_100k release (repeat) | 288 ms | 277 ms | −3.8% |
+
+Release 100k first pass was noisier (`chain_100k` 365 ms, `diamonds_100k`
+327 ms); the repeat sits at or under the previous baseline. Debug diamond
++6.2% is inside the 10% noise band (same apply path). **No revert.**
+
+Kernel release medians (this machine, n=7): wide 0.917 ms, chain 0.403 ms,
+diamond_10k 38.980 ms, apply_only 3.834 ms (no prior release kernel row).
 
 `diamond_10k` is 2500 sequential Research→{Sum,Crit}→Writer diamonds (10 000
 nodes), concurrency 32. `apply_only` drives `Execution::apply` on the same
