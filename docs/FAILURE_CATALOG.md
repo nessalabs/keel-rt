@@ -195,7 +195,7 @@ exactly-once must make the executor idempotent.
 | 50 sequential starts on one Runtime | each terminal `running_count` 0; next start runs | **gap-closed-by:** `fifty_sequential_executions_do_not_leak_permits` | per-scheduler permits |
 | Panic then inspect counts | executor/policy panic → counts 0 | **gap-closed-by:** `panic_paths_release_permits` | permit release |
 | RetryDue after cancel | no-op, still Cancelled | `retry_due_after_cancel_does_not_wake_dead_execution` | no wake into dead run |
-| `ctx.sleep` + cancel | sleep returns; no 60s wait | `sleep_returns_when_cancel_fires` | select on token |
+| `ctx.sleep` + cancel | parks until abort; no busy-loop | `sleep_parks_when_cancel_fires_until_abort` | select + pending |
 | SpawnSet Drop | inflight execute aborted | `drop_aborts_inflight_execute` | RAII abort |
 | Cancel vs in-flight retry timer | Ready with future deadline does not start later | `cancel_ready_with_future_deadline_does_not_start_later` | cancel |
 | Cancel bound | hang ignoring cancel ends within `DEFAULT_CANCEL_BOUND` | `hang_ignore_cancel_ends_within_documented_bound` / `cancel_twice_then_bound_still_cancels_hang`; **gap-closed-by:** `cancel_ignore_cancel_fanout_meets_bound` (`cancel_under_load_64` uses hang(false) and does **not** prove the bound) | abort |

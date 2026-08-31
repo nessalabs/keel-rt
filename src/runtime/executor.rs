@@ -24,14 +24,14 @@ pub struct ExecutionContext {
 
 impl ExecutionContext {
     /// Sleep on the execution clock (FakeClock in tests, system clock in apps).
-    /// Returns when `duration` elapses **or** [`Self::cancel`] fires, so a
-    /// cancelled execution does not wake into more user work. Abort of the
-    /// execute task still drops this future if the executor ignores cancel.
+    /// If [`Self::cancel`] fires, this parks until the execute task is aborted
+    /// so a cancelled run cannot busy-loop back into user work.
     pub async fn sleep(&self, duration: Duration) {
         tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => {}
             _ = self.clock.sleep(duration) => {}
+            _ = self.cancel.cancelled() => {
+                std::future::pending::<()>().await;
+            }
         }
     }
 }
@@ -113,13 +113,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sleep_returns_when_cancel_fires() {
+    async fn sleep_parks_when_cancel_fires_until_abort() {
         let cancel = CancellationToken::new();
         let ctx = ctx(cancel.clone());
         cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(2), ctx.sleep(Duration::from_secs(60)))
-            .await
-            .expect("ctx.sleep must return on cancel, not wait the full duration");
+        let raced = tokio::time::timeout(
+            Duration::from_millis(80),
+            ctx.sleep(Duration::from_secs(60)),
+        )
+        .await;
+        assert!(
+            raced.is_err(),
+            "sleep must not return to user code after cancel (that busy-loops current_thread)"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

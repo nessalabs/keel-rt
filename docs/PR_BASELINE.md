@@ -93,8 +93,8 @@ Unchanged (say so on PRs that only refactor):
   `SpawnSet::Drop` aborts inflight execute, and the cancel-bound sleeper is
   aborted in `Scheduler::Drop`.
 - When an executor calls `ExecutionContext::sleep`, it used to wait the full
-  duration even after cancel (until task abort). Now sleep returns when the
-  cancel token fires.
+  duration even after cancel (until task abort). Now cancel parks the sleep
+  until abort so a loop cannot busy-spin on current_thread.
 - jemalloc is **opt-in** (`--features jemalloc` on an example/binary).
   `Runtime::start` is unchanged. The library does not install `#[global_allocator]`.
 - Phase 1 failure catalog: [`docs/FAILURE_CATALOG.md`](FAILURE_CATALOG.md)
