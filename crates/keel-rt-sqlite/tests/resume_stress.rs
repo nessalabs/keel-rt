@@ -158,6 +158,64 @@ fn resume_256_wide_snapshot_within_bound() {
     let _ = std::fs::remove_file(&path);
 }
 
+fn resume_256_median(
+    label: &str,
+    open: impl Fn(&std::path::Path) -> keel_rt_sqlite::SqliteStore,
+) -> Duration {
+    let path = tmp();
+    let def = wide_def(256);
+    let store = open(&path);
+    let rt = current_rt();
+    let median = rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .concurrency(32)
+            .register_fn("ok", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let mut samples = Vec::new();
+        for _ in 0..3 {
+            let mut ex = Execution::new(def.clone());
+            ex.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+                .unwrap();
+            store.persist(&ex).await.unwrap();
+            let t0 = Instant::now();
+            let handle = tokio::time::timeout(WIDE_BOUND, runtime.resume(ex.id()))
+                .await
+                .unwrap_or_else(|_| panic!("{label} 256-wide resume timed out"))
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(WIDE_BOUND, handle.wait())
+                    .await
+                    .unwrap_or_else(|_| panic!("{label} 256-wide wait timed out")),
+                ExecutionState::Succeeded
+            );
+            samples.push(t0.elapsed());
+        }
+        samples.sort();
+        eprintln!(
+            "sqlite resume 256-wide {label} (debug, n=3) median={:?} samples={:?}",
+            samples[1], samples
+        );
+        samples[1]
+    });
+    let _ = std::fs::remove_file(&path);
+    median
+}
+
+#[test]
+fn resume_256_wide_full_vs_normal() {
+    let normal = resume_256_median("NORMAL", |p| SqliteStore::open_fast(p).unwrap());
+    let full = resume_256_median("FULL", |p| SqliteStore::open(p).unwrap());
+    eprintln!(
+        "sqlite 256-wide resume NORMAL={:?} FULL={:?} (50% of 1.008s = 504ms)",
+        normal, full
+    );
+    assert!(normal < WIDE_BOUND);
+    assert!(full < WIDE_BOUND);
+}
+
 #[test]
 fn one_thousand_sequential_dags_resume_last() {
     let path = tmp();

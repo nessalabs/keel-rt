@@ -966,3 +966,125 @@ fn concurrent_persist_two_executions_same_file_no_panic() {
     });
     let _ = std::fs::remove_file(&path);
 }
+
+/// 256-wide: one node Succeeded (dirty write), 256 workers still Pending in
+/// the file from the first snapshot. Kill, resume — none of the Pending
+/// rows are missing (would fail if incremental persist DELETEd unchanged nodes).
+#[test]
+fn incremental_persist_256_wide_succeeded_does_not_drop_pending() {
+    use keel_rt::{AcceptPolicy, ApplyCmd, Execution, Timestamp};
+    let path = tmp();
+    let n = 256usize;
+    let mut b = WorkflowDefinition::builder("wide-inc")
+        .node("ok", "ok")
+        .node("hold", "hold");
+    for i in 0..n {
+        let id = format!("w{i}");
+        b = b.node(id.as_str(), "w").edge("hold", id.as_str());
+    }
+    let def = b.build().unwrap();
+    let id = {
+        let store = SqliteStore::open(&path).unwrap();
+        let exec = Execution::new(def);
+        let id = exec.id().clone();
+        let rt = current_rt();
+        rt.block_on(async {
+            store.persist(&exec).await.unwrap();
+            let def = store.workflow_definition(&id).await.unwrap().unwrap();
+            let snap = store.get(&id).await.unwrap().unwrap();
+            let mut exec = Execution::from_snapshot(def, snap).unwrap();
+            exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+                .unwrap();
+            store.persist(&exec).await.unwrap();
+            let def = store.workflow_definition(&id).await.unwrap().unwrap();
+            let snap = store.get(&id).await.unwrap().unwrap();
+            let mut exec = Execution::from_snapshot(def, snap).unwrap();
+            exec.apply(
+                ApplyCmd::StartNode {
+                    node_id: "ok".into(),
+                },
+                &AcceptPolicy,
+                Timestamp(0),
+            )
+            .unwrap();
+            exec.apply(
+                ApplyCmd::FinishNode {
+                    node_id: "ok".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+                },
+                &AcceptPolicy,
+                Timestamp(0),
+            )
+            .unwrap();
+            assert!(
+                exec.dirty_nodes().iter().any(|(nid, n)| {
+                    nid.as_str() == "ok" && matches!(n.state, NodeState::Succeeded)
+                }),
+                "ok must be the dirty Succeeded slot"
+            );
+            store.persist(&exec).await.unwrap();
+        });
+        drop(rt);
+        drop(store);
+        id
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let hold_runs = Arc::new(AtomicU32::new(0));
+    let hc = hold_runs.clone();
+    let worker_runs = Arc::new(AtomicU32::new(0));
+    let wc = worker_runs.clone();
+    let rt = current_rt();
+    rt.block_on(async {
+        let snap = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(snap.nodes.len(), n + 2, "256 Pending workers must still be rows");
+        assert!(matches!(
+            snap.node(&NodeId::new("ok")).unwrap().state,
+            NodeState::Succeeded
+        ));
+        for i in 0..n {
+            match &snap.node(&NodeId::new(format!("w{i}"))).unwrap().state {
+                NodeState::Pending => {}
+                other => panic!("w{i} must still be Pending, got {other:?}"),
+            }
+        }
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .register_fn("ok", |_c: ExecutionContext| async {
+                panic!("succeeded ok must not re-run")
+            })
+            .register_fn("hold", move |_c: ExecutionContext| {
+                hc.fetch_add(1, Ordering::SeqCst);
+                async {
+                    std::future::pending::<()>().await;
+                    NodeOutcome::Succeeded(Bytes::from_static(b"h"))
+                }
+            })
+            .register_fn("w", move |_c: ExecutionContext| {
+                wc.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"w")) }
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        wait_node(&store, &id, "hold", |s| matches!(s, NodeState::Running { .. })).await;
+        for i in 0..n {
+            let st = store
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&NodeId::new(format!("w{i}")))
+                .unwrap()
+                .state
+                .clone();
+            assert!(
+                matches!(st, NodeState::Pending),
+                "resume must not drop Pending w{i}: {st:?}"
+            );
+        }
+        assert_eq!(worker_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(hold_runs.load(Ordering::SeqCst), 1);
+        std::mem::forget(handle);
+    });
+    let _ = std::fs::remove_file(&path);
+}
