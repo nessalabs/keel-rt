@@ -2,6 +2,14 @@
 //!
 //! Delete this package without editing `scheduler.rs`. Persist is inline
 //! (no queue) — ADR 0001 still applies.
+//!
+//! Open uses WAL + `synchronous=NORMAL` + `wal_autocheckpoint=1000`. `NORMAL`
+//! is durable for process-kill after `COMMIT` (the crash-after-CAS tests);
+//! it is not an OS-crash `FULL` fsync of every node. One `BEGIN IMMEDIATE`
+//! … `COMMIT` per persist/put — the scheduler already batches the events of
+//! one apply. After the first write, only [`Execution::dirty_nodes`] rows are
+//! upserted (ADR 0002). Terminal persist checkpoints the WAL (`TRUNCATE`) so
+//! start-crash-resume loops on one file do not grow `-wal` without bound.
 
 use async_trait::async_trait;
 use keel_rt::{
@@ -18,7 +26,15 @@ CREATE TABLE IF NOT EXISTS executions (
   revision INTEGER NOT NULL,
   schema_version INTEGER NOT NULL,
   definition_hash TEXT NOT NULL,
-  snapshot_json TEXT NOT NULL
+  workflow_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  node_order TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS nodes (
+  execution_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (execution_id, node_id)
 );
 CREATE TABLE IF NOT EXISTS definitions (
   hash TEXT PRIMARY KEY,
@@ -28,6 +44,9 @@ CREATE TABLE IF NOT EXISTS definitions (
 
 /// One connection, shared. Sync sqlite work runs inside async persist
 /// the same way [`keel_rt::MemoryStore`] blocks — no persist queue.
+///
+/// [`Self::open_with_busy_timeout`] bounds `SQLITE_BUSY`: a locked file is a
+/// typed [`StoreError`], not a hang. Default open waits up to 5s.
 #[derive(Clone)]
 pub struct SqliteStore {
     path: PathBuf,
@@ -48,6 +67,12 @@ impl SqliteStore {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path).map_err(store_err)?;
         conn.busy_timeout(busy).map_err(store_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(store_err)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(store_err)?;
+        conn.pragma_update(None, "wal_autocheckpoint", 1000)
+            .map_err(store_err)?;
         conn.execute_batch(SCHEMA).map_err(store_err)?;
         Ok(Self {
             path,
@@ -68,75 +93,263 @@ impl SqliteStore {
         snapshot: &ExecutionSnapshot,
         definition: Option<&WorkflowDefinition>,
     ) -> Result<(), StoreError> {
-        if let Some(def) = definition {
-            conn.execute(
-                "INSERT OR IGNORE INTO definitions (hash, body) VALUES (?1, ?2)",
-                params![def.content_hash().as_str(), def.durable_bytes()],
-            )
-            .map_err(store_err)?;
-        }
-        let json = serde_json::to_string(snapshot).map_err(|e| StoreError::Message(e.to_string()))?;
-        let found: Option<i64> = conn
-            .query_row(
-                "SELECT revision FROM executions WHERE id = ?1",
-                params![snapshot.execution_id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(store_err)?;
-        match found {
-            Some(found) if found as u64 > snapshot.revision => Err(StoreError::Stale {
-                found: found as u64,
-                attempted: snapshot.revision,
-            }),
-            Some(found) if found as u64 == snapshot.revision => Ok(()),
-            Some(_) => {
-                let n = conn
-                    .execute(
-                        "UPDATE executions SET revision = ?1, schema_version = ?2,
-                         definition_hash = ?3, snapshot_json = ?4
-                         WHERE id = ?5 AND revision < ?1",
-                        params![
-                            snapshot.revision as i64,
-                            snapshot.schema_version as i64,
-                            snapshot.definition_hash.as_str(),
-                            json,
-                            snapshot.execution_id.as_str(),
-                        ],
-                    )
-                    .map_err(store_err)?;
-                if n == 0 {
-                    return Err(StoreError::Message("lost cas race".into()));
-                }
-                Ok(())
-            }
-            None => {
-                if definition.is_none() {
-                    return Err(StoreError::Message(
-                        "put requires an existing execution (persist first)".into(),
-                    ));
-                }
-                conn.execute(
-                    "INSERT INTO executions
-                     (id, revision, schema_version, definition_hash, snapshot_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        snapshot.execution_id.as_str(),
-                        snapshot.revision as i64,
-                        snapshot.schema_version as i64,
-                        snapshot.definition_hash.as_str(),
-                        json,
-                    ],
+        conn.execute("BEGIN IMMEDIATE", []).map_err(store_err)?;
+        let r = (|| {
+            insert_definition(conn, definition)?;
+            upsert_full_snapshot(conn, snapshot)
+        })();
+        finish_tx(conn, r).map(|_| ())
+    }
+
+    fn persist_exec(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
+        conn.execute("BEGIN IMMEDIATE", []).map_err(store_err)?;
+        let r = (|| {
+            insert_definition(conn, Some(exec.definition()))?;
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT revision FROM executions WHERE id = ?1",
+                    params![exec.id().as_str()],
+                    |row| row.get(0),
                 )
+                .optional()
                 .map_err(store_err)?;
-                Ok(())
+            match found {
+                Some(found) if found as u64 > exec.revision() => Err(StoreError::Stale {
+                    found: found as u64,
+                    attempted: exec.revision(),
+                }),
+                Some(found) if found as u64 == exec.revision() => Ok(()),
+                Some(_) => {
+                    upsert_execution_meta(conn, exec)?;
+                    upsert_dirty_nodes(conn, exec)?;
+                    Ok(())
+                }
+                None => insert_new_snapshot(conn, &exec.snapshot()),
             }
+        })();
+        let committed = finish_tx(conn, r)?;
+        if committed && exec.state().is_terminal() {
+            checkpoint_wal(conn)?;
         }
+        Ok(())
     }
 }
 
 fn store_err(e: rusqlite::Error) -> StoreError {
     StoreError::Message(e.to_string())
+}
+
+fn json_err(e: serde_json::Error) -> StoreError {
+    StoreError::Message(e.to_string())
+}
+
+fn finish_tx(conn: &Connection, r: Result<(), StoreError>) -> Result<bool, StoreError> {
+    match r {
+        Ok(()) => {
+            conn.execute("COMMIT", []).map_err(store_err)?;
+            Ok(true)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
+fn checkpoint_wal(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(store_err)
+}
+
+fn insert_definition(
+    conn: &Connection,
+    definition: Option<&WorkflowDefinition>,
+) -> Result<(), StoreError> {
+    let Some(def) = definition else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO definitions (hash, body) VALUES (?1, ?2)",
+        params![def.content_hash().as_str(), def.durable_bytes()],
+    )
+    .map_err(store_err)?;
+    Ok(())
+}
+
+fn upsert_execution_row(
+    conn: &Connection,
+    snapshot: &ExecutionSnapshot,
+) -> Result<(), StoreError> {
+    let state = serde_json::to_string(&snapshot.state).map_err(json_err)?;
+    let order = serde_json::to_string(&snapshot.node_order).map_err(json_err)?;
+    conn.execute(
+        "INSERT INTO executions
+           (id, revision, schema_version, definition_hash, workflow_id, state, node_order)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+           revision = excluded.revision,
+           schema_version = excluded.schema_version,
+           definition_hash = excluded.definition_hash,
+           workflow_id = excluded.workflow_id,
+           state = excluded.state,
+           node_order = excluded.node_order
+         WHERE executions.revision < excluded.revision",
+        params![
+            snapshot.execution_id.as_str(),
+            snapshot.revision as i64,
+            snapshot.schema_version as i64,
+            snapshot.definition_hash.as_str(),
+            snapshot.workflow_id.as_str(),
+            state,
+            order,
+        ],
+    )
+    .map_err(store_err)?;
+    Ok(())
+}
+
+fn upsert_execution_meta(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
+    let order: Vec<_> = exec
+        .definition()
+        .nodes()
+        .iter()
+        .map(|n| n.id.clone())
+        .collect();
+    let meta = ExecutionSnapshot {
+        schema_version: keel_rt::SCHEMA_VERSION,
+        revision: exec.revision(),
+        execution_id: exec.id().clone(),
+        workflow_id: exec.definition().id().clone(),
+        state: exec.state(),
+        nodes: std::collections::HashMap::new(),
+        node_order: order,
+        definition_hash: exec.definition().content_hash(),
+    };
+    upsert_execution_row(conn, &meta)
+}
+
+fn upsert_full_snapshot(
+    conn: &Connection,
+    snapshot: &ExecutionSnapshot,
+) -> Result<(), StoreError> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT revision FROM executions WHERE id = ?1",
+            params![snapshot.execution_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(store_err)?;
+    match found {
+        Some(found) if found as u64 > snapshot.revision => Err(StoreError::Stale {
+            found: found as u64,
+            attempted: snapshot.revision,
+        }),
+        Some(found) if found as u64 == snapshot.revision => Ok(()),
+        Some(_) => {
+            upsert_execution_row(conn, snapshot)?;
+            conn.execute(
+                "DELETE FROM nodes WHERE execution_id = ?1",
+                params![snapshot.execution_id.as_str()],
+            )
+            .map_err(store_err)?;
+            insert_nodes(conn, snapshot)?;
+            Ok(())
+        }
+        None => Err(StoreError::Message(
+            "put requires an existing execution (persist first)".into(),
+        )),
+    }
+}
+
+fn insert_new_snapshot(
+    conn: &Connection,
+    snapshot: &ExecutionSnapshot,
+) -> Result<(), StoreError> {
+    upsert_execution_row(conn, snapshot)?;
+    insert_nodes(conn, snapshot)
+}
+
+fn insert_nodes(conn: &Connection, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "INSERT OR REPLACE INTO nodes (execution_id, node_id, body) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(store_err)?;
+    for (id, node) in &snapshot.nodes {
+        let body = serde_json::to_string(node).map_err(json_err)?;
+        stmt.execute(params![
+            snapshot.execution_id.as_str(),
+            id.as_str(),
+            body
+        ])
+        .map_err(store_err)?;
+    }
+    Ok(())
+}
+
+fn upsert_dirty_nodes(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "INSERT OR REPLACE INTO nodes (execution_id, node_id, body) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(store_err)?;
+    for (id, node) in exec.dirty_nodes() {
+        let body = serde_json::to_string(&node).map_err(json_err)?;
+        stmt.execute(params![exec.id().as_str(), id.as_str(), body])
+            .map_err(store_err)?;
+    }
+    Ok(())
+}
+
+fn load_snapshot(
+    conn: &Connection,
+    id: &ExecutionId,
+) -> Result<Option<ExecutionSnapshot>, StoreError> {
+    let row: Option<(i64, i64, String, String, String, String)> = conn
+        .query_row(
+            "SELECT revision, schema_version, definition_hash, workflow_id, state, node_order
+             FROM executions WHERE id = ?1",
+            params![id.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(store_err)?;
+    let Some((revision, schema_version, definition_hash, workflow_id, state, order)) = row else {
+        return Ok(None);
+    };
+    let mut stmt = conn
+        .prepare_cached("SELECT node_id, body FROM nodes WHERE execution_id = ?1")
+        .map_err(store_err)?;
+    let mut rows = stmt.query(params![id.as_str()]).map_err(store_err)?;
+    let mut nodes = std::collections::HashMap::new();
+    while let Some(row) = rows.next().map_err(store_err)? {
+        let nid: String = row.get(0).map_err(store_err)?;
+        let body: String = row.get(1).map_err(store_err)?;
+        let node: keel_rt::NodeSnapshot =
+            serde_json::from_str(&body).map_err(json_err)?;
+        nodes.insert(keel_rt::NodeId::new(nid), node);
+    }
+    Ok(Some(ExecutionSnapshot {
+        schema_version: schema_version as u32,
+        revision: revision as u64,
+        execution_id: id.clone(),
+        workflow_id: keel_rt::WorkflowId::new(workflow_id),
+        state: serde_json::from_str(&state).map_err(json_err)?,
+        nodes,
+        node_order: serde_json::from_str(&order).map_err(json_err)?,
+        definition_hash: keel_rt::DefinitionHash::parse(&definition_hash)
+            .map_err(|e| StoreError::Message(e.to_string()))?,
+    }))
 }
 
 #[async_trait]
@@ -148,27 +361,13 @@ impl StateStore for SqliteStore {
 
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         let conn = self.lock()?;
-        let json: Option<String> = conn
-            .query_row(
-                "SELECT snapshot_json FROM executions WHERE id = ?1",
-                params![id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(store_err)?;
-        match json {
-            None => Ok(None),
-            Some(json) => serde_json::from_str(&json)
-                .map(Some)
-                .map_err(|e| StoreError::Message(e.to_string())),
-        }
+        load_snapshot(&conn, id)
     }
 
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
         let _ = exec.definition().content_hash();
-        let snap = exec.snapshot();
         let conn = self.lock()?;
-        Self::write_snapshot(&conn, &snap, Some(exec.definition()))
+        Self::persist_exec(&conn, exec)
     }
 
     async fn workflow_definition(
@@ -355,7 +554,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE executions SET snapshot_json = '{not-json' WHERE id = ?1",
+                "UPDATE nodes SET body = '{not-json' WHERE execution_id = ?1",
                 params![exec.id().as_str()],
             )
             .unwrap();
@@ -372,14 +571,11 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         let exec = one_node();
         store.persist(&exec).await.unwrap();
-        let mut snap = store.get(exec.id()).await.unwrap().unwrap();
-        snap.schema_version = 99;
-        let json = serde_json::to_string(&snap).unwrap();
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE executions SET snapshot_json = ?1, schema_version = 99 WHERE id = ?2",
-                params![json, exec.id().as_str()],
+                "UPDATE executions SET schema_version = 99 WHERE id = ?1",
+                params![exec.id().as_str()],
             )
             .unwrap();
         }
@@ -395,6 +591,148 @@ mod tests {
                 expected: SCHEMA_VERSION,
             }) => {}
             other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wal_mode_is_enabled() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let mode: String = {
+            let conn = store.lock().unwrap();
+            conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(mode.to_lowercase(), "wal");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn truncated_wal_does_not_invent_a_terminal() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut exec = one_node();
+        store.persist(&exec).await.unwrap();
+        exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        store.persist(&exec).await.unwrap();
+        drop(store);
+        let wal = {
+            let mut s = path.as_os_str().to_os_string();
+            s.push("-wal");
+            std::path::PathBuf::from(s)
+        };
+        if wal.exists() {
+            std::fs::write(&wal, b"torn").unwrap();
+        }
+        let store = match SqliteStore::open(&path) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        };
+        match store.get(exec.id()).await {
+            Ok(None) => {}
+            Ok(Some(snap)) => {
+                assert_ne!(
+                    snap.state,
+                    keel_rt::ExecutionState::Succeeded,
+                    "torn WAL must not invent a terminal"
+                );
+            }
+            Err(_) => {}
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persist_under_lock_returns_within_busy_bound() {
+        let path = tmp();
+        {
+            let _init = SqliteStore::open(&path).unwrap();
+        }
+        let blocker = Connection::open(&path).unwrap();
+        blocker.busy_timeout(Duration::from_millis(0)).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let t0 = std::time::Instant::now();
+        let err = match SqliteStore::open_with_busy_timeout(&path, Duration::from_millis(50)) {
+            Err(e) => e,
+            Ok(store) => store.persist(&one_node()).await.unwrap_err(),
+        };
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(matches!(err, StoreError::Message(_)));
+        drop(blocker);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incremental_persist_keeps_pending_nodes() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .node("b", "e")
+            .edge("a", "b")
+            .build()
+            .unwrap();
+        let mut exec = Execution::new(def);
+        store.persist(&exec).await.unwrap();
+        exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        assert_eq!(exec.dirty_nodes().len(), 1);
+        store.persist(&exec).await.unwrap();
+        let snap = store.get(exec.id()).await.unwrap().unwrap();
+        assert_eq!(snap.nodes.len(), 2);
+        assert!(matches!(
+            snap.node(&keel_rt::NodeId::new("b")).unwrap().state,
+            keel_rt::NodeState::Pending
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn crash_mid_put_rolls_back_uncommitted_and_does_not_invent_terminal() {
+        let path = tmp();
+        let exec = one_node();
+        let id = exec.id().clone();
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store.persist(&exec).await.unwrap();
+            {
+                let conn = store.lock().unwrap();
+                conn.execute("BEGIN IMMEDIATE", []).unwrap();
+                conn.execute(
+                    "UPDATE executions SET state = '\"Succeeded\"', revision = 99 WHERE id = ?1",
+                    params![id.as_str()],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE nodes SET body = '{\"state\":\"Succeeded\",\"output\":null,\"attempt\":1,\"resume_token\":null,\"last_error\":null}' WHERE execution_id = ?1",
+                    params![id.as_str()],
+                )
+                .unwrap();
+            }
+            drop(store);
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        match store.get(&id).await {
+            Ok(None) => {}
+            Ok(Some(snap)) => {
+                assert_ne!(
+                    snap.state,
+                    keel_rt::ExecutionState::Succeeded,
+                    "uncommitted put must not invent a terminal"
+                );
+                assert_ne!(snap.revision, 99);
+            }
+            Err(_) => {}
         }
         let _ = std::fs::remove_file(&path);
     }
