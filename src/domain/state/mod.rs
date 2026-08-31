@@ -150,12 +150,28 @@ pub enum ApplyCmd {
     ForceCancelRunning,
 }
 
+/// Result of one [`Execution::apply`].
+///
+/// `newly_runnable` / `to_abort` are dense slots so the scheduler can enqueue
+/// and abort without hashing [`NodeId`]. Apply-only drivers (no scheduler)
+/// map them with [`Self::newly_runnable_ids`]. Slots are never public.
 #[derive(Clone, Debug, Default)]
 pub struct ApplyEffect {
     pub events: Vec<crate::domain::events::DomainEvent>,
-    pub newly_runnable: Vec<NodeId>,
-    pub to_abort: Vec<NodeId>,
+    pub(crate) newly_runnable: Vec<NodeSlot>,
+    pub(crate) to_abort: Vec<NodeSlot>,
     pub changed: bool,
+}
+
+impl ApplyEffect {
+    /// Node ids that became immediately runnable. The scheduler does not use
+    /// this; it reads slots. Public `inputs_for` is unchanged.
+    pub fn newly_runnable_ids(&self, exec: &Execution) -> Vec<NodeId> {
+        self.newly_runnable
+            .iter()
+            .map(|s| exec.node_id_at(*s).clone())
+            .collect()
+    }
 }
 
 impl Execution {
@@ -423,7 +439,10 @@ mod tests {
     fn start_marks_sources_ready() {
         let mut ex = linear();
         let now = Timestamp(0);
-        ex.apply(ApplyCmd::Start, &AcceptPolicy, now).unwrap();
+        let effect = ex.apply(ApplyCmd::Start, &AcceptPolicy, now).unwrap();
+        let a = ex.definition.slot(&NodeId::new("a")).unwrap();
+        assert_eq!(effect.newly_runnable, vec![a]);
+        assert_eq!(effect.newly_runnable_ids(&ex), vec![NodeId::new("a")]);
         assert_eq!(ex.state, ExecutionState::Running);
         assert!(matches!(
             ex.node(&NodeId::new("a")).unwrap().state,
@@ -535,6 +554,40 @@ mod tests {
         assert!(!late.changed);
         assert_eq!(ex.revision, rev);
         assert_eq!(count_failed(&late), 0);
+    }
+
+    #[test]
+    fn fail_fast_aborts_running_sibling_by_slot() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .node("b", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .unwrap();
+        let effect = ex
+            .apply(
+                ApplyCmd::FinishNode {
+                    node_id: "a".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::failed("boom")),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+        let b = ex.definition.slot(&NodeId::new("b")).unwrap();
+        assert_eq!(effect.to_abort, vec![b]);
+        assert!(matches!(
+            ex.node(&NodeId::new("b")).unwrap().state,
+            NodeState::Cancelled
+        ));
     }
 
     #[test]

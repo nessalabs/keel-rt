@@ -1,4 +1,4 @@
-use crate::domain::ids::{NodeId, ResumeToken};
+use crate::domain::ids::{NodeId, NodeSlot, ResumeToken};
 use crate::domain::outcome::{NodeOutcome, Resume};
 use crate::domain::snapshot::ExecutionSnapshot;
 use tokio::sync::{mpsc, oneshot};
@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) enum Event {
     Start,
     NodeFinished {
+        slot: NodeSlot,
         node_id: NodeId,
         attempt: u32,
         /// `Err` is a panic payload string from the execute task.

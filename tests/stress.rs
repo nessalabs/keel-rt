@@ -118,12 +118,12 @@ fn apply_only_drive(def: WorkflowDefinition) {
     let p = AcceptPolicy;
     let now = Timestamp(0);
     let mut effect = ex.apply(ApplyCmd::Start, &p, now).unwrap();
-    let mut ready: VecDeque<_> = effect.newly_runnable.into();
+    let mut ready: VecDeque<_> = effect.newly_runnable_ids(&ex).into();
     while let Some(id) = ready.pop_front() {
         effect = ex
             .apply(ApplyCmd::StartNode { node_id: id.clone() }, &p, now)
             .unwrap();
-        ready.extend(effect.newly_runnable);
+        ready.extend(effect.newly_runnable_ids(&ex));
         effect = ex
             .apply(
                 ApplyCmd::FinishNode {
@@ -135,7 +135,7 @@ fn apply_only_drive(def: WorkflowDefinition) {
                 now,
             )
             .unwrap();
-        ready.extend(effect.newly_runnable);
+        ready.extend(effect.newly_runnable_ids(&ex));
     }
     assert_eq!(ex.state(), ExecutionState::Succeeded);
 }

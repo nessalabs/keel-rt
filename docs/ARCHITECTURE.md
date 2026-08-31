@@ -213,6 +213,10 @@ classDiagram
 ## Apply vs run
 
 - **`Execution::apply`** — synchronous, no I/O. Policy is consulted here.
+- **`ApplyEffect`** — public `events` / `changed`. `newly_runnable` and
+  `to_abort` are crate-private `NodeSlot` vectors (not on this diagram).
+  Apply-only drivers call `newly_runnable_ids(&exec)`. The scheduler enqueues
+  and aborts by slot. Public `inputs_for` stays `HashMap<NodeId, Bytes>`.
 - **`Runtime::start` / `run`** — fail-fast if an executor id is missing, then
   spawn the apply loop. Drop `ExecutionHandle` cancels (`#[must_use]`).
 - Default `OnFailure` = `FailExecution`. Default `Join` = `AllSucceeded`.

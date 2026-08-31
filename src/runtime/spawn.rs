@@ -1,7 +1,6 @@
-use crate::domain::ids::NodeId;
+use crate::domain::ids::NodeSlot;
 use crate::runtime::executor::{ExecutionContext, Executor};
 use crate::runtime::inject::{Event, EventTx};
-use std::collections::HashMap;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
@@ -10,23 +9,23 @@ use std::task::{Context, Poll};
 use tokio::task::AbortHandle;
 
 /// One `tokio::spawn` per execute. Completions are [`Event::NodeFinished`].
-/// The apply task never `.await`s user work.
+/// The apply task never `.await`s user work. Inflight is indexed by slot
+/// (dense `0..n`); there is no `NodeId` hash on spawn, abort, or forget.
 pub(crate) struct SpawnSet {
-    inflight: HashMap<NodeId, AbortHandle>,
+    inflight: Vec<Option<AbortHandle>>,
     tx: EventTx,
 }
 
 impl SpawnSet {
-    pub(crate) fn new(tx: EventTx) -> Self {
+    pub(crate) fn new(tx: EventTx, n: usize) -> Self {
         Self {
-            inflight: HashMap::new(),
+            inflight: (0..n).map(|_| None).collect(),
             tx,
         }
     }
 
-    pub(crate) fn spawn(&mut self, exec: Arc<dyn Executor>, ctx: ExecutionContext) {
+    pub(crate) fn spawn(&mut self, slot: NodeSlot, exec: Arc<dyn Executor>, ctx: ExecutionContext) {
         let node_id = ctx.node_id.clone();
-        let key = node_id.clone();
         let attempt = ctx.attempt;
         let tx = self.tx.clone();
         let handle = tokio::spawn(async move {
@@ -35,28 +34,31 @@ impl SpawnSet {
                 Err(payload) => Err(panic_message(payload)),
             };
             let _ = tx.send(Event::NodeFinished {
+                slot,
                 node_id,
                 attempt,
                 result,
             });
         });
-        self.inflight.insert(key, handle.abort_handle());
+        self.inflight[slot.0] = Some(handle.abort_handle());
     }
 
-    pub(crate) fn abort_node(&mut self, id: &NodeId) {
-        if let Some(h) = self.inflight.remove(id) {
+    pub(crate) fn abort_node(&mut self, slot: NodeSlot) {
+        if let Some(h) = self.inflight[slot.0].take() {
             h.abort();
         }
     }
 
     pub(crate) fn abort_all(&mut self) {
-        for (_, h) in self.inflight.drain() {
-            h.abort();
+        for slot in &mut self.inflight {
+            if let Some(h) = slot.take() {
+                h.abort();
+            }
         }
     }
 
-    pub(crate) fn forget(&mut self, id: &NodeId) {
-        self.inflight.remove(id);
+    pub(crate) fn forget(&mut self, slot: NodeSlot) {
+        self.inflight[slot.0] = None;
     }
 }
 

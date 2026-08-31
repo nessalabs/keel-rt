@@ -64,7 +64,7 @@ impl Execution {
                 }
                 self.set_state(slot, NodeState::Ready { runnable_at: None });
                 self.clear_deadline_if(slot);
-                effect.newly_runnable.push(node_id);
+                effect.newly_runnable.push(slot);
                 effect.changed = true;
             }
             ApplyCmd::ForceCancelRunning => {
@@ -98,7 +98,7 @@ impl Execution {
         if let Some(at) = runnable_at {
             self.note_deadline(slot, at);
         } else {
-            effect.newly_runnable.push(id);
+            effect.newly_runnable.push(slot);
         }
     }
 
@@ -275,7 +275,7 @@ impl Execution {
                 if let Some(at) = at {
                     self.note_deadline(slot, at);
                 } else {
-                    effect.newly_runnable.push(id.clone());
+                    effect.newly_runnable.push(slot);
                 }
             }
             (_, PolicyDecision::Reject) => {
@@ -327,7 +327,7 @@ impl Execution {
             self.set_state(NodeSlot(i), NodeState::Cancelled);
             let id = self.definition.id_at(NodeSlot(i)).clone();
             if running {
-                effect.to_abort.push(id.clone());
+                effect.to_abort.push(NodeSlot(i));
             }
             effect.events.push(DomainEvent::NodeCancelled { node_id: id });
         }
@@ -379,7 +379,7 @@ impl Execution {
         self.clear_deadline_if(slot);
         let id = self.definition.id_at(slot).clone();
         if running {
-            effect.to_abort.push(id.clone());
+            effect.to_abort.push(slot);
         }
         effect.events.push(DomainEvent::NodeCancelled { node_id: id });
     }
@@ -466,7 +466,7 @@ impl Execution {
             Resume::Reinvoke => {
                 self.nodes[slot.0].reinvoke = true;
                 self.set_state(slot, NodeState::Ready { runnable_at: None });
-                effect.newly_runnable.push(token.node_id().clone());
+                effect.newly_runnable.push(slot);
                 effect.changed = true;
             }
         }
@@ -485,7 +485,7 @@ impl Execution {
             if matches!(self.nodes[i].state, NodeState::Running { .. }) {
                 self.set_state(NodeSlot(i), NodeState::Cancelled);
                 let id = self.definition.id_at(NodeSlot(i)).clone();
-                effect.to_abort.push(id.clone());
+                effect.to_abort.push(NodeSlot(i));
                 effect.events.push(DomainEvent::NodeCancelled { node_id: id });
             }
         }

@@ -63,7 +63,7 @@ impl Scheduler {
         let exec = Execution::new(definition);
         let _ = state_tx.send(exec.state());
         Self {
-            spawn: SpawnSet::new(tx.clone()),
+            spawn: SpawnSet::new(tx.clone(), n),
             exec,
             policy,
             store,
@@ -104,12 +104,13 @@ impl Scheduler {
                 self.persist_after_event().await;
             }
             Event::NodeFinished {
+                slot,
                 node_id,
                 attempt,
                 result,
             } => {
-                self.release_permit(&node_id);
-                self.spawn.forget(&node_id);
+                self.release_permit_slot(slot);
+                self.spawn.forget(slot);
                 match result {
                     Ok(outcome) => {
                         self.apply_cmd(ApplyCmd::FinishNode {
@@ -198,12 +199,12 @@ impl Scheduler {
                 debug!("EventSink::emit panicked; apply already progressed");
             }
         }
-        for id in effect.newly_runnable {
-            self.enqueue_id(id);
+        for slot in effect.newly_runnable {
+            self.enqueue_slot(slot);
         }
-        for id in &effect.to_abort {
-            self.release_permit(id);
-            self.spawn.abort_node(id);
+        for slot in effect.to_abort {
+            self.release_permit_slot(slot);
+            self.spawn.abort_node(slot);
         }
         let _ = self.state_tx.send(self.exec.state());
         Ok(())
@@ -247,12 +248,6 @@ impl Scheduler {
         self.last_persisted = self.exec.revision();
     }
 
-    fn enqueue_id(&mut self, id: NodeId) {
-        if let Some(slot) = self.exec.definition.slot(&id) {
-            self.enqueue_slot(slot);
-        }
-    }
-
     fn enqueue_slot(&mut self, slot: NodeSlot) {
         if self.queued[slot.0] == 0 {
             self.queued[slot.0] = 1;
@@ -277,15 +272,13 @@ impl Scheduler {
             resume_token: token,
             clock: self.clock.clone(),
         };
-        self.spawn.spawn(exec, ctx);
+        self.spawn.spawn(slot, exec, ctx);
     }
 
-    fn release_permit(&mut self, id: &NodeId) {
-        if let Some(slot) = self.exec.definition.slot(id) {
-            if self.held[slot.0] == 1 {
-                self.held[slot.0] = 0;
-                self.available += 1;
-            }
+    fn release_permit_slot(&mut self, slot: NodeSlot) {
+        if self.held[slot.0] == 1 {
+            self.held[slot.0] = 0;
+            self.available += 1;
         }
     }
 
