@@ -103,12 +103,6 @@ def main() -> int:
     hit, found = totals(cov)
     pct = 100.0 * hit / found if found else 0.0
     print(f"src/ kernel lines: {hit}/{found} = {pct:.2f}%  (floor {args.floor:.2f}%)")
-    if pct + 1e-9 < args.floor:
-        print(
-            f"FAIL: line coverage {pct:.2f}% is below floor {args.floor:.2f}%",
-            file=sys.stderr,
-        )
-        return 1
 
     allow = parse_allowlist(args.baseline)
     uncovered = []
@@ -116,6 +110,17 @@ def main() -> int:
         for ln, h in sorted(lines.items()):
             if h == 0 and ln not in allow.get(f, set()):
                 uncovered.append(f"{f}:{ln}")
+
+    if pct + 1e-9 < args.floor:
+        print(
+            f"FAIL: line coverage {pct:.2f}% is below floor {args.floor:.2f}%",
+            file=sys.stderr,
+        )
+        if uncovered:
+            print("uncovered kernel src lines:", file=sys.stderr)
+            for loc in uncovered:
+                print(f"  {loc}", file=sys.stderr)
+        return 1
 
     base = args.base
     if not base:
@@ -177,8 +182,13 @@ def main() -> int:
             + ", ".join(extra_allow)
         )
 
+    if uncovered:
+        print("FAIL: uncovered kernel src lines:", file=sys.stderr)
+        for loc in uncovered:
+            print(f"  {loc}", file=sys.stderr)
+        return 1
+
     print(f"patch coverage: ok ({sum(len(v) for v in changed.values())} changed src/ lines vs {base or 'HEAD'})")
-    _ = uncovered  # remaining gaps live in BASELINE allow: — not a CI fail
     return 0
 
 

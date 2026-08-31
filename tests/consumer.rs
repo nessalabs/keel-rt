@@ -7,7 +7,7 @@ use keel_rt::{
     AcceptPolicy, ApplyCmd, ApplyError, Clock, DomainEvent, Execution, ExecutionContext,
     ExecutionState, FnSink, Join, MemoryStore, NeverWaitPolicy, NodeId, NodeOutcome, NoopStore,
     OnFailure, Policy, PolicyDecision, ResumeToken, Runtime, StartError, StateStore, Timestamp,
-    WorkflowDefinition,
+    WorkflowDefinition, DEFAULT_CANCEL_BOUND,
 };
 use std::time::Duration;
 
@@ -317,4 +317,293 @@ fn apply_start_twice_is_illegal_unknown_retry_is_noop() {
     assert!(!late.changed);
     let idle = ex.apply(ApplyCmd::ForceCancelRunning, &p, now).unwrap();
     assert!(!idle.changed);
+}
+
+#[test]
+fn domain_event_display_covers_every_variant() {
+    let execution_id = keel_rt::ExecutionId::new();
+    let node_id = NodeId::new("n");
+    let token = ResumeToken::issue(execution_id.clone(), node_id.clone(), 2);
+    let at = Timestamp::from_millis(9);
+    let cases = [
+        (
+            DomainEvent::ExecutionStarted {
+                execution_id: execution_id.clone(),
+            },
+            "execution started",
+        ),
+        (
+            DomainEvent::ExecutionSucceeded {
+                execution_id: execution_id.clone(),
+            },
+            "execution succeeded",
+        ),
+        (
+            DomainEvent::ExecutionFailed {
+                execution_id: execution_id.clone(),
+            },
+            "execution failed",
+        ),
+        (
+            DomainEvent::ExecutionCancelled {
+                execution_id: execution_id.clone(),
+            },
+            "execution cancelled",
+        ),
+        (
+            DomainEvent::ExecutionWaiting {
+                execution_id: execution_id.clone(),
+            },
+            "execution waiting",
+        ),
+        (
+            DomainEvent::ExecutionCompleted {
+                execution_id: execution_id.clone(),
+            },
+            "execution completed",
+        ),
+        (
+            DomainEvent::NodeReady {
+                node_id: node_id.clone(),
+                runnable_at: None,
+            },
+            "node n ready",
+        ),
+        (
+            DomainEvent::NodeReady {
+                node_id: node_id.clone(),
+                runnable_at: Some(at),
+            },
+            "node n ready at",
+        ),
+        (
+            DomainEvent::NodeStarted {
+                node_id: node_id.clone(),
+                attempt: 3,
+            },
+            "started attempt=3",
+        ),
+        (
+            DomainEvent::NodeSucceeded {
+                node_id: node_id.clone(),
+            },
+            "node n succeeded",
+        ),
+        (
+            DomainEvent::NodeFailed {
+                node_id: node_id.clone(),
+                error: keel_rt::NodeError::new("boom"),
+            },
+            "failed: boom",
+        ),
+        (
+            DomainEvent::NodeCancelled {
+                node_id: node_id.clone(),
+            },
+            "node n cancelled",
+        ),
+        (
+            DomainEvent::NodeWaiting {
+                node_id: node_id.clone(),
+                token: token.clone(),
+            },
+            "node n waiting",
+        ),
+        (
+            DomainEvent::NodeTimedOut {
+                node_id: node_id.clone(),
+            },
+            "node n timed out",
+        ),
+    ];
+    for (ev, needle) in cases {
+        let s = ev.to_string();
+        assert!(s.contains(needle), "{s} should contain {needle}");
+    }
+}
+
+#[test]
+fn ids_display_default_from_string_and_serde_round_trip() {
+    let wf = keel_rt::WorkflowId::from(String::from("wf"));
+    assert_eq!(wf.to_string(), "wf");
+    let exec = keel_rt::ExecutorId::from(String::from("http"));
+    assert_eq!(exec.to_string(), "http");
+    let eid = keel_rt::ExecutionId::default();
+    assert!(eid.as_str().starts_with("exec-"));
+    assert_eq!(eid.to_string(), eid.as_str());
+
+    let id = NodeId::new("page-7");
+    let json = serde_json::to_string(&id).unwrap();
+    assert_eq!(json, "\"page-7\"");
+    let back: NodeId = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, id);
+
+    let snap = keel_rt::ExecutionSnapshot {
+        schema_version: keel_rt::SCHEMA_VERSION,
+        revision: 2,
+        execution_id: eid.clone(),
+        workflow_id: wf,
+        state: ExecutionState::Succeeded,
+        nodes: Default::default(),
+        node_order: vec![id.clone()],
+    };
+    let sjson = serde_json::to_string(&snap).unwrap();
+    let restored: keel_rt::ExecutionSnapshot = serde_json::from_str(&sjson).unwrap();
+    assert_eq!(restored.execution_id, eid);
+    assert_eq!(restored.node_order, vec![id]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn policy_store_sink_arc_and_box_adapters_run() {
+    use std::sync::Arc;
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let store: Arc<dyn keel_rt::StateStore> = Arc::new(MemoryStore::new());
+    let policy: Arc<dyn Policy> = Arc::new(AcceptPolicy);
+    let boxed: Box<dyn Policy> = Box::new(AcceptPolicy);
+    assert_eq!(
+        policy.decide(&NodeOutcome::succeeded(Bytes::new()), 1),
+        PolicyDecision::Accept
+    );
+    assert_eq!(
+        boxed.decide(&NodeOutcome::succeeded(Bytes::new()), 1),
+        PolicyDecision::Accept
+    );
+    let def_store = WorkflowDefinition::builder("persist")
+        .node("n", "n")
+        .build()
+        .unwrap();
+    let exec = Execution::new(def_store);
+    store.persist(&exec).await.unwrap();
+    assert!(store.get(exec.id()).await.unwrap().is_some());
+    store.put(&exec.snapshot()).await.unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(0u32));
+    let c = seen.clone();
+    let sink: Arc<dyn keel_rt::EventSink> = Arc::new(FnSink(move |_e: &DomainEvent| {
+        *c.lock().unwrap() += 1;
+    }));
+    let rt = Runtime::builder()
+        .store(store)
+        .policy(policy)
+        .sink_arc(sink)
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    assert_eq!(rt.run(def).await.unwrap(), ExecutionState::Succeeded);
+    assert!(*seen.lock().unwrap() > 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inspect_after_store_panic_returns_stopped_snapshot_and_wait_unblocks() {
+    struct PanicStore;
+    #[async_trait::async_trait]
+    impl keel_rt::StateStore for PanicStore {
+        async fn put(
+            &self,
+            _snapshot: &keel_rt::ExecutionSnapshot,
+        ) -> Result<(), keel_rt::StoreError> {
+            panic!("put must not be the persist path for this test");
+        }
+        async fn get(
+            &self,
+            _id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::ExecutionSnapshot>, keel_rt::StoreError> {
+            Ok(None)
+        }
+        async fn persist(
+            &self,
+            _exec: &keel_rt::Execution,
+        ) -> Result<(), keel_rt::StoreError> {
+            panic!("persist boom");
+        }
+    }
+
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(PanicStore)
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    let stable = tokio::time::timeout(Duration::from_secs(2), handle.wait_stable())
+        .await
+        .expect("wait_stable must not hang after scheduler panic");
+    assert!(
+        !stable.is_terminal() || stable == ExecutionState::Cancelled,
+        "watch-closed wait_stable returns current state, got {stable:?}"
+    );
+    let snap = handle.inspect().await;
+    assert_eq!(snap.workflow_id.as_str(), "stopped");
+    assert_eq!(snap.state, ExecutionState::Cancelled);
+    assert!(snap.nodes.is_empty());
+    let state = tokio::time::timeout(Duration::from_secs(2), handle.wait())
+        .await
+        .expect("wait must not hang after scheduler panic");
+    assert!(
+        !state.is_terminal() || state == ExecutionState::Cancelled,
+        "watch-closed wait returns current state, got {state:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn executor_panic_string_and_unknown_payload_fail_the_node() {
+    let owned = WorkflowDefinition::builder("owned")
+        .node("p", "p")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .register_fn("p", |_ctx: ExecutionContext| async {
+            std::panic::panic_any(String::from("owned-panic"));
+        })
+        .build();
+    assert_eq!(rt.run(owned).await.unwrap(), ExecutionState::Failed);
+
+    let num = WorkflowDefinition::builder("num")
+        .node("p", "p")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .register_fn("p", |_ctx: ExecutionContext| async {
+            std::panic::panic_any(42u32);
+        })
+        .build();
+    let handle = rt.start(num).expect("start");
+    assert_eq!(handle.wait().await, ExecutionState::Failed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_twice_then_bound_still_cancels_hang() {
+    let def = WorkflowDefinition::builder("hang")
+        .node("h", "h")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .cancel_bound(DEFAULT_CANCEL_BOUND)
+        .register_fn("h", |ctx: ExecutionContext| async move {
+            loop {
+                ctx.sleep(Duration::from_secs(60)).await;
+            }
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    tokio::task::yield_now().await;
+    handle.cancel().await;
+    handle.cancel().await;
+    tokio::time::sleep(DEFAULT_CANCEL_BOUND + Duration::from_millis(80)).await;
+    let snap = handle.inspect().await;
+    assert_eq!(snap.state, ExecutionState::Cancelled);
+    let state = tokio::time::timeout(
+        DEFAULT_CANCEL_BOUND + Duration::from_millis(200),
+        handle.wait(),
+    )
+    .await
+    .expect("cancel bound must finish hang");
+    assert_eq!(state, ExecutionState::Cancelled);
 }

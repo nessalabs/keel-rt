@@ -57,7 +57,7 @@ the same). Do not omit a verb because “it was only a rename.”
 
 - `cargo test -- --test-threads=1` green. Do not skip or weaken adversarial,
   scenario, stress, or resilience tests.
-- Coverage: `just coverage` / `./scripts/coverage.sh`. New `src/` lines covered
-  or allowlisted; floor in `coverage/BASELINE` does not drop.
+- Coverage: `just coverage` / `./scripts/coverage.sh`. Kernel `src/` lines
+  100%; `coverage/BASELINE` allowlist stays empty.
 - One reason per commit. Imperative, module prefix.
 - `FailSubtree` / `Join::AllDone` stay definition-only opt-in.

@@ -181,4 +181,68 @@ mod tests {
         assert_eq!(got, vec!["a-first", "z-last"]);
         assert!(snap.to_string().contains("Failed"));
     }
+
+    #[test]
+    fn iter_nodes_skips_order_ids_missing_from_the_map() {
+        let a = NodeId::new("keep");
+        let mut nodes = HashMap::new();
+        nodes.insert(a.clone(), empty_node());
+        let snap = ExecutionSnapshot {
+            schema_version: SCHEMA_VERSION,
+            revision: 1,
+            execution_id: ExecutionId::new(),
+            workflow_id: WorkflowId::new("gap"),
+            state: ExecutionState::Running,
+            nodes,
+            node_order: vec![NodeId::new("ghost"), a.clone(), NodeId::new("also-missing")],
+        };
+        let got: Vec<&str> = snap.iter_nodes().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(got, vec!["keep"]);
+    }
+
+    #[test]
+    fn snapshot_display_names_every_execution_and_node_state() {
+        fn snap(state: ExecutionState, node: NodeState) -> String {
+            let id = NodeId::new("n");
+            let mut nodes = HashMap::new();
+            nodes.insert(
+                id.clone(),
+                NodeSnapshot {
+                    state: node,
+                    output: None,
+                    attempt: 2,
+                    resume_token: None,
+                    last_error: None,
+                },
+            );
+            ExecutionSnapshot {
+                schema_version: SCHEMA_VERSION,
+                revision: 1,
+                execution_id: ExecutionId::new(),
+                workflow_id: WorkflowId::new("d"),
+                state,
+                nodes,
+                node_order: vec![id],
+            }
+            .to_string()
+        }
+        assert!(snap(ExecutionState::Created, NodeState::Pending).contains("Created"));
+        assert!(snap(ExecutionState::Running, NodeState::Ready { runnable_at: None }).contains("Ready"));
+        assert!(snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Waiting"));
+        assert!(snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Running(1)"));
+        let token = ResumeToken::issue(ExecutionId::new(), NodeId::new("n"), 1);
+        assert!(snap(
+            ExecutionState::Cancelled,
+            NodeState::Waiting {
+                token,
+                attempt: 1
+            }
+        )
+        .contains("Cancelled"));
+        assert!(snap(ExecutionState::Completed, NodeState::Failed).contains("Completed"));
+        assert!(snap(ExecutionState::Completed, NodeState::Failed).contains("Failed"));
+        assert!(snap(ExecutionState::Succeeded, NodeState::Cancelled).contains("Cancelled"));
+        assert!(snap(ExecutionState::Succeeded, NodeState::TimedOut).contains("TimedOut"));
+        assert!(snap(ExecutionState::Succeeded, NodeState::Succeeded).contains("Succeeded"));
+    }
 }

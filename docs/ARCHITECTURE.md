@@ -248,6 +248,6 @@ medians is a bug: fix or revert and ADR.
 ## Coverage gate
 
 `just coverage` / `./scripts/coverage.sh` runs `cargo llvm-cov` on the default
-suite (not `stress_100k`). CI fails on uncovered **new/changed** `src/` kernel
-lines and if total line % drops below `coverage/BASELINE`. `src/testing/` does
-not count.
+suite (not `stress_100k`). CI fails unless kernel `src/` line coverage is
+**100%** (`coverage/BASELINE` allowlist is empty). `src/testing/` does not
+count. Architecture diagrams are unchanged (after = before; see this file).

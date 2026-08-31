@@ -1,9 +1,9 @@
-//! Equal deadlines both fire, cancel future runnable_at, timer after Succeeded.
+//! Equal and staggered retry deadlines, cancel future runnable_at, timer after Succeeded.
 
 use super::common::{ok, within};
 use bytes::Bytes;
 use keel_rt::{ApplyCmd, Execution};
-use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
+use keel_rt::testing::{ScriptedAction, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
     AcceptPolicy, ExecutionState, NodeId, NodeOutcome, NodeState, RetryPolicy, WorkflowDefinition,
 };
@@ -64,6 +64,94 @@ async fn two_nodes_same_retry_deadline_both_run() {
     assert_eq!(run.execution_state().await, ExecutionState::Succeeded);
     assert_eq!(run.scripted("x").attempts(), vec![1, 2]);
     assert_eq!(run.scripted("y").attempts(), vec![1, 2]);
+}
+
+/// Staggered fail times → different `runnable_at`. The due timer must leave
+/// the later deadline armed (`at > now` break) instead of firing it early.
+#[tokio::test(flavor = "current_thread")]
+async fn two_nodes_staggered_retry_deadlines_both_run() {
+    let test = WorkflowTest::new()
+        .concurrency(2)
+        .node(
+            "fast",
+            ScriptedExecutor::new("fast")
+                .fail("fast")
+                .succeed(Bytes::from_static(b"fok")),
+        )
+        .node(
+            "slow",
+            ScriptedExecutor::new("slow")
+                .then(ScriptedAction::Delay {
+                    delay: Duration::from_millis(50),
+                    then: Box::new(ScriptedAction::Fail("slow".into())),
+                })
+                .succeed(Bytes::from_static(b"sok")),
+        )
+        .policy(RetryPolicy::new(3, Duration::from_millis(100)));
+    let clock = test.fake_clock();
+    let run = test.start().await;
+    within(async {
+        loop {
+            if matches!(
+                run.state("fast").await,
+                NodeState::Ready {
+                    runnable_at: Some(_)
+                }
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    clock.advance(Duration::from_millis(50));
+    within(async {
+        loop {
+            if matches!(
+                run.state("slow").await,
+                NodeState::Ready {
+                    runnable_at: Some(_)
+                }
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        matches!(
+            run.state("fast").await,
+            NodeState::Ready {
+                runnable_at: Some(_)
+            }
+        ),
+        "fast must still be waiting on the later clock tick"
+    );
+    clock.advance(Duration::from_millis(50));
+    within(async {
+        loop {
+            if matches!(run.state("fast").await, NodeState::Succeeded) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        matches!(
+            run.state("slow").await,
+            NodeState::Ready {
+                runnable_at: Some(_)
+            }
+        ),
+        "slow's later deadline must not fire with fast's timer"
+    );
+    clock.advance(Duration::from_millis(50));
+    within(run.wait_stable()).await;
+    assert_eq!(run.execution_state().await, ExecutionState::Succeeded);
+    assert_eq!(run.scripted("fast").attempts(), vec![1, 2]);
+    assert_eq!(run.scripted("slow").attempts(), vec![1, 2]);
 }
 
 #[tokio::test(flavor = "current_thread")]

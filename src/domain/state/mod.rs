@@ -179,13 +179,13 @@ impl ApplyEffect {
 impl Execution {
     pub fn new(definition: WorkflowDefinition) -> Self {
         let n = definition.len();
-        let nodes = (0..n).map(|_| NodeRuntime::default()).collect();
+        let nodes: Vec<NodeRuntime> = (0..n).map(|_| NodeRuntime::default()).collect();
         let dirty = vec![1u8; n];
         let dirty_list: Vec<NodeSlot> = (0..n).map(NodeSlot).collect();
         let remain: Vec<u32> = (0..n)
             .map(|i| definition.pred_slots(NodeSlot(i)).len() as u32)
             .collect();
-        Self {
+        let mut exec = Self {
             id: ExecutionId::new(),
             workflow_id: definition.id().clone(),
             definition,
@@ -197,7 +197,7 @@ impl Execution {
             next_deadline: None,
             dirty,
             dirty_list,
-            n_pending: n as u32,
+            n_pending: 0,
             n_ready: 0,
             n_running: 0,
             n_waiting: 0,
@@ -205,7 +205,11 @@ impl Execution {
             n_failed: 0,
             n_cancelled: 0,
             remain,
+        };
+        for i in 0..n {
+            exec.inc_kind(count_kind(&exec.nodes[i].state));
         }
+        exec
     }
 
     pub fn id(&self) -> &ExecutionId {
@@ -235,11 +239,11 @@ impl Execution {
             .unwrap_or(false)
     }
 
-    pub(crate) fn is_ready_now_slot(&self, slot: NodeSlot, now: Timestamp) -> bool {
-        self.nodes
-            .get(slot.0)
-            .map(|n| n.state.is_ready_now(now))
-            .unwrap_or(false)
+    pub(crate) fn is_dispatchable_slot(&self, slot: NodeSlot) -> bool {
+        matches!(
+            self.nodes[slot.0].state,
+            NodeState::Ready { runnable_at: None }
+        )
     }
 
     pub(crate) fn mark_dirty(&mut self, slot: NodeSlot) {
@@ -283,14 +287,15 @@ impl Execution {
     }
 
     fn dec_count(&mut self, s: &NodeState) {
-        match s {
-            NodeState::Pending => self.n_pending -= 1,
-            NodeState::Ready { .. } => self.n_ready -= 1,
-            NodeState::Running { .. } => self.n_running -= 1,
-            NodeState::Waiting { .. } => self.n_waiting -= 1,
-            NodeState::Succeeded => self.n_succeeded -= 1,
-            NodeState::Failed | NodeState::TimedOut => self.n_failed -= 1,
-            NodeState::Cancelled => self.n_cancelled -= 1,
+        // Terminal states are never left; n_succeeded/failed/cancelled only increase.
+        if matches!(s, NodeState::Pending) {
+            self.n_pending -= 1;
+        } else if matches!(s, NodeState::Ready { .. }) {
+            self.n_ready -= 1;
+        } else if matches!(s, NodeState::Running { .. }) {
+            self.n_running -= 1;
+        } else if matches!(s, NodeState::Waiting { .. }) {
+            self.n_waiting -= 1;
         }
     }
 
@@ -873,5 +878,298 @@ mod tests {
         ));
         assert_eq!(ex.inputs_for(&NodeId::new("j")).len(), 1);
         assert!(!ex.inputs_for(&NodeId::new("j")).contains_key(&NodeId::new("a")));
+    }
+
+    #[test]
+    fn double_cancel_is_noop_and_start_node_rejects_unknown_and_pending() {
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        assert!(!ex.is_cancelled());
+        assert!(ex.is_ready_now(&NodeId::new("a"), now));
+        assert!(!ex.is_ready_now(&NodeId::new("ghost"), now));
+        assert!(ex.attempt(&NodeId::new("ghost")).is_none());
+        assert!(ex.resume_token(&NodeId::new("ghost")).is_none());
+        let pending = ex
+            .apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .unwrap_err();
+        assert!(matches!(pending, ApplyError::Illegal(_)));
+        let unknown = ex
+            .apply(ApplyCmd::StartNode { node_id: "ghost".into() }, &p, now)
+            .unwrap_err();
+        assert!(matches!(unknown, ApplyError::UnknownNode(_)));
+        ex.apply(ApplyCmd::Cancel, &p, now).unwrap();
+        assert!(ex.is_cancelled());
+        let rev = ex.revision;
+        let again = ex.apply(ApplyCmd::Cancel, &p, now).unwrap();
+        assert!(!again.changed);
+        assert_eq!(ex.revision, rev);
+        assert_eq!(ex.state, ExecutionState::Cancelled);
+    }
+
+    #[test]
+    fn force_cancel_running_aborts_and_cancels_execution() {
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        let effect = ex.apply(ApplyCmd::ForceCancelRunning, &p, now).unwrap();
+        let a = ex.definition.slot(&NodeId::new("a")).unwrap();
+        assert_eq!(effect.to_abort, vec![a]);
+        assert_eq!(ex.state, ExecutionState::Cancelled);
+        assert!(matches!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Cancelled
+        ));
+    }
+
+    #[test]
+    fn fail_subtree_skips_already_cancelled_successor() {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("a", "e")
+            .node("b", "e")
+            .node("d", "e")
+            .edge("a", "d")
+            .edge("b", "d")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("a")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("d")).unwrap().state,
+            NodeState::Cancelled
+        ));
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "b".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("b")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("d")).unwrap().state,
+            NodeState::Cancelled
+        ));
+        assert_eq!(ex.state, ExecutionState::Completed);
+    }
+
+    #[test]
+    fn resume_failed_node_while_sibling_runs_is_resume_after_cancel() {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("a", "e")
+            .node("b", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .unwrap();
+        let token = ex.resume_token(&NodeId::new("a")).unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("a")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("b")).unwrap().state,
+            NodeState::Running { .. }
+        ));
+        let err = ex
+            .apply(
+                ApplyCmd::Resume {
+                    token,
+                    resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
+                },
+                &p,
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, ApplyError::ResumeAfterCancel);
+    }
+
+    #[test]
+    fn resume_reinvoke_on_succeeded_is_not_waiting() {
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        let token = ex.resume_token(&NodeId::new("a")).unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"a"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let err = ex
+            .apply(
+                ApplyCmd::Resume {
+                    token,
+                    resume: Resume::Reinvoke,
+                },
+                &p,
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, ApplyError::NotWaiting);
+    }
+
+    #[test]
+    fn conflicting_complete_on_succeeded_node() {
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        let token = ex.resume_token(&NodeId::new("a")).unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"a"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let err = ex
+            .apply(
+                ApplyCmd::Resume {
+                    token: token.clone(),
+                    resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"other"))),
+                },
+                &p,
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, ApplyError::ConflictingComplete);
+        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "b".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"b"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Succeeded);
+        let rev = ex.revision;
+        ex.apply(
+            ApplyCmd::Resume {
+                token: token.clone(),
+                resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"a"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.revision, rev, "equivalent complete after Succeeded is a no-op");
+        let err = ex
+            .apply(
+                ApplyCmd::Resume {
+                    token: token.clone(),
+                    resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"zzz"))),
+                },
+                &p,
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, ApplyError::ConflictingComplete);
+        let err = ex
+            .apply(
+                ApplyCmd::Resume {
+                    token,
+                    resume: Resume::Reinvoke,
+                },
+                &p,
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, ApplyError::ResumeAfterCancel);
+    }
+
+    #[test]
+    fn retry_timed_out_zero_delay_is_immediately_runnable() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = RetryPolicy::new(3, Duration::ZERO);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        let effect = ex
+            .apply(
+                ApplyCmd::FinishNode {
+                    node_id: "a".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::TimedOut),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+        assert!(!effect.newly_runnable.is_empty());
+        assert!(matches!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        ));
+    }
+
+    #[test]
+    fn node_state_ready_now_overdue_and_non_ready() {
+        assert!(NodeState::Ready { runnable_at: None }.is_ready_now(Timestamp(0)));
+        assert!(NodeState::Ready {
+            runnable_at: Some(Timestamp(1)),
+        }
+        .is_ready_now(Timestamp(5)));
+        assert!(!NodeState::Ready {
+            runnable_at: Some(Timestamp(10)),
+        }
+        .is_ready_now(Timestamp(5)));
+        assert!(!NodeState::Pending.is_ready_now(Timestamp(0)));
+        assert!(!NodeState::Succeeded.is_ready_now(Timestamp(0)));
     }
 }

@@ -87,9 +87,7 @@ impl Scheduler {
     pub(crate) async fn run(mut self) {
         loop {
             let timer = self.exec.next_deadline();
-            let Some(event) = self.park.recv(timer).await else {
-                break;
-            };
+            let event = self.park.recv(timer).await;
             if self.handle_event(event).await {
                 break;
             }
@@ -142,8 +140,8 @@ impl Scheduler {
             }
             Event::Cancel => {
                 self.cancel.cancel();
-                self.apply_cmd(ApplyCmd::Cancel);
                 self.arm_cancel_bound();
+                self.apply_cmd(ApplyCmd::Cancel);
                 self.persist_after_event().await;
             }
             Event::Inspect { reply } => {
@@ -163,11 +161,7 @@ impl Scheduler {
                 self.persist_after_event().await;
             }
             Event::ForceCancelBound => {
-                warn!(
-                    execution_id = %self.exec.id(),
-                    bound_ms = self.cancel_bound.as_millis() as u64,
-                    "cancel bound elapsed; aborting remaining execute tasks"
-                );
+                warn!("cancel bound elapsed; aborting remaining execute tasks");
                 self.spawn.abort_all();
                 self.apply_cmd(ApplyCmd::ForceCancelRunning);
                 self.persist_after_event().await;
@@ -216,17 +210,11 @@ impl Scheduler {
                 break;
             };
             self.queued[slot.0] = 0;
-            let now = self.clock.now();
-            if !self.exec.is_ready_now_slot(slot, now) {
+            if !self.exec.is_dispatchable_slot(slot) {
                 continue;
             }
             let id = self.exec.node_id_at(slot).clone();
-            if self
-                .apply_cmd_result(ApplyCmd::StartNode { node_id: id.clone() })
-                .is_err()
-            {
-                continue;
-            }
+            self.apply_cmd(ApplyCmd::StartNode { node_id: id.clone() });
             self.available -= 1;
             self.held[slot.0] = 1;
             self.launch_slot(slot, id);

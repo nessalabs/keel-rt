@@ -15,20 +15,20 @@ impl ChannelPark {
         Self { rx, clock }
     }
 
-    pub(crate) async fn recv(&mut self, next_timer: Option<(Timestamp, NodeId)>) -> Option<Event> {
+    pub(crate) async fn recv(&mut self, next_timer: Option<(Timestamp, NodeId)>) -> Event {
         match next_timer {
             Some((when, node_id)) => {
                 let now = self.clock.now();
                 if when <= now {
-                    return Some(Event::Timer { node_id });
+                    return Event::Timer { node_id };
                 }
                 let wait = when.saturating_duration_since(now);
                 tokio::select! {
-                    ev = self.rx.recv() => ev,
-                    _ = self.clock.sleep(wait) => Some(Event::Timer { node_id }),
+                    ev = self.rx.recv() => ev.unwrap_or(Event::Shutdown),
+                    _ = self.clock.sleep(wait) => Event::Timer { node_id },
                 }
             }
-            None => self.rx.recv().await,
+            None => self.rx.recv().await.unwrap_or(Event::Shutdown),
         }
     }
 }

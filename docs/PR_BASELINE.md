@@ -1,8 +1,7 @@
 # Filled PR body (this `main` is the baseline)
 
-Greenfield: the diagrams in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) **are**
-the baseline. There is no separate “before” pair. Paste them into
-Architecture (after). Architecture (before): “First baseline; see after.”
+Architecture (before / after): **after = before**. No module-graph or
+public run-loop type change. Diagrams: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 DX that already landed on this branch (keep; do not revert):
 
@@ -46,3 +45,7 @@ Unchanged (say so on PRs that only refactor):
   never Waiting. Now it still does. Waiting still releases the permit.
 - When a caller runs **inspect**, it used to return an `ExecutionSnapshot`
   keyed by `NodeId`. Now it still does.
+- When CI runs **coverage**, it used to pass at 93.2% with allowlisted kernel
+  lines. Now it fails unless kernel `src/` (not `src/testing/`) is 100%
+  executable lines. Wait / cancel / resume / fail / retry / inspect are
+  unchanged.

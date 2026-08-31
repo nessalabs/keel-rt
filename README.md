@@ -58,7 +58,8 @@ Accepted leftovers: [`docs/adr/`](docs/adr/).
 ## Coverage
 
 Kernel `src/` line coverage (not `src/testing/`, not `tests/` painting themselves).
-Floor and allowlisted gaps: [`coverage/BASELINE`](coverage/BASELINE).
+Floor: **100%** of executable lines in `src/domain/`, `src/runtime/`, and
+`src/lib.rs`. [`coverage/BASELINE`](coverage/BASELINE) has an empty allowlist.
 
 ```bash
 just coverage
@@ -70,19 +71,19 @@ cargo llvm-cov --lib \
   --test scenarios --test stress --test stress_uneven --test structure \
   --test workloads \
   --ignore-filename-regex 'src/testing/|\.cargo/|/tests/|/examples/' \
-  --fail-under-lines 93 \
+  --fail-under-lines 100 \
   -- --test-threads=1
 ```
 
 CI (`.github/workflows/ci.yml`) fails the `coverage` job when:
 
 1. **Patch:** a new or changed executable line in `src/` (except `src/testing/`)
-   has 0 hits and is not allowlisted.
-2. **Floor:** total kernel line % drops below `floor_lines_pct` (93.2) or
-   `cargo llvm-cov --fail-under-lines 93`.
+   has 0 hits.
+2. **Floor:** total kernel line % is below 100 (`floor_lines_pct=100` /
+   `cargo llvm-cov --fail-under-lines 100`).
 
 `stress_100k` is a separate CI job without instrumentation. Do not lower the
-floor to make a refactor green — raise it when coverage goes up.
+floor to make a refactor green.
 
 ```bash
 cargo test -- --test-threads=1
