@@ -36,10 +36,18 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_busy_timeout(path, Duration::from_secs(5))
+    }
+
+    /// Same as [`Self::open`], with a caller-visible busy bound.
+    /// Tests use `Duration::ZERO` so a locked file is a typed error, not a wait.
+    pub fn open_with_busy_timeout(
+        path: impl AsRef<Path>,
+        busy: Duration,
+    ) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path).map_err(store_err)?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(store_err)?;
+        conn.busy_timeout(busy).map_err(store_err)?;
         conn.execute_batch(SCHEMA).map_err(store_err)?;
         Ok(Self {
             path,
@@ -290,6 +298,104 @@ mod tests {
         }));
         assert!(poisoned.is_err());
         store.persist(&one_node()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn truncated_file_is_typed_error() {
+        let path = tmp();
+        std::fs::write(&path, b"not a sqlite database").unwrap();
+        let err = match SqliteStore::open(&path) {
+            Err(e) => e,
+            Ok(_) => panic!("truncated file must not open"),
+        };
+        assert!(matches!(err, StoreError::Message(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_file_opens_as_new_store() {
+        let path = tmp();
+        std::fs::write(&path, b"").unwrap();
+        let store = SqliteStore::open(&path).unwrap();
+        let id = ExecutionId::parse("exec-missing").unwrap();
+        assert!(store.get(&id).await.unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn locked_file_is_typed_error_not_panic() {
+        let path = tmp();
+        {
+            let _init = SqliteStore::open(&path).unwrap();
+        }
+        let blocker = Connection::open(&path).unwrap();
+        blocker
+            .busy_timeout(Duration::from_millis(0))
+            .unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let err = match SqliteStore::open_with_busy_timeout(&path, Duration::ZERO) {
+            Err(e) => e,
+            Ok(store) => store.persist(&one_node()).await.unwrap_err(),
+        };
+        assert!(
+            matches!(&err, StoreError::Message(m) if m.contains("locked") || m.contains("busy")),
+            "{err}"
+        );
+        drop(blocker);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn corrupt_snapshot_json_is_typed_error() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let exec = one_node();
+        store.persist(&exec).await.unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "UPDATE executions SET snapshot_json = '{not-json' WHERE id = ?1",
+                params![exec.id().as_str()],
+            )
+            .unwrap();
+        }
+        let err = store.get(exec.id()).await.unwrap_err();
+        assert!(matches!(err, StoreError::Message(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn schema_version_in_json_fail_closed() {
+        use keel_rt::{SCHEMA_VERSION, SnapshotError};
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let exec = one_node();
+        store.persist(&exec).await.unwrap();
+        let mut snap = store.get(exec.id()).await.unwrap().unwrap();
+        snap.schema_version = 99;
+        let json = serde_json::to_string(&snap).unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "UPDATE executions SET snapshot_json = ?1, schema_version = 99 WHERE id = ?2",
+                params![json, exec.id().as_str()],
+            )
+            .unwrap();
+        }
+        let loaded = store.get(exec.id()).await.unwrap().unwrap();
+        let def = store
+            .workflow_definition(exec.id())
+            .await
+            .unwrap()
+            .unwrap();
+        match Execution::from_snapshot(def, loaded) {
+            Err(SnapshotError::SchemaMismatch {
+                found: 99,
+                expected: SCHEMA_VERSION,
+            }) => {}
+            other => panic!("{other:?}"),
+        }
         let _ = std::fs::remove_file(&path);
     }
 }

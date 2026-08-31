@@ -24,3 +24,5 @@ mod definition;
 mod inspect;
 #[path = "adversarial/diamond_repeat.rs"]
 mod diamond_repeat;
+#[path = "adversarial/resume.rs"]
+mod resume;
