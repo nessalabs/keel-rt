@@ -44,6 +44,11 @@ pub(crate) struct Scheduler {
     pending_events: Vec<DomainEvent>,
 }
 
+/// Extra persist attempts on `Event::Shutdown` after the command that produced
+/// the snapshot already tried once. Eight rides out a recovering backend
+/// without turning Drop into an infinite hang.
+const SHUTDOWN_PERSIST_ATTEMPTS: u32 = 8;
+
 impl Scheduler {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -242,11 +247,13 @@ impl Scheduler {
             Event::Shutdown => {
                 self.spawn.abort_all();
                 debug_assert_eq!(self.spawn.inflight_len(), 0);
-                // Retry a persist that failed on the last apply (transient
-                // store Err). `wait` already announced in-memory; without
-                // this flush the file stays at the previous revision and
-                // resume re-invokes work the caller observed as done/cancelled.
-                self.persist_then_emit().await;
+                // Last chance: a failed persist on the command that made
+                // this execution terminal left `last_persisted` behind.
+                // One extra attempt is not enough when the store is still
+                // recovering. Bound the loop so a permanently failing store
+                // cannot hang Drop; Phase 1 still allows in-memory terminal
+                // with a non-durable file when every attempt returns Err.
+                self.persist_then_emit_n(SHUTDOWN_PERSIST_ATTEMPTS).await;
                 return true;
             }
         }
@@ -294,16 +301,23 @@ impl Scheduler {
     /// Persist the durable snapshot, then announce. A failed persist keeps
     /// in-memory apply and does not emit (do not announce a non-durable fact
     /// on the sink). `last_persisted` advances only on persist `Ok`. Shutdown
-    /// retries a failed last persist so a clean `wait`/Drop matches the file.
+    /// retries a recovering store so a clean `wait`/Drop matches the file.
     /// No persist queue — ADR 0001 still applies.
     async fn persist_then_emit(&mut self) {
+        self.persist_then_emit_n(1).await;
+    }
+
+    async fn persist_then_emit_n(&mut self, attempts: u32) {
         let events = std::mem::take(&mut self.pending_events);
         if self.store.is_noop() {
             self.emit_events(&events);
             return;
         }
-        if self.persist_snapshot().await {
-            self.emit_events(&events);
+        for _ in 0..attempts {
+            if self.persist_snapshot().await {
+                self.emit_events(&events);
+                return;
+            }
         }
     }
 

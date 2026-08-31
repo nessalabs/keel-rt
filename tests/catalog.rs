@@ -1370,6 +1370,78 @@ async fn transient_cancel_persist_err_shutdown_flushes_cancelled() {
     );
 }
 
+/// Terminal persist `Err` twice (command + first Shutdown attempt). A single
+/// extra persist on Shutdown used to leave the store Running after `wait()`
+/// Succeeded. Shutdown must keep retrying a recovering store.
+#[tokio::test(flavor = "current_thread")]
+async fn transient_terminal_persist_err_twice_shutdown_retries_until_ok() {
+    struct FailFirstTwoTerminal {
+        inner: MemoryStore,
+        terminal_attempts: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl StateStore for FailFirstTwoTerminal {
+        async fn put(
+            &self,
+            snapshot: &keel_rt::ExecutionSnapshot,
+        ) -> Result<(), StoreError> {
+            self.inner.put(snapshot).await
+        }
+        async fn get(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            if exec.state().is_terminal() {
+                let n = self.terminal_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if n <= 2 {
+                    return Err(StoreError::Message("busy terminal twice".into()));
+                }
+            }
+            self.inner.persist(exec).await
+        }
+        async fn workflow_definition(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::WorkflowDefinition>, StoreError> {
+            self.inner.workflow_definition(id).await
+        }
+    }
+    let inner = MemoryStore::new();
+    let terminal_attempts = Arc::new(AtomicUsize::new(0));
+    let store = FailFirstTwoTerminal {
+        inner: inner.clone(),
+        terminal_attempts: terminal_attempts.clone(),
+    };
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store)
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    drop(rt);
+    tokio::task::yield_now().await;
+    assert_eq!(
+        inner.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Succeeded,
+        "Shutdown must retry past a second transient terminal persist Err"
+    );
+    assert!(
+        terminal_attempts.load(Ordering::SeqCst) >= 3,
+        "Shutdown must keep retrying, got {}",
+        terminal_attempts.load(Ordering::SeqCst)
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn fat_bytes_join_input_is_refcount_not_copy() {
     let fat = Bytes::from(vec![9u8; 64 * 1024]);
