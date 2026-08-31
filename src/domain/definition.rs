@@ -5,24 +5,33 @@ use thiserror::Error;
 
 /// What happens after policy Accepts Failed or TimedOut.
 ///
-/// Retry is decided **before** this. Default is the existing fail-fast contract.
+/// Retry is decided **before** this.
+///
+/// **Library default is [`OnFailure::FailExecution`]** (execution-wide fail-fast).
+/// [`OnFailure::FailSubtree`] is opt-in on [`WorkflowDefinition::builder`] via
+/// `.on_failure(...)`. It is not a `Runtime` default, feature flag, or process
+/// static — existing workflows keep fail-fast unless they set it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnFailure {
-    /// Cancel every non-terminal node; execution [`Failed`](crate::ExecutionState::Failed).
+    /// Library default. Cancel every non-terminal node; execution
+    /// [`Failed`](crate::ExecutionState::Failed).
     #[default]
     FailExecution,
-    /// Cancel only AllSucceeded descendants of the failed/timed-out node.
-    /// Siblings keep running. Execution is not Failed.
+    /// Opt-in. Cancel only AllSucceeded descendants of the failed/timed-out
+    /// node. Siblings keep running. Execution is not Failed.
     FailSubtree,
 }
 
 /// When a node becomes Ready relative to its predecessors.
+///
+/// **Library default is [`Join::AllSucceeded`]** (AND-join). [`Join::AllDone`]
+/// is opt-in per node via [`WorkflowDefinitionBuilder::join`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Join {
-    /// AND: Ready only when every predecessor is Succeeded.
+    /// Library default. AND: Ready only when every predecessor is Succeeded.
     #[default]
     AllSucceeded,
-    /// Ready when every predecessor is terminal. `inputs_for` is succeeded preds only.
+    /// Opt-in. Ready when every predecessor is terminal. `inputs_for` is succeeded preds only.
     AllDone,
 }
 
@@ -60,6 +69,10 @@ pub enum DefinitionError {
 }
 
 /// Validated DAG. Indices stay private; callers use [`NodeId`].
+///
+/// Failure scope and join predicates live here — the only config surface:
+/// `.on_failure(OnFailure::FailSubtree)` and `.join(id, Join::AllDone)`.
+/// Both default to fail-fast / AND (`FailExecution`, `AllSucceeded`).
 #[derive(Clone, Debug)]
 pub struct WorkflowDefinition {
     pub id: WorkflowId,
@@ -194,13 +207,15 @@ impl WorkflowDefinitionBuilder {
         self
     }
 
-    /// Workflow-level failure scope. Default [`OnFailure::FailExecution`].
+    /// Opt-in failure scope. Omit this to keep the library default
+    /// [`OnFailure::FailExecution`].
     pub fn on_failure(mut self, on_failure: OnFailure) -> Self {
         self.on_failure = on_failure;
         self
     }
 
-    /// Per-node join. Default [`Join::AllSucceeded`]. Unknown ids fail at `build`.
+    /// Opt-in per-node join. Omit this to keep [`Join::AllSucceeded`].
+    /// Unknown ids fail at `build`.
     pub fn join(mut self, id: impl Into<NodeId>, join: Join) -> Self {
         self.node_joins.push((id.into(), join));
         self
@@ -343,7 +358,17 @@ mod tests {
     }
 
     #[test]
-    fn on_failure_and_join_defaults() {
+    fn on_failure_library_default_is_fail_execution() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap();
+        assert_eq!(def.on_failure(), OnFailure::FailExecution);
+        assert_eq!(def.join_of(&NodeId::new("a")), Some(Join::AllSucceeded));
+    }
+
+    #[test]
+    fn on_failure_and_join_opt_in() {
         let def = WorkflowDefinition::builder("wf")
             .node("a", "e")
             .node("b", "e")

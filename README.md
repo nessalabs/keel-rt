@@ -78,13 +78,31 @@ definition ──► Runtime::start ──► ExecutionHandle
 ```
 
 - **Join default is AND (`AllSucceeded`).** A node becomes Ready only when every
-  predecessor is Succeeded. `Join::AllDone` is Ready when every predecessor is
-  terminal; `inputs_for` still contains succeeded preds only.
-- **Fail-fast (`OnFailure::FailExecution`, default).** After policy Accepts
-  Failed/TimedOut, that node is Failed, all non-terminal nodes are Cancelled,
-  execution is Failed. `OnFailure::FailSubtree` cancels only AllSucceeded
-  descendants of the failed node; siblings keep running; execution becomes
-  `Completed` (not Failed) when every node is terminal.
+  predecessor is Succeeded. `Join::AllDone` is **opt-in per node**.
+- **Fail-fast (`OnFailure::FailExecution`) is the library default.** After policy
+  Accepts Failed/TimedOut, that node is Failed, all non-terminal nodes are
+  Cancelled, execution is Failed. `OnFailure::FailSubtree` and `Join::AllDone`
+  are **opt-in on `WorkflowDefinition` only** — not a `Runtime` default, feature
+  flag, or process static. `WorkflowTest` also defaults to FailExecution.
+
+### Opt-in failure scope (definition only)
+
+```rust
+use keel_rt::{Join, OnFailure, WorkflowDefinition};
+
+let def = WorkflowDefinition::builder("crawl")
+    .on_failure(OnFailure::FailSubtree)   // omit → FailExecution
+    .node("seed", "ok")
+    .node("child", "ok")
+    .node("reducer", "ok")
+    .edge("seed", "child")
+    .edge("child", "reducer")
+    .join("reducer", Join::AllDone)       // omit → AllSucceeded
+    .build()?;
+```
+
+`Runtime::builder()` does not take `on_failure`. Configure it on the definition
+you pass to `Runtime::start`.
 - **Dataflow.** Opaque `bytes::Bytes` keyed by `NodeId`. Dependents receive a
   `HashMap` of succeeded predecessors' outputs. The kernel does not interpret.
 - **Waiting.** Executor may return `Waiting { token }`. The permit is released.

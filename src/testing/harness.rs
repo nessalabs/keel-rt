@@ -18,6 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Fluent builder: `.node` / `.edge` / `.concurrency` / `.policy` / `.store` / `.run()`.
+///
+/// Defaults to [`OnFailure::FailExecution`] and [`Join::AllSucceeded`] so
+/// existing tests keep execution-wide fail-fast. Call `.on_failure` / `.join`
+/// only when a test opts in.
 pub struct WorkflowTest {
     workflow_id: String,
     nodes: Vec<(String, Arc<dyn Executor>)>,

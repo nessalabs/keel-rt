@@ -1,4 +1,5 @@
-//! `OnFailure::FailSubtree` + `Join::AllDone`. Default remains FailExecution.
+//! `OnFailure::FailSubtree` + `Join::AllDone` are **opt-in**.
+//! Library default remains `OnFailure::FailExecution` (this file never flips it).
 //!
 //! `cargo test --test scenarios -- --test-threads=1`
 

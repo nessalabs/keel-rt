@@ -19,6 +19,9 @@ use tokio_util::sync::CancellationToken;
 /// Tests should use a timeout at least this large; production can override.
 pub const DEFAULT_CANCEL_BOUND: Duration = Duration::from_millis(50);
 
+/// Runtime bundle. [`OnFailure`](crate::OnFailure) / [`Join`](crate::Join) are
+/// **not** set here — they belong on [`WorkflowDefinition`](crate::WorkflowDefinition).
+/// The library default remains [`OnFailure::FailExecution`](crate::OnFailure::FailExecution).
 pub struct Runtime {
     store: Arc<dyn StateStore>,
     policy: Arc<dyn Policy>,

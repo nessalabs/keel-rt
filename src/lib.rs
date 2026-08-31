@@ -7,6 +7,10 @@
 //! Execution is the aggregate. Node is an entity inside it. Ids / outcomes /
 //! snapshots are value objects. Policy and Executor are domain ports.
 //! StateStore is the repository port.
+//!
+//! [`OnFailure::FailExecution`] is the library default (fail-fast). FailSubtree
+//! and AllDone are opt-in on [`WorkflowDefinition`] only — not a Runtime or
+//! process-wide switch.
 
 pub mod domain;
 pub mod runtime;
