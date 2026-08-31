@@ -24,6 +24,7 @@ pub trait StateStore: Send + Sync {
 
     /// Persist the live aggregate. Default builds a full snapshot and `put`s it.
     /// [`MemoryStore`] updates only dirty node slots after the first write.
+    /// See `docs/adr/0002-store-persist-live-aggregate.md`.
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
         self.put(&exec.snapshot()).await
     }
