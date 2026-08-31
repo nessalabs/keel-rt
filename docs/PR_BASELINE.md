@@ -78,9 +78,17 @@ Unchanged (say so on PRs that only refactor):
 - When a caller cancels (or drops a non-consumed handle) after the execution
   is already terminal, it used to apply `Cancel` and rewrite `Succeeded` /
   `Failed` to `Cancelled`. Now cancel is a no-op on a terminal execution.
+- When `Policy::decide` panics under opt-in `FailSubtree`, it used to fail-fast
+  the execution (`Failed`, not `Completed`). Now it still does — process
+  resilience is not graph resilience. Executor panic under `FailSubtree` still
+  honours FailSubtree (`Completed`, sibling runs).
+- When `EventSink::emit` blocks, inspect used to wait behind apply (unbounded
+  inbox, ADR 0001). Now it still does: stall, not a lock-cycle
+  (`eventsink_blocking_does_not_deadlock_inspect`).
 - Phase 1 failure catalog: [`docs/FAILURE_CATALOG.md`](FAILURE_CATALOG.md)
-  (zero MISSING rows).
+  (zero MISSING rows; hunt pass pins production paths the packs did not prove).
 
-Architecture (this change): **after = before**. No module split. New public
-items: `DefinitionError::{EmptyNodeId,EmptyWorkflowId,EmptyExecutorId}`,
+Architecture (this change): **after = before**. No module split. Hunt pass is
+tests + catalog only. Public items from the catalog close remain:
+`DefinitionError::{EmptyNodeId,EmptyWorkflowId,EmptyExecutorId}`,
 `Display` for `NodeState` / `ExecutionState`.

@@ -1,4 +1,4 @@
-use keel_rt::{DefinitionError, WorkflowDefinition};
+use keel_rt::{DefinitionError, Join, WorkflowDefinition};
 
 #[test]
 fn cycle_is_rejected() {
@@ -27,6 +27,16 @@ fn disconnected_node_rejected() {
     let err = WorkflowDefinition::builder("wf")
         .node("a", "e")
         .edge("a", "ghost")
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, DefinitionError::DisconnectedNode(id) if id.as_str() == "ghost"));
+}
+
+#[test]
+fn join_unknown_node_is_disconnected() {
+    let err = WorkflowDefinition::builder("wf")
+        .node("a", "e")
+        .join("ghost", Join::AllDone)
         .build()
         .unwrap_err();
     assert!(matches!(err, DefinitionError::DisconnectedNode(id) if id.as_str() == "ghost"));

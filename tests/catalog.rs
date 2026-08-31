@@ -6,15 +6,16 @@
 use bytes::Bytes;
 use keel_rt::testing::{NetFault, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, ApplyError, Execution, ExecutionContext, ExecutionState,
-    FunctionExecutor, Join, MemoryStore, NodeId, NodeOutcome, NodeState, OnFailure, Policy,
-    PolicyDecision, Resume, ResumeToken, RetryPolicy, Runtime, StateStore, StoreError, Timestamp,
-    WorkflowDefinition, DEFAULT_CANCEL_BOUND, SCHEMA_VERSION,
+    AcceptPolicy, ApplyCmd, ApplyError, DomainEvent, EventSink, Execution, ExecutionContext,
+    ExecutionState, FunctionExecutor, Join, MemoryStore, NodeId, NodeOutcome, NodeState,
+    OnFailure, Policy, PolicyDecision, Resume, ResumeToken, RetryPolicy, Runtime, StateStore,
+    StoreError, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND, SCHEMA_VERSION,
 };
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 const BOUND: Duration = Duration::from_secs(5);
 
@@ -666,66 +667,71 @@ fn second_finish_same_attempt_after_success_is_noop() {
 
 // --- ADR 0001 / persist backpressure ------------------------------------------
 
-struct BlockingPersist {
-    delay: Duration,
-    entered: Arc<AtomicUsize>,
+struct GatePersist {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    gated: AtomicUsize,
+    inner: MemoryStore,
 }
 
 #[async_trait::async_trait]
-impl StateStore for BlockingPersist {
-    async fn put(&self, _snapshot: &keel_rt::ExecutionSnapshot) -> Result<(), StoreError> {
-        Ok(())
+impl StateStore for GatePersist {
+    async fn put(&self, snapshot: &keel_rt::ExecutionSnapshot) -> Result<(), StoreError> {
+        self.inner.put(snapshot).await
     }
 
     async fn get(
         &self,
-        _id: &keel_rt::ExecutionId,
+        id: &keel_rt::ExecutionId,
     ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
-        Ok(None)
+        self.inner.get(id).await
     }
 
-    async fn persist(&self, _exec: &Execution) -> Result<(), StoreError> {
-        self.entered.fetch_add(1, Ordering::SeqCst);
-        tokio::time::sleep(self.delay).await;
-        Ok(())
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        if self.gated.fetch_add(1, Ordering::SeqCst) == 0 {
+            let wait = self.release.notified();
+            self.entered.notify_waiters();
+            wait.await;
+        }
+        self.inner.persist(exec).await
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn inspect_during_blocking_persist_completes_after_persist() {
-    let entered = Arc::new(AtomicUsize::new(0));
-    let store = BlockingPersist {
-        delay: Duration::from_millis(80),
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let store = GatePersist {
         entered: entered.clone(),
+        release: release.clone(),
+        gated: AtomicUsize::new(0),
+        inner: MemoryStore::new(),
     };
     let def = WorkflowDefinition::builder("wf")
-        .node("h", "h")
+        .node("w", "w")
         .build()
         .unwrap();
+    let parked = entered.notified();
     let rt = Runtime::builder()
         .store(store)
-        .register_fn("h", |ctx: ExecutionContext| async move {
-            loop {
-                ctx.sleep(Duration::from_secs(60)).await;
+        .register_fn("w", |_ctx: ExecutionContext| async {
+            NodeOutcome::Waiting {
+                token: ResumeToken::issue(keel_rt::ExecutionId::new(), NodeId::new("w"), 1),
             }
         })
         .build();
     let handle = rt.start(def).expect("start");
-    let snap = tokio::time::timeout(BOUND, handle.inspect())
+    tokio::time::timeout(BOUND, parked)
+        .await
+        .expect("persist must enter before inspect is sent");
+    let inspect = handle.inspect();
+    release.notify_waiters();
+    let snap = tokio::time::timeout(BOUND, inspect)
         .await
         .expect("inspect must not deadlock behind a blocking persist (ADR 0001)");
-    assert!(
-        entered.load(Ordering::SeqCst) >= 1,
-        "persist must have been entered; inspect waited (backpressure), then completed"
-    );
     assert_ne!(snap.workflow_id.as_str(), "stopped");
     handle.cancel().await;
-    tokio::time::timeout(
-        DEFAULT_CANCEL_BOUND + Duration::from_millis(200),
-        handle.wait(),
-    )
-    .await
-    .expect("cancel hang");
+    within(handle.wait()).await;
 }
 
 // --- Display -------------------------------------------------------------------
@@ -787,4 +793,672 @@ async fn memory_store_is_the_builder_default() {
         store.get(&id).await.unwrap().unwrap().state,
         ExecutionState::Succeeded
     );
+}
+
+// --- Hunt: production paths the packs did not actually prove -------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn drop_runtime_while_running_and_waiting_keeps_execution() {
+    let hanging = Arc::new(AtomicBool::new(false));
+    let def_run = WorkflowDefinition::builder("run")
+        .node("h", "h")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .register_fn("h", {
+            let hanging = hanging.clone();
+            move |ctx: ExecutionContext| {
+                let hanging = hanging.clone();
+                async move {
+                    hanging.store(true, Ordering::SeqCst);
+                    loop {
+                        if ctx.cancel.is_cancelled() {
+                            return NodeOutcome::Failed(keel_rt::NodeError::new("cancelled"));
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        })
+        .build();
+    let handle = rt.start(def_run).expect("start");
+    drop(rt);
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if hanging.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("execute started after Runtime drop");
+    let snap = handle.inspect().await;
+    assert_eq!(snap.state, ExecutionState::Running);
+    handle.cancel().await;
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+
+    let def_wait = WorkflowDefinition::builder("wait")
+        .node("w", "w")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .register_fn("w", |_ctx: ExecutionContext| async {
+            NodeOutcome::Waiting {
+                token: ResumeToken::issue(keel_rt::ExecutionId::new(), NodeId::new("w"), 1),
+            }
+        })
+        .build();
+    let handle = rt.start(def_wait).expect("start");
+    drop(rt);
+    assert_eq!(within(handle.wait_stable()).await, ExecutionState::Waiting);
+    let token = handle
+        .inspect()
+        .await
+        .node(&NodeId::new("w"))
+        .and_then(|n| n.resume_token.clone())
+        .expect("token");
+    handle
+        .resume(
+            token,
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn slow_execute_does_not_stall_inspect_or_cancel() {
+    let in_execute = Arc::new(AtomicBool::new(false));
+    let def = WorkflowDefinition::builder("wf")
+        .node("slow", "slow")
+        .node("idle", "idle")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .concurrency(1)
+        .register_fn("slow", {
+            let in_execute = in_execute.clone();
+            move |ctx: ExecutionContext| {
+                let in_execute = in_execute.clone();
+                async move {
+                    in_execute.store(true, Ordering::SeqCst);
+                    loop {
+                        if ctx.cancel.is_cancelled() {
+                            return NodeOutcome::Failed(keel_rt::NodeError::new("cancelled"));
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        })
+        .register_fn("idle", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"idle"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if in_execute.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("slow execute entered");
+    let snap = handle.inspect().await;
+    assert_eq!(
+        snap.state,
+        ExecutionState::Running,
+        "inspect must return while execute is still in-flight (apply does not await execute)"
+    );
+    assert!(matches!(
+        snap.node(&NodeId::new("slow")).map(|n| &n.state),
+        Some(NodeState::Running { .. })
+    ));
+    let idle = snap.node(&NodeId::new("idle")).map(|n| n.state.clone());
+    assert!(
+        matches!(idle, Some(NodeState::Pending) | Some(NodeState::Ready { .. })),
+        "conc 1: idle must not start while slow holds the permit, got {idle:?}"
+    );
+    handle.cancel().await;
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fail_execution_all_done_reducer_never_runs_but_terminates() {
+    let run = within(
+        WorkflowTest::new()
+            .concurrency(2)
+            .join("reducer", Join::AllDone)
+            .node("ok", ok("ok"))
+            .node("fail", ScriptedExecutor::new("fail").fail("nope"))
+            .node("reducer", ok("reducer"))
+            .edge("ok", "reducer")
+            .edge("fail", "reducer")
+            .run(),
+    )
+    .await;
+    assert_eq!(
+        run.execution_state().await,
+        ExecutionState::Failed,
+        "FailExecution + AllDone must fail-fast, not hang waiting for the reducer"
+    );
+    assert!(matches!(run.state("reducer").await, NodeState::Cancelled));
+    assert!(
+        run.scripted("reducer").attempts().is_empty(),
+        "AllDone reducer must never start under fail-fast"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn clock_jump_over_several_staggered_retry_deadlines() {
+    let test = WorkflowTest::new()
+        .concurrency(2)
+        .node(
+            "fast",
+            ScriptedExecutor::new("fast")
+                .fail("fast")
+                .succeed(Bytes::from_static(b"fok")),
+        )
+        .node(
+            "slow",
+            ScriptedExecutor::new("slow")
+                .then(keel_rt::testing::ScriptedAction::Delay {
+                    delay: Duration::from_millis(50),
+                    then: Box::new(keel_rt::testing::ScriptedAction::Fail("slow".into())),
+                })
+                .succeed(Bytes::from_static(b"sok")),
+        )
+        .policy(RetryPolicy::new(3, Duration::from_millis(100)));
+    let clock = test.fake_clock();
+    let run = test.start().await;
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if matches!(
+                run.state("fast").await,
+                NodeState::Ready {
+                    runnable_at: Some(_)
+                }
+            ) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fast parked");
+    clock.advance(Duration::from_millis(50));
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if matches!(
+                run.state("slow").await,
+                NodeState::Ready {
+                    runnable_at: Some(_)
+                }
+            ) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("slow parked");
+    assert!(
+        matches!(
+            run.state("fast").await,
+            NodeState::Ready {
+                runnable_at: Some(_)
+            }
+        ),
+        "fast must still be parked when slow parks"
+    );
+    assert!(
+        !matches!(run.state("fast").await, NodeState::Waiting { .. })
+            && !matches!(run.state("slow").await, NodeState::Waiting { .. }),
+        "retry must never be Waiting"
+    );
+    clock.advance(Duration::from_secs(10));
+    within(run.wait_stable()).await;
+    assert_eq!(run.execution_state().await, ExecutionState::Succeeded);
+    assert_eq!(run.scripted("fast").attempts(), vec![1, 2]);
+    assert_eq!(run.scripted("slow").attempts(), vec![1, 2]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn store_error_on_terminal_write_keeps_in_memory_succeeded() {
+    struct FailTerminal {
+        inner: MemoryStore,
+        terminal_fails: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl StateStore for FailTerminal {
+        async fn put(
+            &self,
+            snapshot: &keel_rt::ExecutionSnapshot,
+        ) -> Result<(), StoreError> {
+            self.inner.put(snapshot).await
+        }
+        async fn get(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            if exec.state().is_terminal() {
+                self.terminal_fails.fetch_add(1, Ordering::SeqCst);
+                return Err(StoreError::Message("terminal persist".into()));
+            }
+            self.inner.persist(exec).await
+        }
+    }
+    let terminal_fails = Arc::new(AtomicUsize::new(0));
+    let store = FailTerminal {
+        inner: MemoryStore::new(),
+        terminal_fails: terminal_fails.clone(),
+    };
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store)
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    assert_eq!(
+        within(rt.run(def)).await.unwrap(),
+        ExecutionState::Succeeded
+    );
+    assert!(
+        terminal_fails.load(Ordering::SeqCst) >= 1,
+        "terminal persist must have been attempted (and failed)"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fat_bytes_join_input_is_refcount_not_copy() {
+    let fat = Bytes::from(vec![9u8; 64 * 1024]);
+    let run = within(
+        WorkflowTest::new()
+            .node("fat", ScriptedExecutor::new("fat").succeed(fat.clone()))
+            .node("join", ok("join"))
+            .edge("fat", "join")
+            .run(),
+    )
+    .await;
+    let out = run.output("fat").await.expect("fat output");
+    let input = run
+        .inputs("join")
+        .await
+        .get(&NodeId::new("fat"))
+        .cloned()
+        .expect("join input");
+    assert_eq!(out.len(), fat.len());
+    assert_eq!(
+        out.as_ptr(),
+        input.as_ptr(),
+        "join inputs must clone Bytes (refcount), not copy the buffer"
+    );
+}
+
+#[test]
+fn retry_due_twice_does_not_double_runnable() {
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "e")
+        .build()
+        .unwrap();
+    let mut ex = Execution::new(def);
+    let now = Timestamp::from_millis(0);
+    let p = RetryPolicy::new(3, Duration::from_millis(10));
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+        .unwrap();
+    ex.apply(
+        ApplyCmd::FinishNode {
+            node_id: "a".into(),
+            attempt: 1,
+            outcome: Ok(NodeOutcome::failed("once")),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    let first = ex
+        .apply(ApplyCmd::RetryDue { node_id: "a".into() }, &p, Timestamp::from_millis(10))
+        .unwrap();
+    assert!(first.changed);
+    let rev = ex.revision();
+    let second = ex
+        .apply(ApplyCmd::RetryDue { node_id: "a".into() }, &p, Timestamp::from_millis(10))
+        .unwrap();
+    assert!(!second.changed, "second Timer for the same retry is a no-op");
+    assert_eq!(ex.revision(), rev);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retry_storm_under_concurrency_cap_never_waiting() {
+    let n = 6usize;
+    let mut test = WorkflowTest::new()
+        .concurrency(2)
+        .policy(RetryPolicy::new(2, Duration::from_millis(100)));
+    for i in 0..n {
+        let id = format!("n{i}");
+        test = test.node(
+            &id,
+            ScriptedExecutor::new(id.as_str())
+                .fail("once")
+                .succeed(Bytes::from_static(b"ok")),
+        );
+    }
+    let clock = test.fake_clock();
+    let run = test.start().await;
+    tokio::time::timeout(BOUND, async {
+        loop {
+            let snap = run.snapshot().await;
+            let running = snap
+                .nodes
+                .values()
+                .filter(|n| matches!(n.state, NodeState::Running { .. }))
+                .count();
+            assert!(running <= 2, "retry storm Running {running} > cap 2");
+            assert_ne!(snap.state, ExecutionState::Waiting, "retry is never Waiting");
+            let parked = snap
+                .nodes
+                .values()
+                .filter(|n| matches!(n.state, NodeState::Ready { runnable_at: Some(_) }))
+                .count();
+            if parked == n {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all nodes parked at retry");
+    clock.advance(Duration::from_millis(100));
+    within(run.wait_stable()).await;
+    assert_eq!(run.execution_state().await, ExecutionState::Succeeded);
+    for i in 0..n {
+        assert_eq!(run.scripted(&format!("n{i}")).attempts(), vec![1, 2]);
+    }
+}
+
+struct PanicPolicy;
+impl Policy for PanicPolicy {
+    fn decide(&self, _o: &NodeOutcome, _a: u32) -> PolicyDecision {
+        panic!("policy exploded");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn policy_panic_fail_fasts_even_under_fail_subtree() {
+    let run = within(
+        WorkflowTest::new()
+            .concurrency(2)
+            .on_failure(OnFailure::FailSubtree)
+            .policy(PanicPolicy)
+            .node("a", ok("a"))
+            .node("sib", ScriptedExecutor::new("sib").hang(false))
+            .run(),
+    )
+    .await;
+    assert_eq!(
+        run.execution_state().await,
+        ExecutionState::Failed,
+        "Policy::decide panic is fail-fast (process lives; graph does not use FailSubtree)"
+    );
+    let sib = run.state("sib").await;
+    assert!(
+        matches!(sib, NodeState::Cancelled | NodeState::Failed),
+        "hanging sibling must not leak, got {sib:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_ignore_cancel_fanout_meets_bound() {
+    let n = 8usize;
+    let mut test = WorkflowTest::new()
+        .concurrency(8)
+        .cancel_bound(DEFAULT_CANCEL_BOUND);
+    for i in 0..n {
+        let id = format!("h{i}");
+        test = test.node(&id, ScriptedExecutor::new(id.as_str()).hang(true));
+    }
+    let run = test.start().await;
+    tokio::time::timeout(BOUND, async {
+        loop {
+            let snap = run.snapshot().await;
+            let running = snap
+                .nodes
+                .values()
+                .filter(|n| matches!(n.state, NodeState::Running { .. }))
+                .count();
+            if running == n {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all ignore_cancel hangs Running");
+    run.cancel().await;
+    tokio::time::timeout(
+        DEFAULT_CANCEL_BOUND + Duration::from_millis(100),
+        run.wait_stable(),
+    )
+    .await
+    .expect("cancel bound under fanout is a lie if this times out");
+    assert_eq!(run.execution_state().await, ExecutionState::Cancelled);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn memory_store_persists_failed_cancelled_completed_terminals() {
+    let store = MemoryStore::new();
+    let failed = within(
+        WorkflowTest::new()
+            .store(store.clone())
+            .node("a", ScriptedExecutor::new("a").fail("boom"))
+            .run(),
+    )
+    .await;
+    assert_eq!(failed.execution_state().await, ExecutionState::Failed);
+    let id = failed.snapshot().await.execution_id.clone();
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Failed
+    );
+
+    let store = MemoryStore::new();
+    let run = WorkflowTest::new()
+        .store(store.clone())
+        .node("h", ScriptedExecutor::new("h").hang(false))
+        .start()
+        .await;
+    tokio::time::timeout(BOUND, run.scripted("h").wait_until_hanging())
+        .await
+        .expect("hang");
+    run.cancel().await;
+    within(run.wait_stable()).await;
+    let id = run.snapshot().await.execution_id.clone();
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Cancelled
+    );
+
+    let store = MemoryStore::new();
+    let completed = within(
+        WorkflowTest::new()
+            .store(store.clone())
+            .on_failure(OnFailure::FailSubtree)
+            .node("a", ScriptedExecutor::new("a").fail("boom"))
+            .run(),
+    )
+    .await;
+    assert_eq!(completed.execution_state().await, ExecutionState::Completed);
+    let id = completed.snapshot().await.execution_id.clone();
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Completed
+    );
+}
+
+/// `emit` is sync on apply. A blocking sink stalls inspect until it returns
+/// (persist-class backpressure). The unbounded inbox must still accept the
+/// Inspect send — that is not a lock-cycle. Proved on multi_thread so the
+/// test task can run while apply is inside `emit`; on current_thread a
+/// blocking emit freezes the runtime until it returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eventsink_blocking_does_not_deadlock_inspect() {
+    struct BlockFirstEmit {
+        entered: Arc<AtomicBool>,
+        in_block: Arc<AtomicBool>,
+        pair: Arc<(Mutex<bool>, Condvar)>,
+    }
+    impl EventSink for BlockFirstEmit {
+        fn emit(&self, _event: &DomainEvent) {
+            if !self.entered.swap(true, Ordering::SeqCst) {
+                self.in_block.store(true, Ordering::SeqCst);
+                let (lock, cv) = &*self.pair;
+                let mut g = lock.lock().expect("block-first emit");
+                while !*g {
+                    g = cv.wait(g).expect("block-first emit");
+                }
+                self.in_block.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+    let entered = Arc::new(AtomicBool::new(false));
+    let in_block = Arc::new(AtomicBool::new(false));
+    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .sink(BlockFirstEmit {
+            entered: entered.clone(),
+            in_block: in_block.clone(),
+            pair: pair.clone(),
+        })
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if entered.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("EventSink::emit must enter");
+    assert!(
+        in_block.load(Ordering::SeqCst),
+        "inspect is sent while emit still holds the apply task"
+    );
+    let inspect = handle.inspect();
+    let release = async {
+        let (lock, cv) = &*pair;
+        *lock.lock().expect("release emit") = true;
+        cv.notify_one();
+    };
+    let (snap, _) = tokio::time::timeout(BOUND, async { tokio::join!(inspect, release) })
+        .await
+        .expect("inspect send must not deadlock behind a blocking EventSink (ADR 0001)");
+    assert_ne!(snap.workflow_id.as_str(), "stopped");
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+}
+
+/// Executor panic is a node Failed. FailSubtree is honoured (unlike Policy
+/// panic, which is fail-fast). conc 1: the panic path must release the
+/// permit so the sibling can run.
+#[tokio::test(flavor = "current_thread")]
+async fn executor_panic_fail_subtree_releases_permit_sibling_runs() {
+    let run = within(
+        WorkflowTest::new()
+            .concurrency(1)
+            .on_failure(OnFailure::FailSubtree)
+            .node("boom", ScriptedExecutor::new("boom").panic())
+            .node("sib", ok("sib"))
+            .run(),
+    )
+    .await;
+    assert_eq!(
+        run.execution_state().await,
+        ExecutionState::Completed,
+        "executor panic under FailSubtree is graph-local, not fail-fast"
+    );
+    assert!(matches!(run.state("boom").await, NodeState::Failed));
+    assert!(
+        matches!(run.state("sib").await, NodeState::Succeeded),
+        "permit must be released after executor panic; sibling must run"
+    );
+}
+
+/// One Runtime, two sequential starts: executor panic must not leak JoinSet
+/// / permits into the next execution.
+#[tokio::test(flavor = "current_thread")]
+async fn next_start_after_executor_panic_succeeds() {
+    let rt = Runtime::builder()
+        .concurrency(1)
+        .register(ScriptedExecutor::new("boom").panic())
+        .register_fn("ok", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let boom = WorkflowDefinition::builder("boom")
+        .node("b", "boom")
+        .build()
+        .unwrap();
+    assert_eq!(within(rt.run(boom)).await.unwrap(), ExecutionState::Failed);
+    let ok_def = WorkflowDefinition::builder("ok")
+        .node("a", "ok")
+        .build()
+        .unwrap();
+    assert_eq!(
+        within(rt.run(ok_def)).await.unwrap(),
+        ExecutionState::Succeeded,
+        "next start on the same Runtime must not hang after an executor panic"
+    );
+}
+
+/// Hourglass + FailExecution: sources succeed, neck fails, sinks never start,
+/// execution terminates Failed (AND-join default, fail-fast default).
+#[tokio::test(flavor = "current_thread")]
+async fn hourglass_neck_fail_cancels_sinks_and_terminates() {
+    let n = 4usize;
+    let mut test = WorkflowTest::new()
+        .concurrency(8)
+        .node("neck", ScriptedExecutor::new("neck").fail("neck"));
+    for i in 0..n {
+        let a = format!("a{i}");
+        let b = format!("b{i}");
+        test = test
+            .node(&a, ok(&a))
+            .node(&b, ok(&b))
+            .edge(&a, "neck")
+            .edge("neck", &b);
+    }
+    let run = within(test.run()).await;
+    assert_eq!(
+        run.execution_state().await,
+        ExecutionState::Failed,
+        "hourglass neck fail must fail-fast, not hang on AND-join sinks"
+    );
+    for i in 0..n {
+        assert!(matches!(run.state(&format!("a{i}")).await, NodeState::Succeeded));
+        assert!(matches!(run.state(&format!("b{i}")).await, NodeState::Cancelled));
+        assert!(
+            run.scripted(&format!("b{i}")).attempts().is_empty(),
+            "sink b{i} must never start"
+        );
+    }
 }
