@@ -27,7 +27,7 @@ jobs:
       - name: Default suite (no 100k)
         run: |
           cargo test --lib \
-            --test adversarial --test catalog --test consumer --test graph --test resilience \
+            --test adversarial --test catalog --test consumer --test graph             --test resilience --test resume \
             --test scenarios --test stress --test stress_uneven --test structure \
             --test workloads \
             -- --test-threads=1

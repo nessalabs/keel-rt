@@ -90,6 +90,64 @@ impl Scheduler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_execution(
+        exec: Execution,
+        policy: Arc<dyn Policy>,
+        store: Arc<dyn StateStore>,
+        sink: Arc<dyn EventSink>,
+        registry: ExecutorRegistry,
+        clock: Arc<dyn Clock>,
+        park: ChannelPark,
+        tx: EventTx,
+        concurrency: usize,
+        cancel: CancellationToken,
+        state_tx: watch::Sender<ExecutionState>,
+        cancel_bound: Duration,
+    ) -> Self {
+        let n = exec.definition().len();
+        let executors: Vec<Option<Arc<dyn Executor>>> = (0..n)
+            .map(|i| registry.get(exec.definition().executor_at(NodeSlot(i))))
+            .collect();
+        let _ = state_tx.send(exec.state());
+        Self {
+            spawn: SpawnSet::new(tx.clone(), n),
+            exec,
+            policy,
+            store,
+            sink,
+            clock,
+            park,
+            ready: VecDeque::new(),
+            queued: vec![0u8; n],
+            available: concurrency.max(1),
+            held: vec![0u8; n],
+            executors,
+            cancel,
+            state_tx,
+            cancel_bound,
+            tx,
+            bound_armed: false,
+            cancel_bound_task: None,
+            last_persisted: 0,
+            pending_events: Vec::new(),
+        }
+    }
+
+    pub(crate) fn execution_id(&self) -> crate::domain::ids::ExecutionId {
+        self.exec.id().clone()
+    }
+
+    fn enqueue_dispatchable(&mut self) {
+        let n = self.exec.definition().len();
+        for i in 0..n {
+            let slot = NodeSlot(i);
+            if self.exec.is_dispatchable_slot(slot) {
+                self.enqueue_slot(slot);
+            }
+        }
+    }
+
     pub(crate) async fn run(mut self) {
         loop {
             let timer = self.exec.next_deadline();
@@ -104,6 +162,15 @@ impl Scheduler {
         match event {
             Event::Start => {
                 self.apply_cmd(ApplyCmd::Start);
+                self.dispatch();
+                self.persist_then_emit().await;
+            }
+            Event::Restore => {
+                if self.exec.state() == ExecutionState::Created {
+                    self.apply_cmd(ApplyCmd::Start);
+                } else {
+                    self.enqueue_dispatchable();
+                }
                 self.dispatch();
                 self.persist_then_emit().await;
             }

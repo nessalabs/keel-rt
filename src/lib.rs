@@ -42,7 +42,8 @@ pub use runtime::executor::{ExecutionContext, Executor, FunctionExecutor};
 pub use runtime::handle::ExecutionHandle;
 pub use runtime::sink::{EventSink, FnSink};
 pub use runtime::runtime::{
-    Runtime, RuntimeBuilder, StartError, UnregisteredExecutors, DEFAULT_CANCEL_BOUND,
+    ResumeError, Runtime, RuntimeBuilder, StartError, UnregisteredExecutors,
+    DEFAULT_CANCEL_BOUND,
 };
 pub use runtime::store::{MemoryStore, NoopStore, StateStore, StoreError};
 pub use runtime::time::Clock;
