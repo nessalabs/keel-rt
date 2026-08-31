@@ -4,8 +4,7 @@
 
 use bytes::Bytes;
 use keel_rt::{
-    DomainEvent, ExecutionContext, ExecutionState, FnSink, NodeId, NodeOutcome, Runtime,
-    WorkflowDefinition,
+    DomainEvent, ExecutionContext, FnSink, NodeId, NodeOutcome, Runtime, WorkflowDefinition,
 };
 use std::process::ExitCode;
 
