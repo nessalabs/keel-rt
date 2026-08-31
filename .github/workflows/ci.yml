@@ -99,5 +99,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.83.0
-      - name: Standing sqlite chaos / load pack
-        run: cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture
+      - name: Standing sqlite chaos / crash-inject
+        run: cargo test -p keel-rt-sqlite --test chaos --test crash_inject -- --test-threads=1 --nocapture

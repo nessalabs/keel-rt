@@ -1,5 +1,20 @@
 # Changelog
 
+## Shutdown retries persist until the store recovers (`chaos/load-p2`)
+
+A single extra persist on Shutdown left sqlite **Running** when the terminal
+write failed twice (command + first Shutdown attempt). `wait()` had already
+returned Succeeded. Resume re-invoked work the caller treated as done. Fix:
+Shutdown retries persist up to eight times. Permanently failing persist is
+still Phase 1 in-memory wins. Fail-fast / AND-join unchanged.
+
+Seeded sqlite crash-inject (`crates/keel-rt-sqlite/tests/crash_inject.rs`)
+runs 256 process-kill/resume seeds against small DAGs (FakeClock, no wall
+sleep) plus constructed killers (clock jump, stale FinishNode, HITL
+duplicate Complete, persisted cancel, AlreadyActive, uncommitted retry
+delay, WAL after Succeeded COMMIT, definition mismatch, unicode ids, 64KiB
+join inputs, FIFO-64, `open` vs `open_fast`). CI job `chaos-sqlite`.
+
 ## Shutdown flushes a transient last persist (`chaos/load-p2`)
 
 `wait()` / Drop-cancel used to leave sqlite at **Running** when the terminal

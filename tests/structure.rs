@@ -269,6 +269,10 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "chaos-sqlite job must run the sqlite chaos pack"
     );
     assert!(
+        ci.contains("--test crash_inject"),
+        "chaos-sqlite job must run the sqlite crash-inject pack"
+    );
+    assert!(
         ci.contains("--test resume_stress"),
         "stress-resume job must run the sqlite resume stress pack"
     );
@@ -306,6 +310,8 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "crash_after_terminal_cas_before_emit_keeps_terminal",
         "resume_256_wide_snapshot_within_bound",
         "transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded",
+        "transient_terminal_persist_err_twice_shutdown_retries_until_ok",
+        "randomized_crash_inject_sqlite",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }

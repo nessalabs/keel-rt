@@ -61,6 +61,53 @@ Running as Ready and re-invokes.
 Process kill (`mem::forget` + drop tokio) still does not flush — that is
 crash-at-Running and stays at-least-once per ADR 0004 / the resume catalog.
 
+## Defect: Shutdown persist was a single extra attempt
+
+**Broke.** Same files. Named tests (failed with `left: Running, right: Succeeded`,
+then kept):
+
+- `transient_terminal_persist_err_twice_shutdown_retries_until_ok` (catalog)
+- `transient_terminal_persist_err_twice_shutdown_retries_sqlite`
+
+### Mechanism
+
+The first fix retried persist **once** on Shutdown. Timeline: NodeFinished
+persist fails (`wait()` already Succeeded) → Drop sends Shutdown → persist
+fails again (`SQLITE_BUSY` / `SQLITE_FULL` still recovering) → file stays
+Running. Resume re-invokes work the caller observed as done.
+
+### Preconditions
+
+Same as the first defect, plus the recovering store still returns `Err` on
+the first Shutdown persist.
+
+### Blast radius
+
+Identical to the first defect whenever the backend needs more than one extra
+attempt (a locked writer, a full disk that is being freed). Fail-fast /
+AND-join unchanged. Permanently failing persist is still Phase 1 in-memory
+wins (`store_error_on_terminal_write_keeps_in_memory_succeeded`).
+
+### Fix
+
+`Event::Shutdown` calls `persist_then_emit_n(8)`. Bounded so Drop cannot hang.
+Apply / watch order unchanged (in-memory still wins live).
+
+## Seeded crash-inject (`crates/keel-rt-sqlite/tests/crash_inject.rs`)
+
+`randomized_crash_inject_sqlite`: xorshift seed, printed on failure. Small
+DAGs (chain, diamond, wide join, hourglass, FailSubtree+AllDone, HITL
+Waiting, retry delay). Crash at a legal moment after a persist (Running,
+Waiting, retry Ready, Failed, cancel, or `wait()` + Shutdown). Reopen the
+sqlite file, `resume`, assert: terminals never re-run, Waiting keeps the
+token, Running-at-crash is attempt+1, AND-join once, fail-fast stays Failed,
+file is not Running if `wait()` already returned Succeeded/Cancelled, no
+permit leak, no hang. 256 seeds / 60s budget; default CI `test` job does not
+run this pack (`chaos-sqlite` does).
+
+If a seed fails: keep it as a named regression. The suite is not a 2000-job
+loop that never crashes.
+
 ## Hunt refutations (from the code, not a passing stress table)
 
 | Suspicion | Verdict | Why it cannot happen / what it is |
@@ -79,6 +126,20 @@ crash-at-Running and stays at-least-once per ADR 0004 / the resume catalog.
 | `open_fast` vs `open` hiding FULL bugs | **same `persist_exec`** | Only `PRAGMA synchronous` differs. Defect tests run both opens. |
 | Permit leak after resume Waiting then Complete | **Waiting never holds a permit** | `NodeFinished` `release_permit_slot` before apply; Waiting is a finished execute. Restore `held` is all zeros. Complete dispatches successors and takes permits. `waiting_releases_permit_sibling_runs`. |
 | Revision 0 reuse / u64 wrap | **impossible in practice** | `Execution::new` revision 0; first `apply` sets 1. Sqlite stores `revision as i64`; wrap would require `> i64::MAX` applies. Reopen loads stored revision; `from_snapshot` keeps it (or +1 if converting Running). Equal revision persist is a no-op, not a clobber. |
+| Clock jump **backward** after persist of `runnable_at` | **`at <= now`, not elapsed** | Park and `is_ready_now` compare absolute `Timestamp`. `saturating_duration_since` is only the sleep length. `now.saturating_sub(runnable_at) == 0` is **not** used as due. Constructed: `clock_jump_backward_after_runnable_at_persist_does_not_fire`. |
+| Clock jump **forward** over staggered retries | **Timer drain** | `Event::Timer` then `while at <= now { RetryDue }`. Sqlite: `clock_jump_forward_over_staggered_retries_sqlite`. |
+| Stale `FinishNode` for attempt N after resume bumped N+1 | **domain no-op** | `finish_node` matches `Running { attempt }` exactly; otherwise `Ok` without bumping revision. Crash drops the old SpawnSet so the Runtime API cannot inject the stale finish. Constructed: `stale_finish_node_after_resume_attempt_bump_is_noop`. |
+| Duplicate HITL Complete / mismatched payload after resume | **typed `ConflictingComplete`** | `apply` Resume on Succeeded compares `last_outcome` (restored from output bytes). Sqlite: `duplicate_hitl_complete_after_sqlite_resume`. |
+| Cancel vs in-flight vs persist of Running | **persisted Cancelled stays Cancelled** | Crash after Cancelled COMMIT: `cancel_persisted_survives_crash_and_resume`. Crash before cancel persist is at-least-once Running (ADR 0004). Persist is inline; Cancel is the next event after the previous persist returns. |
+| Two `resume` + one `start` same id / file | **AlreadyActive per Runtime; start mints a new id** | `claim_active` insert-before-get. `two_resume_plus_start_same_runtime_already_active`. Two Runtimes remain unfenced. |
+| Persist `Err` on **non-terminal** then crash | **last successful persist** | Watch/inspect can be ahead of disk. Sink does not emit on persist `Err`. Crash without Shutdown resumes the last `Ok` snapshot. A failed persist of `Ready { runnable_at }` leaves Running on disk; resume re-invokes immediately (delay was not durable). Contract: `non_terminal_ready_delay_persist_err_then_crash_skips_uncommitted_delay`. Not persist-before-announce (Phase 1 in-memory wins). |
+| `SQLITE_FULL` / `SQLITE_BUSY` during terminal persist + Shutdown | **same `StoreError` as the Shutdown retry** | Wrapper `Err` is the shape. First two terminal persists fail, third succeeds: `transient_terminal_persist_err_twice_shutdown_retries_sqlite`. Permanent fail remains Phase 1. |
+| WAL truncated after COMMIT of Succeeded (`FULL`) | **checkpoint after terminal COMMIT** | `persist_exec` `wal_checkpoint(TRUNCATE)` only if `committed && terminal`. Truncating an empty WAL afterwards still reads Succeeded: `wal_truncated_after_succeeded_commit_still_succeeded_full`. Truncating WAL **before** checkpoint would drop the txn — that is destroying committed frames, not process-kill. `open_fast` NORMAL may lose last frames on **power** loss; process-kill after COMMIT recovers on both (`open_and_open_fast_process_kill_after_running_commit_both_reinvoke`). |
+| Definition mismatch on resume | **fail closed** | `from_snapshot` hash / missing / unknown node. Poisoning `definitions.body` under the stored hash: `definition_mismatch_on_resume_fail_closed`. |
+| Unicode / long NodeIds | **TEXT bind** | `unicode_and_long_node_ids_survive_crash_resume`. No SQL concatenation. |
+| Empty Bytes vs 64KiB join inputs after resume | **JSON round-trip; AND-join sees both** | `empty_and_64kib_join_inputs_after_resume`. `inputs_for_slot` includes `Some` empty Bytes. |
+| FailSubtree sibling still Running when another page Failed, then crash | **failed page not re-run; reducer AllDone once** | `fail_subtree_sibling_running_crash_keeps_failed_page`. |
+| FIFO 64 ready, concurrency 1, crash, resume | **all run; join once** | Resume re-enqueues in **definition order** (`enqueue_dispatchable`), not the original FIFO. Eligibility is unchanged: `fifo_64_ready_concurrency_1_crash_resume_all_run_join_once`. |
 
 ## Previous load pack (not a hunt)
 

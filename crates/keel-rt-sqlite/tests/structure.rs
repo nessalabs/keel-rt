@@ -43,6 +43,8 @@ fn chaos_log_names_the_standing_pack() {
         "drop_handle_mid_persist_cancels_not_succeed",
         "two_runtimes_diamond_no_silent_wrong_terminal",
         "transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded",
+        "transient_terminal_persist_err_twice_shutdown_retries_sqlite",
+        "randomized_crash_inject_sqlite",
     ] {
         assert!(log.contains(name), "CHAOS_LOG missing {name}");
     }
@@ -54,5 +56,16 @@ fn chaos_log_names_the_standing_pack() {
         "fn wide_2k_and_join_crash_resume_of_ready",
     ] {
         assert!(chaos.contains(name), "chaos.rs missing {name}");
+    }
+    let inject = fs::read_to_string(
+        env!("CARGO_MANIFEST_DIR").to_string() + "/tests/crash_inject.rs",
+    )
+    .unwrap();
+    for name in [
+        "fn randomized_crash_inject_sqlite",
+        "fn clock_jump_backward_after_runnable_at_persist_does_not_fire",
+        "fn non_terminal_ready_delay_persist_err_then_crash_skips_uncommitted_delay",
+    ] {
+        assert!(inject.contains(name), "crash_inject.rs missing {name}");
     }
 }

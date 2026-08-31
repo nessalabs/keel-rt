@@ -18,7 +18,7 @@ stress-resume:
 stress-100k:
     cargo test --test stress_100k -- --test-threads=1
 
-# Standing sqlite chaos / load (thousands of jobs, wide AND-join, HITL, two Runtimes).
-# Not coverage.
+# Standing sqlite chaos / load (thousands of jobs, wide AND-join, HITL, two Runtimes)
+# plus the seeded crash-inject pack. Not coverage.
 chaos-sqlite:
-    cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture
+    cargo test -p keel-rt-sqlite --test chaos --test crash_inject -- --test-threads=1 --nocapture
