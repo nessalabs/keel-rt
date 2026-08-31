@@ -75,8 +75,9 @@ Unchanged (say so on PRs that only refactor):
 - When a leaf node fails under opt-in `FailSubtree` (no children), the
   execution used to become `Completed`. Now it still does — FailSubtree does
   not fail-fast the execution.
-- When a caller resumes after cancel, it used to get `ApplyError::ResumeAfterCancel`.
-  Now it still does (not a panic).
+- When a caller cancels (or drops a non-consumed handle) after the execution
+  is already terminal, it used to apply `Cancel` and rewrite `Succeeded` /
+  `Failed` to `Cancelled`. Now cancel is a no-op on a terminal execution.
 - Phase 1 failure catalog: [`docs/FAILURE_CATALOG.md`](FAILURE_CATALOG.md)
   (zero MISSING rows).
 

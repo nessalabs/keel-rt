@@ -144,7 +144,7 @@ exactly-once must make the executor idempotent.
 |---|---|---|---|
 | Cancel Running + Pending sibling | Running Cancelled; pending never starts | `cancel_mid_run_running_sees_token_pending_never_starts` / `cancel_running_pending_sibling_never_starts` | cancel |
 | Cancel Waiting | Cancelled; later resume `ResumeAfterCancel` | `cancel_while_waiting_is_cancelled` | cancel |
-| Cancel already terminal | no-op; still Succeeded | `cancel_already_terminal_is_noop` / `double_cancel_is_noop_and_start_node_rejects_unknown_and_pending` | no-op |
+| Cancel already terminal | no-op; still Succeeded / Failed | `cancel_already_terminal_is_noop` / `cancel_after_failed_stays_failed` / `double_cancel_is_noop_and_start_node_rejects_unknown_and_pending` | no-op |
 | Drop handle | graph Cancelled, not detached | `dropping_execution_handle_cancels_graph_not_detach` / `drop_handle_cancels_unique_owner` | Drop = cancel |
 | Cancel vs in-flight retry timer | Ready with future deadline does not start later | `cancel_ready_with_future_deadline_does_not_start_later` | cancel |
 | Cancel bound | hang ignoring cancel ends within `DEFAULT_CANCEL_BOUND` | `hang_ignore_cancel_ends_within_documented_bound` / `cancel_twice_then_bound_still_cancels_hang` | abort |

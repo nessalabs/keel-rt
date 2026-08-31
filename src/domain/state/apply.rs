@@ -43,7 +43,9 @@ impl Execution {
                 self.resume(token, resume, policy, now, &mut effect)?;
             }
             ApplyCmd::Cancel => {
-                if self.cancelled && self.state == ExecutionState::Cancelled {
+                // Already terminal (Succeeded / Failed / Completed / Cancelled):
+                // no-op. Do not rewrite a finished run to Cancelled.
+                if self.state.is_terminal() {
                     return Ok(effect);
                 }
                 self.cancel_graph(&mut effect);

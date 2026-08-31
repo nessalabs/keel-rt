@@ -491,6 +491,20 @@ async fn cancel_already_terminal_is_noop() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cancel_after_failed_stays_failed() {
+    let run = within(
+        WorkflowTest::new()
+            .node("a", ScriptedExecutor::new("a").fail("boom"))
+            .run(),
+    )
+    .await;
+    assert_eq!(run.execution_state().await, ExecutionState::Failed);
+    run.cancel().await;
+    assert_eq!(run.execution_state().await, ExecutionState::Failed);
+    assert!(matches!(run.state("a").await, NodeState::Failed));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn inspect_during_running_returns_live_snapshot() {
     let run = WorkflowTest::new()
         .node("a", ScriptedExecutor::new("a").hang(false))
