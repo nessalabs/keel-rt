@@ -39,7 +39,11 @@ Sqlite adapter lines are not kernel `src/`.
 | Fat `Bytes` snapshot | MemoryStore refcount; sqlite JSON copy preserves bytes | `test: fat_bytes_resume_join_is_refcount` `test: fat_bytes_sqlite_round_trip_preserves_bytes` `test: fat_payloads_64kib_times_eight_persist_resume` `test: fat_payloads_64kib_times_32_persist_resume_within_bound` `test: fat_bytes_join_input_is_refcount_not_copy` |
 | Sqlite busy / locked / truncated / empty | typed `StoreError` or empty db + unknown id; no panic | `test: locked_file_is_typed_error_not_panic` `test: persist_under_lock_returns_within_busy_bound` `test: truncated_file_is_typed_error` `test: empty_file_opens_as_new_store` `test: corrupt_snapshot_json_is_typed_error` |
 | Torn WAL / crash mid-`put` (uncommitted BEGIN) | typed error or successful recover; never a silent wrong terminal | `test: truncated_wal_does_not_invent_a_terminal` `test: crash_mid_put_rolls_back_uncommitted_and_does_not_invent_terminal` |
-| Incremental persist after first write | Pending nodes stay in the file (dirty list is not the whole graph) | `test: incremental_persist_keeps_pending_nodes` |
+| Incremental persist after first write | Pending nodes stay in the file (dirty list is not the whole graph) | `test: incremental_persist_keeps_pending_nodes` `test: incremental_persist_does_not_delete_unchanged_rows` `test: incremental_persist_256_wide_succeeded_does_not_drop_pending` |
+| Two persist calls / kill before second COMMIT | first snapshot kept; second turn not merged into one txn | `test: second_uncommitted_persist_does_not_merge_into_first_commit` `test: crash_mid_put_rolls_back_uncommitted_and_does_not_invent_terminal` `test: crash_after_terminal_cas_before_emit_keeps_terminal` |
+| WAL checkpoint TRUNCATE | after COMMIT of a terminal only; autocommit | `test: checkpoint_runs_only_after_commit_of_terminal` `test: two_hundred_start_crash_resume_wal_bounded` |
+| CAS after incremental rows | stale put loses | `test: stale_put_after_incremental_dirty_rows_loses` `test: stale_put_does_not_clobber` |
+| `synchronous=FULL` default vs `open_fast` NORMAL | FULL is default; both recover process-kill | `test: open_default_is_synchronous_full` `test: open_fast_is_synchronous_normal` `test: durable_is_synchronous_full` `test: resume_256_wide_full_vs_normal` |
 | Two connections persist two executions, one file | no panic; `Ok` ⇒ row exists; `SQLITE_BUSY` is typed | `test: concurrent_persist_two_executions_same_file_no_panic` |
 | Hourglass neck Running crash/resume | sources not re-run; sinks run after neck | `test: crash_hourglass_neck_running_resume_runs_sinks_not_sources` `test: crash_resume_hourglass_256_within_bound` |
 | `resume` unknown id | `ResumeError::UnknownExecution` | `test: resume_unknown_id_is_unknown_execution` `test: resume_unknown_id_on_file` |
@@ -51,7 +55,7 @@ Sqlite adapter lines are not kernel `src/`.
 
 | Shape | Bound | Proof |
 |---|---|---|
-| Resume 256-wide Ready snapshot (debug, n=3) | 8s per sample; median recorded | `test: resume_256_wide_snapshot_within_bound` |
+| Resume 256-wide Ready snapshot (debug, n=3) | 8s per sample; FULL vs NORMAL recorded | `test: resume_256_wide_snapshot_within_bound` `test: resume_256_wide_full_vs_normal` |
 | Persist 256-wide first + incremental Start | 8s | `test: persist_256_wide_apply_within_bound` |
 | Hourglass-256 crash/resume | 20s | `test: crash_resume_hourglass_256_within_bound` |
 | 1000 sequential 1-node DAGs, resume last | 30s | `test: one_thousand_sequential_dags_resume_last` |

@@ -58,6 +58,13 @@ to hide sqlite latency.
 dirty node rows after the first write (ADR 0002). It does not serialize the
 whole graph on every event.
 
+**Durability.** Default `SqliteStore::open` is `synchronous=FULL` (last COMMIT
+survives process kill and machine power loss). `SqliteStore::open_fast` is
+`NORMAL`: process kill after COMMIT still recovers (crash-after-CAS tests);
+power loss may drop the last WAL frames. FULL 256-wide resume still meets
+the ≥50% cut vs the pre-opt baseline, so the default did not stay on NORMAL
+for the headline number. Crate README: `crates/keel-rt-sqlite/README.md`.
+
 **No process fence.** `AlreadyActive` is per `Runtime`. Two runtimes on
 one sqlite file can both resume and both re-invoke a Running node
 (`two_runtimes_same_file_are_not_fenced`). CAS still rejects a stale

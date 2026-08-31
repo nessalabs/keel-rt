@@ -8,7 +8,10 @@ Phase 2: at-least-once **snapshot resume**. If the process dies, call
 that was Running is re-invoked (side effects may run twice — make the
 executor idempotent if you need exactly-once). Succeeded nodes never re-run.
 Waiting keeps the same token. File persistence is a sibling crate
-(`keel-rt-sqlite`), not the kernel.
+(`keel-rt-sqlite`), not the kernel. Default sqlite open is
+`synchronous=FULL` (process kill and power loss of the last txn).
+`SqliteStore::open_fast` is `NORMAL` (process kill only; power loss may
+lose the last WAL frames). Details: [`crates/keel-rt-sqlite/README.md`](crates/keel-rt-sqlite/README.md).
 
 The runtime is a **bundle** (scheduler + optional store/sink + handle). The
 scheduler does not know resource types. Drivers only wake. This is a
