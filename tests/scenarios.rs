@@ -6,6 +6,8 @@
 mod happy_path;
 #[path = "scenarios/failure.rs"]
 mod failure;
+#[path = "scenarios/failure_scope.rs"]
+mod failure_scope;
 #[path = "scenarios/cancel.rs"]
 mod cancel;
 #[path = "scenarios/policy.rs"]

@@ -37,6 +37,8 @@ map-reduce, HITL drain, flaky I/O, burst/idle/burst, many Runtime jobs).
 `tests/resilience.rs` is the I/O-fault harness matrix (`NetFault` + FakeClock): Timeout
 fail-fast, retry permit release, Delay AND-join, Reset+Retry, 100 sequential diamonds
 isolating one Timeout, mixed Delay/Timeout/Reset under concurrency 8.
+`tests/scenarios/failure_scope.rs` locks `OnFailure::FailSubtree` + `Join::AllDone`
+without changing the default fail-fast tests.
 
 ```bash
 cargo test --test adversarial -- --test-threads=1
@@ -75,9 +77,14 @@ definition ──► Runtime::start ──► ExecutionHandle
        StateStore  EventSink  spawn(execute)  → Event::NodeFinished
 ```
 
-- **Join is AND.** A node becomes Ready only when every predecessor is Succeeded.
-- **Fail-fast.** After policy Accepts Failed/TimedOut, that node is Failed, all
-  non-terminal nodes are Cancelled, execution is Failed.
+- **Join default is AND (`AllSucceeded`).** A node becomes Ready only when every
+  predecessor is Succeeded. `Join::AllDone` is Ready when every predecessor is
+  terminal; `inputs_for` still contains succeeded preds only.
+- **Fail-fast (`OnFailure::FailExecution`, default).** After policy Accepts
+  Failed/TimedOut, that node is Failed, all non-terminal nodes are Cancelled,
+  execution is Failed. `OnFailure::FailSubtree` cancels only AllSucceeded
+  descendants of the failed node; siblings keep running; execution becomes
+  `Completed` (not Failed) when every node is terminal.
 - **Dataflow.** Opaque `bytes::Bytes` keyed by `NodeId`. Dependents receive a
   `HashMap` of succeeded predecessors' outputs. The kernel does not interpret.
 - **Waiting.** Executor may return `Waiting { token }`. The permit is released.
@@ -101,7 +108,8 @@ Node states: `Pending`, `Ready` (optional `runnable_at`), `Running`, `Waiting`,
 `Succeeded`, `Failed`, `Cancelled`, `TimedOut`.
 
 Execution states: `Created`, `Running`, `Waiting`, `Succeeded`, `Failed`,
-`Cancelled`.
+`Cancelled`, `Completed`. `Completed` means mixed terminals after FailSubtree
+— do not call that Succeeded. `wait()` / `wait_stable()` treat it as terminal.
 
 ## Write a test with ScriptedExecutor
 
@@ -197,5 +205,5 @@ and ignored — the in-memory aggregate is the source of truth for the live run.
 ## Public API
 
 `Runtime`, `RuntimeBuilder`, `ExecutionHandle`, `WorkflowDefinition`,
-`Executor`, `Policy`, `StateStore`, `ExecutionSnapshot`, `NodeOutcome`,
-`Resume`. Scheduler, park, and inject are crate-private.
+`OnFailure`, `Join`, `Executor`, `Policy`, `StateStore`, `ExecutionSnapshot`,
+`NodeOutcome`, `Resume`. Scheduler, park, and inject are crate-private.

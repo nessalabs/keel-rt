@@ -14,7 +14,7 @@ pub mod runtime;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
 
-pub use domain::definition::{DefinitionError, WorkflowDefinition};
+pub use domain::definition::{DefinitionError, Join, OnFailure, WorkflowDefinition};
 pub use domain::events::DomainEvent;
 pub use domain::ids::{ExecutionId, ExecutorId, NodeId, ResumeToken, WorkflowId};
 pub use domain::outcome::{NodeError, NodeOutcome, Resume};

@@ -1,4 +1,4 @@
-use crate::domain::definition::WorkflowDefinition;
+use crate::domain::definition::{Join, OnFailure, WorkflowDefinition};
 use crate::domain::events::DomainEvent;
 use crate::domain::ids::{ExecutionId, NodeId, ResumeToken};
 use crate::domain::outcome::Resume;
@@ -24,6 +24,8 @@ pub struct WorkflowTest {
     scripted: HashMap<String, ScriptedExecutor>,
     edges: Vec<(String, String)>,
     concurrency: usize,
+    on_failure: OnFailure,
+    joins: HashMap<String, Join>,
     policy: Option<Arc<dyn Policy>>,
     store: Option<Arc<dyn StateStore>>,
     clock: Arc<FakeClock>,
@@ -47,6 +49,8 @@ impl WorkflowTest {
             scripted: HashMap::new(),
             edges: Vec::new(),
             concurrency: 8,
+            on_failure: OnFailure::FailExecution,
+            joins: HashMap::new(),
             policy: None,
             store: None,
             clock: Arc::new(FakeClock::new()),
@@ -102,6 +106,16 @@ impl WorkflowTest {
         self
     }
 
+    pub fn on_failure(mut self, on_failure: OnFailure) -> Self {
+        self.on_failure = on_failure;
+        self
+    }
+
+    pub fn join(mut self, id: impl Into<String>, join: Join) -> Self {
+        self.joins.insert(id.into(), join);
+        self
+    }
+
     pub fn policy(mut self, p: impl Policy + 'static) -> Self {
         self.policy = Some(Arc::new(p));
         self
@@ -153,12 +167,15 @@ impl WorkflowTest {
         for (_, exec) in &self.nodes {
             builder = builder.register_arc(exec.clone());
         }
-        let mut def = WorkflowDefinition::builder(self.workflow_id.as_str());
+        let mut def = WorkflowDefinition::builder(self.workflow_id.as_str()).on_failure(self.on_failure);
         for (id, exec) in &self.nodes {
             def = def.node(id.as_str(), exec.id());
         }
         for (from, to) in &self.edges {
             def = def.edge(from.as_str(), to.as_str());
+        }
+        for (id, join) in &self.joins {
+            def = def.join(id.as_str(), *join);
         }
         let definition = def.build().expect("test workflow definition");
         (builder.build(), sink, store, definition)

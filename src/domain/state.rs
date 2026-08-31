@@ -1,4 +1,4 @@
-use crate::domain::definition::WorkflowDefinition;
+use crate::domain::definition::{Join, OnFailure, WorkflowDefinition};
 use crate::domain::ids::{ExecutionId, ExecutorId, NodeId, NodeSlot, ResumeToken, WorkflowId};
 use crate::domain::outcome::{NodeError, NodeOutcome, Resume};
 use crate::domain::policy::{Policy, PolicyDecision};
@@ -48,11 +48,16 @@ pub enum ExecutionState {
     Succeeded,
     Failed,
     Cancelled,
+    /// Every node terminal, mixed outcomes, [`OnFailure::FailSubtree`] (no fail-fast).
+    Completed,
 }
 
 impl ExecutionState {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Completed
+        )
     }
 }
 
@@ -92,18 +97,18 @@ pub struct Execution {
     nodes: Vec<NodeRuntime>,
     pub(crate) revision: u64,
     pub(crate) cancelled: bool,
+    /// Set only by [`Self::fail_fast`] (`OnFailure::FailExecution`).
+    fail_execution: bool,
     next_deadline: Option<(Timestamp, NodeSlot)>,
     /// Slots mutated since last persist / snapshot cache flush.
     dirty: Vec<u8>,
     dirty_list: Vec<NodeSlot>,
-    #[allow(dead_code)]
     n_pending: u32,
     n_ready: u32,
     n_running: u32,
     n_waiting: u32,
     n_succeeded: u32,
     n_failed: u32,
-    #[allow(dead_code)]
     n_cancelled: u32,
     /// Remaining unsatisfied AND-join predecessors per slot. Decremented
     /// once when a predecessor becomes Succeeded. Zero + Pending ⇒ Ready.
@@ -162,6 +167,7 @@ impl Execution {
             nodes,
             revision: 0,
             cancelled: false,
+            fail_execution: false,
             next_deadline: None,
             dirty,
             dirty_list,
@@ -585,7 +591,7 @@ impl Execution {
             }
             (NodeOutcome::Failed(err), PolicyDecision::Accept) => {
                 self.fail_node(slot, id, err.clone(), effect);
-                self.fail_fast(effect);
+                self.apply_on_failure(slot, effect);
             }
             (NodeOutcome::TimedOut, PolicyDecision::Accept) => {
                 {
@@ -597,7 +603,7 @@ impl Execution {
                 effect.events.push(DomainEvent::NodeTimedOut {
                     node_id: id.clone(),
                 });
-                self.fail_fast(effect);
+                self.apply_on_failure(slot, effect);
             }
             (NodeOutcome::Failed(_) | NodeOutcome::TimedOut, PolicyDecision::Retry { delay }) => {
                 let at = if delay.is_zero() {
@@ -631,7 +637,7 @@ impl Execution {
                     NodeError::new("policy rejected outcome"),
                     effect,
                 );
-                self.fail_fast(effect);
+                self.apply_on_failure(slot, effect);
             }
             (NodeOutcome::Succeeded(_) | NodeOutcome::Waiting { .. }, PolicyDecision::Retry { .. }) => {
                 unreachable!("illegal retry handled above");
@@ -655,11 +661,19 @@ impl Execution {
         });
     }
 
+    fn apply_on_failure(&mut self, slot: NodeSlot, effect: &mut ApplyEffect) {
+        match self.definition.on_failure() {
+            OnFailure::FailExecution => self.fail_fast(effect),
+            OnFailure::FailSubtree => self.fail_subtree(slot, effect),
+        }
+    }
+
     /// After policy Accepts Failed/TimedOut (or Rejects): non-terminal nodes
     /// Cancelled, execution Failed. Sets the same abort flag as [`Self::cancel_graph`].
     fn fail_fast(&mut self, effect: &mut ApplyEffect) {
         use crate::domain::events::DomainEvent;
         self.cancelled = true;
+        self.fail_execution = true;
         for i in 0..self.nodes.len() {
             if self.nodes[i].state.is_terminal() {
                 continue;
@@ -674,6 +688,49 @@ impl Execution {
         }
         self.next_deadline = None;
         self.state = ExecutionState::Failed;
+    }
+
+    /// Cancel AllSucceeded descendants of `origin` (already Failed/TimedOut).
+    /// AllDone dependents stay Pending until every predecessor is terminal.
+    /// Iterative — deep DAGs must not blow the stack.
+    fn fail_subtree(&mut self, origin: NodeSlot, effect: &mut ApplyEffect) {
+        let mut stack: Vec<NodeSlot> = self.definition.succ_slots(origin).to_vec();
+        while let Some(succ) = stack.pop() {
+            if self.nodes[succ.0].state.is_terminal() {
+                continue;
+            }
+            match self.definition.join_at(succ) {
+                Join::AllSucceeded => {
+                    self.cancel_node(succ, effect);
+                    stack.extend_from_slice(self.definition.succ_slots(succ));
+                }
+                Join::AllDone => {
+                    if self.remain[succ.0] > 0 {
+                        self.remain[succ.0] -= 1;
+                    }
+                    if self.remain[succ.0] == 0
+                        && matches!(self.nodes[succ.0].state, NodeState::Pending)
+                    {
+                        self.mark_ready(succ, None, effect);
+                    }
+                }
+            }
+        }
+    }
+
+    fn cancel_node(&mut self, slot: NodeSlot, effect: &mut ApplyEffect) {
+        use crate::domain::events::DomainEvent;
+        if self.nodes[slot.0].state.is_terminal() {
+            return;
+        }
+        let running = matches!(self.nodes[slot.0].state, NodeState::Running { .. });
+        self.set_state(slot, NodeState::Cancelled);
+        self.clear_deadline_if(slot);
+        let id = self.definition.id_at(slot).clone();
+        if running {
+            effect.to_abort.push(id.clone());
+        }
+        effect.events.push(DomainEvent::NodeCancelled { node_id: id });
     }
 
     fn ready_successors(&mut self, succeeded: NodeSlot, effect: &mut ApplyEffect) {
@@ -832,18 +889,27 @@ impl Execution {
     }
 
     fn derive_state(&self) -> ExecutionState {
-        if self.n_failed > 0 {
-            ExecutionState::Failed
-        } else if self.n_succeeded == self.nodes.len() as u32 {
-            ExecutionState::Succeeded
-        } else if self.cancelled {
-            ExecutionState::Cancelled
+        if self.fail_execution {
+            return ExecutionState::Failed;
+        }
+        if self.cancelled {
+            return ExecutionState::Cancelled;
+        }
+        let live = self.n_pending + self.n_ready + self.n_running + self.n_waiting;
+        if live == 0 {
+            if self.n_failed == 0 && self.n_cancelled == 0 {
+                ExecutionState::Succeeded
+            } else {
+                ExecutionState::Completed
+            }
         } else if self.n_running > 0 || self.n_ready > 0 {
             ExecutionState::Running
         } else if self.n_waiting > 0 {
             ExecutionState::Waiting
         } else {
-            self.state
+            // Isolated Pending (should not happen if FailSubtree cancels
+            // AllSucceeded dependents). Stay Running so wait() does not lie.
+            ExecutionState::Running
         }
     }
 
@@ -869,6 +935,11 @@ impl Execution {
                 }
                 ExecutionState::Waiting => {
                     effect.events.push(DomainEvent::ExecutionWaiting {
+                        execution_id: self.id.clone(),
+                    });
+                }
+                ExecutionState::Completed => {
+                    effect.events.push(DomainEvent::ExecutionCompleted {
                         execution_id: self.id.clone(),
                     });
                 }
@@ -1191,5 +1262,126 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, ApplyError::ResumeAfterCancel);
+    }
+
+    #[test]
+    fn fail_subtree_diamond_completes_not_failed() {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("a", "e")
+            .node("b", "e")
+            .node("c", "e")
+            .node("d", "e")
+            .edge("a", "b")
+            .edge("a", "c")
+            .edge("b", "d")
+            .edge("c", "d")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"a"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "c".into() }, &p, now)
+            .unwrap();
+        let effect = ex
+            .apply(
+                ApplyCmd::FinishNode {
+                    node_id: "c".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::failed("boom")),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("d")).unwrap().state,
+            NodeState::Cancelled
+        ));
+        assert!(matches!(
+            ex.node(&NodeId::new("b")).unwrap().state,
+            NodeState::Running { .. }
+        ));
+        assert_eq!(ex.state, ExecutionState::Running);
+        assert_eq!(count_failed(&effect), 0);
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "b".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"b"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Completed);
+        assert!(!ex.cancelled);
+    }
+
+    #[test]
+    fn all_done_ready_after_failed_pred() {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("a", "e")
+            .node("b", "e")
+            .node("j", "e")
+            .edge("a", "j")
+            .edge("b", "j")
+            .join("j", Join::AllDone)
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("x")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("j")).unwrap().state,
+            NodeState::Pending
+        ));
+        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "b".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"b"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("j")).unwrap().state,
+            NodeState::Ready { .. }
+        ));
+        assert_eq!(ex.inputs_for(&NodeId::new("j")).len(), 1);
+        assert!(!ex.inputs_for(&NodeId::new("j")).contains_key(&NodeId::new("a")));
     }
 }

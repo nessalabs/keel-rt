@@ -3,6 +3,29 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 
+/// What happens after policy Accepts Failed or TimedOut.
+///
+/// Retry is decided **before** this. Default is the existing fail-fast contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OnFailure {
+    /// Cancel every non-terminal node; execution [`Failed`](crate::ExecutionState::Failed).
+    #[default]
+    FailExecution,
+    /// Cancel only AllSucceeded descendants of the failed/timed-out node.
+    /// Siblings keep running. Execution is not Failed.
+    FailSubtree,
+}
+
+/// When a node becomes Ready relative to its predecessors.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Join {
+    /// AND: Ready only when every predecessor is Succeeded.
+    #[default]
+    AllSucceeded,
+    /// Ready when every predecessor is terminal. `inputs_for` is succeeded preds only.
+    AllDone,
+}
+
 /// Phase 1 only: an edge is a hard AND-join predecessor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgePredicate {
@@ -13,6 +36,8 @@ pub enum EdgePredicate {
 pub struct NodeDef {
     pub id: NodeId,
     pub executor_id: ExecutorId,
+    #[serde(default)]
+    pub join: Join,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +63,7 @@ pub enum DefinitionError {
 #[derive(Clone, Debug)]
 pub struct WorkflowDefinition {
     pub id: WorkflowId,
+    on_failure: OnFailure,
     nodes: Vec<NodeDef>,
     edges: Vec<Edge>,
     /// `NodeId` → dense slot (same order as `nodes`).
@@ -53,7 +79,18 @@ impl WorkflowDefinition {
             id: id.into(),
             nodes: Vec::new(),
             edges: Vec::new(),
+            on_failure: OnFailure::FailExecution,
+            node_joins: Vec::new(),
         }
+    }
+
+    pub fn on_failure(&self) -> OnFailure {
+        self.on_failure
+    }
+
+    pub fn join_of(&self, id: &NodeId) -> Option<Join> {
+        let slot = self.slot(id)?;
+        Some(self.nodes[slot.0].join)
     }
 
     pub fn nodes(&self) -> &[NodeDef] {
@@ -79,6 +116,10 @@ impl WorkflowDefinition {
 
     pub(crate) fn executor_at(&self, slot: NodeSlot) -> &ExecutorId {
         &self.nodes[slot.0].executor_id
+    }
+
+    pub(crate) fn join_at(&self, slot: NodeSlot) -> Join {
+        self.nodes[slot.0].join
     }
 
     pub(crate) fn pred_slots(&self, slot: NodeSlot) -> &[NodeSlot] {
@@ -130,6 +171,8 @@ pub struct WorkflowDefinitionBuilder {
     id: WorkflowId,
     nodes: Vec<NodeDef>,
     edges: Vec<Edge>,
+    on_failure: OnFailure,
+    node_joins: Vec<(NodeId, Join)>,
 }
 
 impl WorkflowDefinitionBuilder {
@@ -137,6 +180,7 @@ impl WorkflowDefinitionBuilder {
         self.nodes.push(NodeDef {
             id: id.into(),
             executor_id: executor.into(),
+            join: Join::AllSucceeded,
         });
         self
     }
@@ -150,7 +194,19 @@ impl WorkflowDefinitionBuilder {
         self
     }
 
-    pub fn build(self) -> Result<WorkflowDefinition, DefinitionError> {
+    /// Workflow-level failure scope. Default [`OnFailure::FailExecution`].
+    pub fn on_failure(mut self, on_failure: OnFailure) -> Self {
+        self.on_failure = on_failure;
+        self
+    }
+
+    /// Per-node join. Default [`Join::AllSucceeded`]. Unknown ids fail at `build`.
+    pub fn join(mut self, id: impl Into<NodeId>, join: Join) -> Self {
+        self.node_joins.push((id.into(), join));
+        self
+    }
+
+    pub fn build(mut self) -> Result<WorkflowDefinition, DefinitionError> {
         if self.nodes.is_empty() {
             return Err(DefinitionError::Empty);
         }
@@ -170,6 +226,12 @@ impl WorkflowDefinitionBuilder {
         let n = self.nodes.len();
         let mut preds = vec![Vec::new(); n];
         let mut succs = vec![Vec::new(); n];
+        for (id, join) in &self.node_joins {
+            let slot = *index
+                .get(id)
+                .ok_or_else(|| DefinitionError::DisconnectedNode(id.clone()))?;
+            self.nodes[slot.0].join = *join;
+        }
         for e in &self.edges {
             let from = *index
                 .get(&e.from)
@@ -197,6 +259,7 @@ impl WorkflowDefinitionBuilder {
 
         Ok(WorkflowDefinition {
             id: self.id,
+            on_failure: self.on_failure,
             nodes: self.nodes,
             edges: self.edges,
             index,
@@ -277,5 +340,20 @@ mod tests {
         assert_eq!(def.node(&NodeId::new("b")).unwrap().executor_id.as_str(), "eb");
         assert_eq!(def.predecessors(&NodeId::new("b")).len(), 1);
         assert!(def.predecessors(&NodeId::new("a")).is_empty());
+    }
+
+    #[test]
+    fn on_failure_and_join_defaults() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .node("b", "e")
+            .edge("a", "b")
+            .join("b", Join::AllDone)
+            .on_failure(OnFailure::FailSubtree)
+            .build()
+            .unwrap();
+        assert_eq!(def.on_failure(), OnFailure::FailSubtree);
+        assert_eq!(def.join_of(&NodeId::new("a")), Some(Join::AllSucceeded));
+        assert_eq!(def.join_of(&NodeId::new("b")), Some(Join::AllDone));
     }
 }

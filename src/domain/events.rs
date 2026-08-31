@@ -12,6 +12,8 @@ pub enum DomainEvent {
     ExecutionFailed { execution_id: ExecutionId },
     ExecutionCancelled { execution_id: ExecutionId },
     ExecutionWaiting { execution_id: ExecutionId },
+    /// Mixed terminals after [`OnFailure::FailSubtree`](crate::domain::definition::OnFailure::FailSubtree).
+    ExecutionCompleted { execution_id: ExecutionId },
     NodeReady {
         node_id: NodeId,
         runnable_at: Option<Timestamp>,
@@ -41,6 +43,9 @@ impl fmt::Display for DomainEvent {
             }
             Self::ExecutionWaiting { execution_id } => {
                 write!(f, "execution waiting {execution_id}")
+            }
+            Self::ExecutionCompleted { execution_id } => {
+                write!(f, "execution completed {execution_id}")
             }
             Self::NodeReady {
                 node_id,
