@@ -4,6 +4,21 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Failure-catalog re-measure (2026-08-31)
+
+Empty-id rejection, MemoryStore poison recovery, Display impls, cancel-after-terminal
+no-op. No scheduler hot-path algorithm change. Gate: no median >10% worse than
+the previous “this run” column.
+
+| bench | previous this run | this run | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 (debug median n=7) | 4.403 ms | 4.141 ms | −6.0% |
+| deep_chain_128 (debug median n=7) | 1.965 ms | 1.851 ms | −5.8% |
+| diamond_10k (debug median n=7) | 157.950 ms | 149.460 ms | −5.4% |
+| apply_only (debug median n=7) | 14.731 ms | 15.062 ms | +2.2% |
+
+`apply_only` +2.2% is inside the 10% noise band. **No revert.**
+
 ## Architecture review re-measure (2026-08-31)
 
 Same harness, same VM class. Structural work only (visibility, dead layers,

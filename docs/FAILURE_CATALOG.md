@@ -13,7 +13,8 @@ How to read a row:
 | Test | Named regression that fails without the handling |
 | Handling | typed error / cancel / no-op / default / documented panic |
 
-Invariants this catalog does **not** change:
+Kernel `src/` line coverage (python gate, OR-merged lcov): **2735/2735 = 100.00%**.
+Empty allowlist. Floor 100.
 
 - Default join is `Join::AllSucceeded`. Default `OnFailure` is `FailExecution`.
 - `FailSubtree` and `Join::AllDone` are definition-only opt-in.
