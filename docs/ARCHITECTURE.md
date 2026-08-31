@@ -92,3 +92,10 @@ cargo test --test stress_uneven -- --nocapture --test-threads=1
 
 Numbers live in `benches/BASELINE.md`. A hot-path change that regresses those
 medians is a bug: fix or revert and ADR.
+
+## Coverage gate
+
+`just coverage` / `./scripts/coverage.sh` runs `cargo llvm-cov` on the default
+suite (not `stress_100k`). CI fails on uncovered **new/changed** `src/` kernel
+lines and if total line % drops below `coverage/BASELINE`. `src/testing/` does
+not count.

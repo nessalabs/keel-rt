@@ -54,11 +54,41 @@ via `.node(id)` is unchanged.
 Module map and absences: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Accepted leftovers: [`docs/adr/`](docs/adr/).
 
+## Coverage
+
+Kernel `src/` line coverage (not `src/testing/`, not `tests/` painting themselves).
+Floor and allowlisted gaps: [`coverage/BASELINE`](coverage/BASELINE).
+
+```bash
+just coverage
+# or:
+./scripts/coverage.sh
+# llvm-cov integer twin:
+cargo llvm-cov --lib \
+  --test adversarial --test consumer --test graph --test resilience \
+  --test scenarios --test stress --test stress_uneven --test structure \
+  --test workloads \
+  --ignore-filename-regex 'src/testing/|\.cargo/|/tests/|/examples/' \
+  --fail-under-lines 93 \
+  -- --test-threads=1
+```
+
+CI (`.github/workflows/ci.yml`) fails the `coverage` job when:
+
+1. **Patch:** a new or changed executable line in `src/` (except `src/testing/`)
+   has 0 hits and is not allowlisted.
+2. **Floor:** total kernel line % drops below `floor_lines_pct` (93.2) or
+   `cargo llvm-cov --fail-under-lines 93`.
+
+`stress_100k` is a separate CI job without instrumentation. Do not lower the
+floor to make a refactor green — raise it when coverage goes up.
+
 ```bash
 cargo test -- --test-threads=1
 cargo test --test structure -- --test-threads=1
 cargo test --features test-util
 cargo clippy --lib -- -D warnings
+just coverage
 ```
 
 ### Regression packs

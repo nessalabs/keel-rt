@@ -1,0 +1,167 @@
+# Kernel src/ line coverage floor (domain + runtime + lib.rs).
+# src/testing/ is the test-util harness and does not count.
+# Do not lower floor_lines_pct without an ADR.
+#
+# Measured 2026-08-31: 2078/2228 = 93.27% lines
+# (`cargo llvm-cov` on lib + adversarial/consumer/graph/resilience/
+#  scenarios/stress/stress_uneven/structure/workloads; not stress_100k).
+# Branch (lcov BRF) is 0 with this llvm-cov/llvm-tools pair — not gated.
+
+floor_lines_pct=93.2
+fail_under_lines=93
+
+# Uncovered executable lines we accept. One-line reason each.
+# New src/ kernel lines must not be added here unless they are
+# unreachable, defensive, or forwarding with no second caller.
+
+allow:
+src/domain/events.rs:38	Display: ExecutionFailed (FnSink tests cover started/succeeded)
+src/domain/events.rs:39	Display: ExecutionFailed
+src/domain/events.rs:41	Display: ExecutionCancelled
+src/domain/events.rs:42	Display: ExecutionCancelled
+src/domain/events.rs:44	Display: ExecutionWaiting
+src/domain/events.rs:45	Display: ExecutionWaiting
+src/domain/events.rs:47	Display: ExecutionCompleted
+src/domain/events.rs:48	Display: ExecutionCompleted
+src/domain/events.rs:54	Display: NodeReady with runnable_at
+src/domain/events.rs:61	Display: NodeFailed
+src/domain/events.rs:62	Display: NodeFailed
+src/domain/events.rs:64	Display: NodeCancelled
+src/domain/events.rs:65	Display: NodeCancelled
+src/domain/events.rs:66	Display: NodeWaiting
+src/domain/ids.rs:12	NodeId serde; MemoryStore holds snapshots in RAM
+src/domain/ids.rs:13	NodeId serde
+src/domain/ids.rs:14	NodeId serde
+src/domain/ids.rs:18	NodeId serde
+src/domain/ids.rs:19	NodeId serde
+src/domain/ids.rs:20	NodeId serde
+src/domain/ids.rs:21	NodeId serde
+src/domain/ids.rs:83	WorkflowId Display unused on the public path
+src/domain/ids.rs:84	WorkflowId Display
+src/domain/ids.rs:85	WorkflowId Display
+src/domain/ids.rs:109	ExecutionId::default alias of new
+src/domain/ids.rs:110	ExecutionId::default
+src/domain/ids.rs:111	ExecutionId::default
+src/domain/ids.rs:140	ExecutorId Display unused on the public path
+src/domain/ids.rs:141	ExecutorId Display
+src/domain/ids.rs:142	ExecutorId Display
+src/domain/ids.rs:146	ExecutorId From<String> (builder takes impl Into)
+src/domain/ids.rs:147	ExecutorId From<String>
+src/domain/ids.rs:148	ExecutorId From<String>
+src/domain/policy.rs:78	Box<dyn Policy> forwarding
+src/domain/policy.rs:79	Box<dyn Policy> forwarding
+src/domain/policy.rs:80	Box<dyn Policy> forwarding
+src/domain/policy.rs:84	Arc<dyn Policy> forwarding
+src/domain/policy.rs:85	Arc<dyn Policy> forwarding
+src/domain/policy.rs:86	Arc<dyn Policy> forwarding
+src/domain/snapshot.rs:86	iter_nodes skips a node_order id missing from the map
+src/domain/snapshot.rs:103	Display: ExecutionState::Created
+src/domain/snapshot.rs:105	Display: ExecutionState::Waiting
+src/domain/snapshot.rs:108	Display: ExecutionState::Cancelled
+src/domain/snapshot.rs:109	Display: ExecutionState::Completed
+src/domain/snapshot.rs:116	Display: NodeState::Ready
+src/domain/snapshot.rs:117	Display: NodeState::Running
+src/domain/snapshot.rs:118	Display: NodeState::Waiting
+src/domain/snapshot.rs:120	Display: NodeState::Failed
+src/domain/snapshot.rs:121	Display: NodeState::Cancelled
+src/domain/snapshot.rs:122	Display: NodeState::TimedOut
+src/domain/state/apply.rs:47	double Cancel after already Cancelled
+src/domain/state/apply.rs:73	ForceCancelRunning with no Running nodes
+src/domain/state/apply.rs:74	ForceCancelRunning with no Running nodes
+src/domain/state/apply.rs:75	ForceCancelRunning with no Running nodes
+src/domain/state/apply.rs:90	mark_ready no-op if already terminal/Running
+src/domain/state/apply.rs:99	note_deadline on Ready { runnable_at: Some } (retry Display path)
+src/domain/state/apply.rs:113	dispatch unknown NodeId
+src/domain/state/apply.rs:114	dispatch illegal state
+src/domain/state/apply.rs:115	dispatch illegal state
+src/domain/state/apply.rs:116	dispatch illegal state
+src/domain/state/apply.rs:291	unreachable: illegal Retry after Succeeded/Waiting rejected above
+src/domain/state/apply.rs:351	fail_subtree skip already-terminal successor
+src/domain/state/apply.rs:375	cancel_node no-op if already terminal
+src/domain/state/apply.rs:382	cancel_node abort flag only if Running
+src/domain/state/apply.rs:420	resume Complete on terminal without last_outcome
+src/domain/state/apply.rs:422	resume Complete on terminal ConflictingComplete
+src/domain/state/apply.rs:423	resume Complete on terminal ConflictingComplete
+src/domain/state/apply.rs:424	resume Complete on terminal ConflictingComplete
+src/domain/state/apply.rs:425	resume Complete on terminal → ResumeAfterCancel
+src/domain/state/apply.rs:440	Succeeded + Complete missing last_outcome
+src/domain/state/apply.rs:441	Succeeded + Complete ConflictingComplete
+src/domain/state/apply.rs:442	Succeeded + Complete ConflictingComplete
+src/domain/state/apply.rs:443	Succeeded + Complete ConflictingComplete
+src/domain/state/apply.rs:444	Succeeded + Reinvoke → NotWaiting
+src/domain/state/apply.rs:451	resume on Cancelled node
+src/domain/state/apply.rs:482	force_cancel_running body (bound races Shutdown in hang tests)
+src/domain/state/apply.rs:484	force_cancel_running
+src/domain/state/apply.rs:485	force_cancel_running
+src/domain/state/apply.rs:486	force_cancel_running
+src/domain/state/apply.rs:487	force_cancel_running
+src/domain/state/apply.rs:488	force_cancel_running
+src/domain/state/apply.rs:489	force_cancel_running
+src/domain/state/apply.rs:490	force_cancel_running
+src/domain/state/apply.rs:492	force_cancel_running already-terminal
+src/domain/state/apply.rs:493	force_cancel_running already-terminal
+src/domain/state/apply.rs:494	force_cancel_running already-terminal
+src/domain/state/apply.rs:495	force_cancel_running already-terminal
+src/domain/state/apply.rs:496	force_cancel_running already-terminal
+src/domain/state/apply.rs:497	force_cancel_running already-terminal
+src/domain/state/apply.rs:550	defensive: isolated Pending after FailSubtree (must not lie to wait)
+src/domain/state/mod.rs:35	NodeState::is_ready_now Ready { Some } overdue
+src/domain/state/mod.rs:36	NodeState::is_ready_now non-Ready
+src/domain/state/mod.rs:205	Execution::is_cancelled
+src/domain/state/mod.rs:206	Execution::is_cancelled
+src/domain/state/mod.rs:207	Execution::is_cancelled
+src/domain/state/mod.rs:214	is_ready_now(id) unknown id
+src/domain/state/mod.rs:215	is_ready_now(id)
+src/domain/state/mod.rs:216	is_ready_now(id)
+src/domain/state/mod.rs:217	is_ready_now(id)
+src/domain/state/mod.rs:218	is_ready_now(id)
+src/domain/state/mod.rs:273	dec_count Waiting (counters hit via set_state other kinds)
+src/domain/state/mod.rs:274	dec_count Succeeded
+src/domain/state/mod.rs:275	dec_count Failed/TimedOut
+src/domain/state/mod.rs:281	inc_kind pending (kind 0)
+src/domain/state/mod.rs:296	Execution::attempt unknown id
+src/domain/state/mod.rs:297	Execution::attempt
+src/domain/state/mod.rs:298	Execution::attempt
+src/domain/state/mod.rs:304	resume_token unknown id
+src/domain/state/mod.rs:305	resume_token
+src/domain/state/mod.rs:306	resume_token
+src/domain/state/mod.rs:375	count_kind Pending (constructor uses Default, not this arm in tests)
+src/domain/state/mod.rs:564	#[cfg(test)] illegal-retry panic arm
+src/domain/state/mod.rs:565	#[cfg(test)] illegal-retry panic arm
+src/runtime/handle.rs:53	inspect send failed → empty snapshot
+src/runtime/handle.rs:71	wait: watch closed
+src/runtime/handle.rs:86	wait_stable: watch closed
+src/runtime/handle.rs:103	empty_snapshot after scheduler stop
+src/runtime/handle.rs:106	empty_snapshot
+src/runtime/handle.rs:107	empty_snapshot
+src/runtime/handle.rs:108	empty_snapshot
+src/runtime/handle.rs:109	empty_snapshot
+src/runtime/handle.rs:110	empty_snapshot
+src/runtime/handle.rs:111	empty_snapshot
+src/runtime/handle.rs:112	empty_snapshot
+src/runtime/handle.rs:113	empty_snapshot
+src/runtime/handle.rs:114	empty_snapshot
+src/runtime/handle.rs:115	empty_snapshot
+src/runtime/runtime.rs:183	RuntimeBuilder::sink_arc twin of sink()
+src/runtime/runtime.rs:184	RuntimeBuilder::sink_arc
+src/runtime/runtime.rs:185	RuntimeBuilder::sink_arc
+src/runtime/runtime.rs:186	RuntimeBuilder::sink_arc
+src/runtime/scheduler.rs:91	park recv None (channel closed without Shutdown)
+src/runtime/scheduler.rs:165	ForceCancelBound warn (hang tests often Shutdown first)
+src/runtime/scheduler.rs:166	ForceCancelBound
+src/runtime/scheduler.rs:167	ForceCancelBound
+src/runtime/scheduler.rs:168	ForceCancelBound
+src/runtime/scheduler.rs:170	ForceCancelBound apply
+src/runtime/scheduler.rs:171	ForceCancelBound apply
+src/runtime/scheduler.rs:172	ForceCancelBound persist
+src/runtime/scheduler.rs:227	dispatch StartNode Illegal skip
+src/runtime/scheduler.rs:289	release_permit unknown id
+src/runtime/scheduler.rs:294	arm_cancel_bound already armed
+src/runtime/spawn.rs:54	abort_all drain (bound/shutdown; hang often abort_node)
+src/runtime/spawn.rs:55	abort_all abort
+src/runtime/spawn.rs:66	panic_message String payload
+src/runtime/spawn.rs:67	panic_message String payload
+src/runtime/spawn.rs:69	panic_message unknown payload
+src/runtime/store.rs:116	Arc<dyn StateStore> put forwarding
+src/runtime/store.rs:117	Arc<dyn StateStore> put forwarding
+src/runtime/store.rs:118	Arc<dyn StateStore> put forwarding
