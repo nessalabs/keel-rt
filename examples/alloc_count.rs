@@ -4,10 +4,9 @@
 //! cargo run --release --example alloc_count
 //! ```
 //!
-//! Uses a counting wrapper around the system allocator. Do not combine with
-//! `--features jemalloc` on this example (one `#[global_allocator]` per binary).
-//! Enabling `keel-rt/jemalloc` still would not set the library allocator —
-//! `keel-rt` never does.
+//! Uses a counting wrapper around the system allocator. One `#[global_allocator]`
+//! per binary — do not run this together with `benches/jemalloc_compare`.
+//! `keel-rt` never sets a process allocator.
 
 use bytes::Bytes;
 use keel_rt::{

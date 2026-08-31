@@ -96,14 +96,12 @@ Unchanged (say so on PRs that only refactor):
   duration even after cancel (until task abort). Now cancel parks the sleep
   until abort so a loop cannot busy-spin on current_thread.
 - Allocator is the **consumer binary’s** choice, not `keel-rt`’s.
-  Default `keel-rt` never sets `#[global_allocator]`. The optional
-  `jemalloc` feature is only for this repo’s examples/benches (and only
-  if enabled in *that* `Cargo.toml` / `--features`). `Runtime::start` is
-  unchanged.
+  No `jemalloc` crate feature. Default `keel-rt` never sets
+  `#[global_allocator]`. Jemalloc comparison is a separate unpublished
+  binary under `benches/jemalloc_compare/`. `Runtime::start` is unchanged.
 - Phase 1 failure catalog: [`docs/FAILURE_CATALOG.md`](FAILURE_CATALOG.md)
   (zero MISSING rows).
 
 Architecture (this change): **after = before**. No module split. New public
-items: `ExecutionSnapshot::running_count` / `waiting_count`. Optional crate
-feature `jemalloc` is unused by `lib.rs` (consumer binaries may depend on
-`tikv-jemallocator` themselves).
+items: `ExecutionSnapshot::running_count` / `waiting_count`. No `jemalloc`
+crate feature. Consumer binaries may set an allocator themselves.

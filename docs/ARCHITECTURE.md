@@ -249,9 +249,9 @@ cargo test --test stress_uneven -- --nocapture --test-threads=1
 Numbers live in `benches/BASELINE.md`. A hot-path change that regresses those
 medians is a bug: fix or revert and ADR.
 
-This crate does not pick an allocator. Production binaries may set
-`tikv-jemallocator`; see `benches/JEMALLOC.md`. The optional `jemalloc`
-feature is only for this repo’s examples/benches.
+This crate does not pick an allocator and has no `jemalloc` feature.
+See `benches/JEMALLOC.md` (jemalloc lives only in a separate unpublished
+bench binary).
 
 ## Coverage gate
 

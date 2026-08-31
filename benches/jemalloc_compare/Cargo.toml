@@ -1,0 +1,15 @@
+# Unpublished comparison binary. Not a keel-rt feature and not a workspace member.
+# Default `cargo test` in the library crate never builds this.
+
+[package]
+name = "keel-jemalloc-benches"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "jemalloc-backed copy of examples/kernel_benches (allocator experiment only)"
+
+[dependencies]
+keel-rt = { path = "../.." }
+tikv-jemallocator = "0.6"
+bytes = { version = "1.9", features = ["serde"] }
+tokio = { version = "1.43", features = ["full"] }

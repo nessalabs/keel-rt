@@ -4,9 +4,8 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
-Allocator experiment (release example, not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
-This crate does not pick an allocator. jemalloc is a consumer-binary choice
-(this repo’s examples only, via `--features jemalloc`).
+Allocator experiment (not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
+This crate does not pick an allocator and has no `jemalloc` feature.
 
 ## RAII re-measure (2026-08-31)
 

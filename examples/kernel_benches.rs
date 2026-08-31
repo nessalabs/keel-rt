@@ -1,21 +1,17 @@
-//! Hot-path benches for allocator experiments.
+//! Hot-path benches using the **system** allocator.
 //!
-//! This **example binary** may set `#[global_allocator]` when built with
-//! `--features jemalloc`. The `keel-rt` library never does.
+//! `keel-rt` has no `jemalloc` feature and never sets `#[global_allocator]`.
+//! The jemalloc comparison binary lives in `benches/jemalloc_compare/`
+//! (unpublished; not part of this crate).
 //!
 //! ```text
 //! cargo run --release --example kernel_benches
-//! cargo run --release --example kernel_benches --features jemalloc
+//! cargo run --release --manifest-path benches/jemalloc_compare/Cargo.toml
 //! cargo run --release --example kernel_benches -- --multi-thread
 //! ```
 //!
 //! Tokio default here is **current_thread** (Phase 1). `--multi-thread` is a
 //! one-off experiment and does not change the library scheduler.
-
-// Consumer-binary choice, not the library: only this example installs jemalloc.
-#[cfg(feature = "jemalloc")]
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use bytes::Bytes;
 use keel_rt::{
@@ -28,12 +24,11 @@ use std::time::{Duration, Instant};
 const MEDIAN_ITERS: usize = 7;
 const BOUND: Duration = Duration::from_secs(30);
 
-fn allocator_name() -> &'static str {
-    if cfg!(feature = "jemalloc") {
-        "jemalloc"
-    } else {
-        "sys"
-    }
+fn allocator_name() -> String {
+    std::env::var("KEEL_BENCH_ALLOC")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "sys".into())
 }
 
 fn instant(_ctx: ExecutionContext) -> std::future::Ready<NodeOutcome> {
@@ -213,7 +208,7 @@ fn run_multi_thread() {
     });
 }
 
-fn main() {
+pub fn main() {
     let mt = std::env::args().any(|a| a == "--multi-thread");
     println!("keel-rt kernel_benches allocator={}", allocator_name());
     if mt {

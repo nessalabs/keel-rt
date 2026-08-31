@@ -52,8 +52,10 @@ in-flight observability (Running holds a permit; Waiting does not).
 
 ## Allocator
 
-This crate does not pick an allocator; production binaries may set
-`tikv-jemallocator`; see [`benches/JEMALLOC.md`](benches/JEMALLOC.md).
+This crate does not pick an allocator and has no `jemalloc` feature.
+See [`benches/JEMALLOC.md`](benches/JEMALLOC.md) for a sys vs jemalloc
+comparison (jemalloc only in an unpublished bench binary). Recommendation
+for production binaries follows those numbers.
 
 ## Build and test
 
