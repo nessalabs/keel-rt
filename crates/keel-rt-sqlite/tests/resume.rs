@@ -1291,3 +1291,102 @@ fn transient_cancel_persist_err_shutdown_flushes_sqlite_cancelled() {
     });
     let _ = std::fs::remove_file(&path);
 }
+
+struct FailFirstTwoTerminal {
+    inner: SqliteStore,
+    n: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl StateStore for FailFirstTwoTerminal {
+    async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+        self.inner.put(snapshot).await
+    }
+    async fn get(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<ExecutionSnapshot>, StoreError> {
+        self.inner.get(id).await
+    }
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        if exec.state().is_terminal() {
+            let k = self.n.fetch_add(1, Ordering::SeqCst) + 1;
+            if k <= 2 {
+                return Err(StoreError::Message("SQLITE_BUSY terminal twice".into()));
+            }
+        }
+        self.inner.persist(exec).await
+    }
+    async fn workflow_definition(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<WorkflowDefinition>, StoreError> {
+        self.inner.workflow_definition(id).await
+    }
+}
+
+/// Command persist Err + first Shutdown persist Err used to leave sqlite
+/// Running after wait() Succeeded. Shutdown must keep retrying.
+#[test]
+fn transient_terminal_persist_err_twice_shutdown_retries_sqlite() {
+    let path = tmp();
+    let inner = SqliteStore::open(&path).unwrap();
+    let id = {
+        let store = FailFirstTwoTerminal {
+            inner: inner.clone(),
+            n: std::sync::atomic::AtomicU32::new(0),
+        };
+        let rt = current_rt();
+        let id = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store)
+                .register_fn("a", |_c: ExecutionContext| async {
+                    NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+                })
+                .build();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("a", "a")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            let id = handle.execution_id().clone();
+            assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+            drop(runtime);
+            tokio::time::timeout(BOUND, async {
+                loop {
+                    if let Some(s) = inner.get(&id).await.unwrap() {
+                        if s.state == ExecutionState::Succeeded {
+                            return;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("Shutdown must retry past a second terminal persist Err");
+            id
+        });
+        drop(rt);
+        id
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().state,
+            ExecutionState::Succeeded
+        );
+        let runtime = Runtime::builder()
+            .store(store)
+            .register_fn("a", |_c: ExecutionContext| async {
+                panic!("succeeded must not re-run after double persist Err + Shutdown")
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    });
+    let _ = std::fs::remove_file(&path);
+}
