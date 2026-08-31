@@ -118,7 +118,8 @@ fn apply_only_drive(def: WorkflowDefinition) {
     let p = AcceptPolicy;
     let now = Timestamp(0);
     let mut effect = ex.apply(ApplyCmd::Start, &p, now).unwrap();
-    let mut ready: VecDeque<_> = effect.newly_runnable_ids(&ex).into();
+    let mut ready: VecDeque<NodeId> = VecDeque::new();
+    ready.extend(effect.newly_runnable_ids(&ex));
     while let Some(id) = ready.pop_front() {
         effect = ex
             .apply(ApplyCmd::StartNode { node_id: id.clone() }, &p, now)

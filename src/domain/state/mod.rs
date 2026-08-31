@@ -166,11 +166,13 @@ pub struct ApplyEffect {
 impl ApplyEffect {
     /// Node ids that became immediately runnable. The scheduler does not use
     /// this; it reads slots. Public `inputs_for` is unchanged.
-    pub fn newly_runnable_ids(&self, exec: &Execution) -> Vec<NodeId> {
+    pub fn newly_runnable_ids<'a>(
+        &'a self,
+        exec: &'a Execution,
+    ) -> impl Iterator<Item = NodeId> + 'a {
         self.newly_runnable
             .iter()
-            .map(|s| exec.node_id_at(*s).clone())
-            .collect()
+            .map(|&s| exec.node_id_at(s).clone())
     }
 }
 
@@ -442,7 +444,10 @@ mod tests {
         let effect = ex.apply(ApplyCmd::Start, &AcceptPolicy, now).unwrap();
         let a = ex.definition.slot(&NodeId::new("a")).unwrap();
         assert_eq!(effect.newly_runnable, vec![a]);
-        assert_eq!(effect.newly_runnable_ids(&ex), vec![NodeId::new("a")]);
+        assert_eq!(
+            effect.newly_runnable_ids(&ex).collect::<Vec<_>>(),
+            vec![NodeId::new("a")]
+        );
         assert_eq!(ex.state, ExecutionState::Running);
         assert!(matches!(
             ex.node(&NodeId::new("a")).unwrap().state,
