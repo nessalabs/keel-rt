@@ -1,10 +1,10 @@
 # Keel-rt tasks. `just coverage` is the CI coverage gate.
 
 test:
-    cargo test -- --test-threads=1
+    cargo test --workspace -- --test-threads=1
 
 clippy:
-    cargo clippy --lib -- -D warnings
+    cargo clippy --workspace --lib -- -D warnings
 
 # src/ kernel line coverage + patch gate. Excludes stress_100k (separate job).
 coverage:

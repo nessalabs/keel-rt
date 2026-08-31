@@ -17,7 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.83.0
         with:
           components: clippy
-      - run: cargo clippy --lib -- -D warnings
+      - run: cargo clippy --workspace --lib -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -26,11 +26,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.83.0
       - name: Default suite (no 100k)
         run: |
-          cargo test --lib \
-            --test adversarial --test catalog --test consumer --test graph             --test resilience --test resume \
+          cargo test -p keel-rt --lib \
+            --test adversarial --test catalog --test consumer --test graph \
+            --test resilience --test resume \
             --test scenarios --test stress --test stress_uneven --test structure \
             --test workloads \
             -- --test-threads=1
+          cargo test -p keel-rt-sqlite -- --test-threads=1
 
   stress-100k:
     runs-on: ubuntu-latest

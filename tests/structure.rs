@@ -96,6 +96,27 @@ fn domain_imports_nothing_outward() {
 }
 
 #[test]
+fn kernel_src_has_no_storage_engine() {
+    let cargo = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .unwrap();
+    let deps = cargo.split("[dev-dependencies]").next().unwrap_or(&cargo);
+    for word in ["rusqlite", "postgres", "tokio_postgres", "sqlx"] {
+        assert!(
+            !deps.contains(word),
+            "keel-rt package deps must not name {word}"
+        );
+        for p in rust_files(&src_root()) {
+            let s = fs::read_to_string(&p).unwrap();
+            assert!(
+                !s.contains(word),
+                "{} contains banned storage engine {word}",
+                rel(&p)
+            );
+        }
+    }
+}
+
+#[test]
 fn src_has_no_product_resource_identifiers() {
     for word in ["Agent", "HTTP", "HITL", "Sql", "crawl"] {
         for p in rust_files(&src_root()) {
