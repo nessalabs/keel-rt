@@ -155,10 +155,11 @@ src/runtime/scheduler.rs:170	ForceCancelBound apply
 src/runtime/scheduler.rs:171	ForceCancelBound apply
 src/runtime/scheduler.rs:172	ForceCancelBound persist
 src/runtime/scheduler.rs:227	dispatch StartNode Illegal skip
-src/runtime/scheduler.rs:289	release_permit unknown id
-src/runtime/scheduler.rs:294	arm_cancel_bound already armed
-src/runtime/spawn.rs:54	abort_all drain (bound/shutdown; hang often abort_node)
+src/runtime/scheduler.rs:286	arm_cancel_bound already armed
+src/runtime/spawn.rs:53	abort_all drain (bound/shutdown; hang often abort_node)
+src/runtime/spawn.rs:54	abort_all take
 src/runtime/spawn.rs:55	abort_all abort
+src/runtime/spawn.rs:56	abort_all close
 src/runtime/spawn.rs:66	panic_message String payload
 src/runtime/spawn.rs:67	panic_message String payload
 src/runtime/spawn.rs:69	panic_message unknown payload
