@@ -772,3 +772,197 @@ fn fat_bytes_sqlite_round_trip_preserves_bytes() {
     });
     let _ = std::fs::remove_file(&path);
 }
+
+fn hourglass_def(n: usize) -> WorkflowDefinition {
+    let mut b = WorkflowDefinition::builder("hourglass").node("neck", "neck");
+    for i in 0..n {
+        let a = format!("a{i}");
+        let sink = format!("b{i}");
+        b = b
+            .node(a.as_str(), "src")
+            .node(sink.as_str(), "sink")
+            .edge(a.as_str(), "neck")
+            .edge("neck", sink.as_str());
+    }
+    b.build().unwrap()
+}
+
+#[test]
+fn crash_hourglass_neck_running_resume_runs_sinks_not_sources() {
+    let path = tmp();
+    let n = 4usize;
+    let id = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let id = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .register_fn("src", |_c: ExecutionContext| async {
+                    NodeOutcome::Succeeded(Bytes::from_static(b"s"))
+                })
+                .register(ScriptedExecutor::new("neck").hang(false))
+                .register_fn("sink", |_c: ExecutionContext| async {
+                    panic!("sinks stay pending until neck succeeds")
+                })
+                .build();
+            let handle = runtime.start(hourglass_def(n)).unwrap();
+            let id = handle.execution_id().clone();
+            wait_node(&store, &id, "neck", |s| matches!(s, NodeState::Running { .. }))
+                .await;
+            std::mem::forget(handle);
+            drop(runtime);
+            id
+        });
+        drop(rt);
+        drop(store);
+        id
+    };
+    let src_runs = Arc::new(AtomicU32::new(0));
+    let sink_runs = Arc::new(AtomicU32::new(0));
+    let sc = src_runs.clone();
+    let kc = sink_runs.clone();
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store)
+            .register_fn("src", move |_c: ExecutionContext| {
+                sc.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"s")) }
+            })
+            .register_fn("neck", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"n"))
+            })
+            .register_fn("sink", move |_c: ExecutionContext| {
+                kc.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"b")) }
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        assert_eq!(src_runs.load(Ordering::SeqCst), 0, "sources already succeeded");
+        assert_eq!(sink_runs.load(Ordering::SeqCst), n as u32);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn fat_payloads_64kib_times_eight_persist_resume() {
+    use keel_rt::{AcceptPolicy, ApplyCmd, Execution, Timestamp};
+    let path = tmp();
+    let n = 8usize;
+    let fat = Bytes::from(vec![7u8; 64 * 1024]);
+    let store = SqliteStore::open(&path).unwrap();
+    let mut b = WorkflowDefinition::builder("fatn").node("join", "join");
+    for i in 0..n {
+        let id = format!("f{i}");
+        b = b.node(id.as_str(), "fat").edge(id.as_str(), "join");
+    }
+    let def = b.build().unwrap();
+    let mut ex = Execution::new(def);
+    let p = AcceptPolicy;
+    let now = Timestamp(0);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    for i in 0..n {
+        let nid = format!("f{i}");
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: nid.clone().into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: nid.into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(fat.clone())),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+    }
+    let rt = current_rt();
+    rt.block_on(async {
+        store.persist(&ex).await.unwrap();
+        drop(store);
+        let store = SqliteStore::open(&path).unwrap();
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .register_fn("fat", |_c: ExecutionContext| async {
+                panic!("succeeded fat node must not re-run")
+            })
+            .register_fn("join", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"j"))
+            })
+            .build();
+        let handle = runtime.resume(ex.id()).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        let snap = store.get(ex.id()).await.unwrap().unwrap();
+        for i in 0..n {
+            let out = snap
+                .node(&NodeId::new(format!("f{i}")))
+                .and_then(|n| n.output.clone())
+                .expect("fat node");
+            assert_eq!(out.as_ref(), fat.as_ref());
+        }
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn concurrent_persist_two_executions_same_file_no_panic() {
+    use keel_rt::{Execution, StoreError};
+    let path = tmp();
+    let store_a = SqliteStore::open(&path).unwrap();
+    let store_b = SqliteStore::open(&path).unwrap();
+    let ex_a = Execution::new(
+        WorkflowDefinition::builder("wa")
+            .node("a", "a")
+            .build()
+            .unwrap(),
+    );
+    let ex_b = Execution::new(
+        WorkflowDefinition::builder("wb")
+            .node("b", "b")
+            .build()
+            .unwrap(),
+    );
+    let id_a = ex_a.id().clone();
+    let id_b = ex_b.id().clone();
+    let ha = std::thread::spawn(move || {
+        let rt = current_rt();
+        rt.block_on(store_a.persist(&ex_a))
+    });
+    let hb = std::thread::spawn(move || {
+        let rt = current_rt();
+        rt.block_on(store_b.persist(&ex_b))
+    });
+    let ra = ha.join().expect("writer A panicked (SQLITE_BUSY must be typed)");
+    let rb = hb.join().expect("writer B panicked (SQLITE_BUSY must be typed)");
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        for (r, id) in [(&ra, &id_a), (&rb, &id_b)] {
+            match r {
+                Ok(()) => {
+                    assert!(
+                        store.get(id).await.unwrap().is_some(),
+                        "successful persist must not lose the row"
+                    );
+                }
+                Err(StoreError::Message(m)) => {
+                    assert!(
+                        m.to_lowercase().contains("locked")
+                            || m.to_lowercase().contains("busy"),
+                        "unexpected persist error: {m}"
+                    );
+                }
+                Err(e) => panic!("unexpected persist error: {e}"),
+            }
+        }
+    });
+    let _ = std::fs::remove_file(&path);
+}
