@@ -17,3 +17,8 @@ stress-resume:
 # 100k scale pack — no coverage instrumentation.
 stress-100k:
     cargo test --test stress_100k -- --test-threads=1
+
+# Standing sqlite chaos / load (thousands of jobs, wide AND-join, HITL, two Runtimes).
+# Not coverage.
+chaos-sqlite:
+    cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture

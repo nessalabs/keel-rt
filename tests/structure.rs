@@ -256,12 +256,17 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "coverage:",
         "stress-resume:",
         "stress-100k:",
+        "chaos-sqlite:",
     ] {
         assert!(ci.contains(job), "ci.yml missing job {job}");
     }
     assert!(
         !ci.contains("continue-on-error"),
         "ci.yml must not skip a red job"
+    );
+    assert!(
+        ci.contains("--test chaos"),
+        "chaos-sqlite job must run the sqlite chaos pack"
     );
     assert!(
         ci.contains("--test resume_stress"),
@@ -275,15 +280,19 @@ fn ci_and_agents_name_phase2_review_jobs() {
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
     assert!(agents.contains("Phase 2+ review gate"));
     assert!(agents.contains("stress-resume"));
+    assert!(agents.contains("chaos-sqlite"));
     assert!(agents.contains("docs/RESUME_CATALOG.md"));
+    assert!(agents.contains("docs/CHAOS_LOG.md"));
 
     let tmpl = fs::read_to_string(root.join(".github/pull_request_template.md")).unwrap();
     assert!(tmpl.contains("## Phase 2+ review gate"));
     assert!(tmpl.contains("stress-resume"));
+    assert!(tmpl.contains("chaos-sqlite"));
 
     let rule = fs::read_to_string(root.join(".cursor/rules/pr-architecture.mdc")).unwrap();
     assert!(rule.contains("Phase 2+ review gate"));
     assert!(rule.contains("stress-resume"));
+    assert!(rule.contains("chaos-sqlite"));
 
     let catalog = fs::read_to_string(root.join("docs/RESUME_CATALOG.md")).unwrap();
     assert!(catalog.contains("Zero MISSING"));
@@ -299,4 +308,9 @@ fn ci_and_agents_name_phase2_review_jobs() {
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
+
+    let chaos = fs::read_to_string(root.join("docs/CHAOS_LOG.md")).unwrap();
+    assert!(chaos.contains("two_thousand_short_jobs_one_file"));
+    assert!(chaos.contains("wide_256_resume_under_concurrent_starts_is_sqlite_bound"));
+    assert!(chaos.contains("wide_2k_and_join_crash_resume_of_ready"));
 }

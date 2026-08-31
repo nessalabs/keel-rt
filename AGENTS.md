@@ -72,8 +72,9 @@ of the following are true. Structure tests pin the names.
   behavior change (`crates/keel-rt-sqlite/tests/resume.rs` or
   `tests/adversarial/resume.rs`). Do not mock `StateStore` for recovery.
 - CI jobs **test**, **adversarial**, **coverage**, **stress-resume** green.
-  `stress-100k` stays its own uninstrumented job. No `continue-on-error`.
+  `stress-100k` stays its own uninstrumented job. `chaos-sqlite` is the
+  standing sqlite load breaker (`docs/CHAOS_LOG.md`). No `continue-on-error`.
 - Catalog: `docs/RESUME_CATALOG.md` has a `test:` name for every hunt row.
   Zero MISSING.
 
-`just coverage` / `just stress-resume` / `just stress-100k`.
+`just coverage` / `just stress-resume` / `just stress-100k` / `just chaos-sqlite`.

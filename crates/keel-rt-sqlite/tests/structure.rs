@@ -30,3 +30,28 @@ fn adapter_depends_on_keel_rt() {
     let cargo = fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/Cargo.toml").unwrap();
     assert!(cargo.contains("keel-rt"), "adapter must depend on keel-rt");
 }
+
+#[test]
+fn chaos_log_names_the_standing_pack() {
+    let log = fs::read_to_string(root().join("docs/CHAOS_LOG.md")).unwrap();
+    for name in [
+        "two_thousand_short_jobs_one_file",
+        "wide_256_and_join_crash_resume",
+        "wide_256_resume_under_concurrent_starts_is_sqlite_bound",
+        "wide_2k_and_join_crash_resume_of_ready",
+        "and_join_1pm_waiting_4pm_delay_crash_resume",
+        "drop_handle_mid_persist_cancels_not_succeed",
+        "two_runtimes_diamond_no_silent_wrong_terminal",
+    ] {
+        assert!(log.contains(name), "CHAOS_LOG missing {name}");
+    }
+    let chaos = fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/chaos.rs")
+        .unwrap();
+    for name in [
+        "fn two_thousand_short_jobs_one_file",
+        "fn wide_256_resume_under_concurrent_starts_is_sqlite_bound",
+        "fn wide_2k_and_join_crash_resume_of_ready",
+    ] {
+        assert!(chaos.contains(name), "chaos.rs missing {name}");
+    }
+}

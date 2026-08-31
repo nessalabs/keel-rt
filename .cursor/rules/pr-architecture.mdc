@@ -35,5 +35,6 @@ Persist / resume / store changes also require:
 - A named crash-resume test on a **real sqlite file** (not a mock
   `StateStore`). Kernel-side hunt lives in `tests/adversarial/resume.rs`.
 - CI jobs `test`, `adversarial`, `coverage`, `stress-resume` green.
-  `stress-100k` stays separate. Do not add `continue-on-error`.
+  `stress-100k` stays separate. `chaos-sqlite` is the standing sqlite load
+  breaker (`docs/CHAOS_LOG.md`). Do not add `continue-on-error`.
 - `docs/RESUME_CATALOG.md` updated; every hunt row has a `test:` name.

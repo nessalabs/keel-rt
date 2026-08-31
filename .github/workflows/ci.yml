@@ -92,3 +92,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.83.0
       - name: 100k scale (no coverage instrumentation)
         run: cargo test --test stress_100k -- --test-threads=1 --nocapture
+
+  chaos-sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.83.0
+      - name: Standing sqlite chaos / load pack
+        run: cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture
