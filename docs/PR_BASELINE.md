@@ -85,10 +85,21 @@ Unchanged (say so on PRs that only refactor):
 - When `EventSink::emit` blocks, inspect used to wait behind apply (unbounded
   inbox, ADR 0001). Now it still does: stall, not a lock-cycle
   (`eventsink_blocking_does_not_deadlock_inspect`).
+- When a caller inspects in-flight work, they used to scan `snapshot.nodes`.
+  Now `ExecutionSnapshot::running_count()` / `waiting_count()` are the
+  in-flight observability (Running holds a permit; Waiting does not).
+- When `ExecutionHandle` is dropped, execute tasks used to rely on `Shutdown`
+  aborting the JoinSet; a panicking apply loop could detach them. Now
+  `SpawnSet::Drop` aborts inflight execute, and the cancel-bound sleeper is
+  aborted in `Scheduler::Drop`.
+- When an executor calls `ExecutionContext::sleep`, it used to wait the full
+  duration even after cancel (until task abort). Now sleep returns when the
+  cancel token fires.
+- jemalloc is **opt-in** (`--features jemalloc` on an example/binary).
+  `Runtime::start` is unchanged. The library does not install `#[global_allocator]`.
 - Phase 1 failure catalog: [`docs/FAILURE_CATALOG.md`](FAILURE_CATALOG.md)
-  (zero MISSING rows; hunt pass pins production paths the packs did not prove).
+  (zero MISSING rows).
 
-Architecture (this change): **after = before**. No module split. Hunt pass is
-tests + catalog only. Public items from the catalog close remain:
-`DefinitionError::{EmptyNodeId,EmptyWorkflowId,EmptyExecutorId}`,
-`Display` for `NodeState` / `ExecutionState`.
+Architecture (this change): **after = before**. No module split. New public
+items: `ExecutionSnapshot::running_count` / `waiting_count`. Optional crate
+feature `jemalloc` is not used by `lib.rs`.

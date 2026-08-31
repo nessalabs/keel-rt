@@ -110,6 +110,18 @@ fn src_has_no_product_resource_identifiers() {
 }
 
 #[test]
+fn src_has_no_mem_forget() {
+    for p in rust_files(&src_root()) {
+        let s = fs::read_to_string(&p).unwrap();
+        assert!(
+            !s.contains("mem::forget"),
+            "{} uses mem::forget; RAII Drop must release tasks/permits",
+            rel(&p)
+        );
+    }
+}
+
+#[test]
 fn crate_modules_are_acyclic() {
     let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
     for p in rust_files(&src_root()) {

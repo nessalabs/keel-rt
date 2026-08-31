@@ -230,7 +230,11 @@ classDiagram
 - **Retry:** `RetryPolicy::max_attempts` is the only retry bound. Delay is a
   deadline on `Ready`, not a wait state.
 - **Cancel hang:** `cancel_bound` is **wall** time (`tokio::time::sleep`), not
-  `Clock`. FakeClock does not stretch it.
+  `Clock`. FakeClock does not stretch it. The sleeper is an `AbortHandle` on
+  the scheduler and is aborted in `Drop` (no wake into a dead execution).
+  `SpawnSet` Drop aborts leftover execute tasks (JoinSet, not detach).
+- **Permits:** held only while a node is `Running`. Waiting releases. Inspect
+  via [`ExecutionSnapshot::running_count`] / [`waiting_count`].
 
 ## Performance gate
 

@@ -28,6 +28,9 @@ row is `test:` (existing proof) or `gap-closed-by:` (new named test). **Zero MIS
 | Store slow / error mid-apply / error on terminal write | in-memory wins; inspect waits behind persist (not a lock-cycle) | `test: inspect_during_blocking_persist_completes_after_persist` `test: failing_store_put_does_not_roll_back_in_memory` `gap-closed-by: store_error_on_terminal_write_keeps_in_memory_succeeded` |
 | EventSink blocking | emit is sync on apply; inbox send does not deadlock | `gap-closed-by: eventsink_blocking_does_not_deadlock_inspect` |
 | Drop Runtime while Running/Waiting | execution stays until terminal | `test: start_after_runtime_dropped_execution_still_runs` (Succeeded only); `gap-closed-by: drop_runtime_while_running_and_waiting_keeps_execution` |
+| Drop Runtime then last handle | JoinSet aborted, permits 0 | `gap-closed-by: drop_runtime_then_drop_handle_does_not_leak` |
+| Drop handle Running / Waiting / mid-timer | cancel + `running_count`/`waiting_count` 0 | `gap-closed-by: drop_handle_returns_permits_running_waiting_ready_timer` |
+| Panic (executor / policy) + sequential starts | permits 0; next start works | `gap-closed-by: panic_paths_release_permits` `gap-closed-by: fifty_sequential_executions_do_not_leak_permits` |
 | Many executions burst–idle–burst / sequential | no permit leak on one Runtime | `test: many_executions_1000_sequential` `test: burst_idle_burst` `gap-closed-by: next_start_after_executor_panic_succeeds` |
 | Current-thread: execute spawned, apply not stalled | slow node does not stall inspect/cancel | `gap-closed-by: slow_execute_does_not_stall_inspect_or_cancel` |
 | Timer fires twice / never / after cancel | no double-run; cancel clears deadline | `test: timer_after_succeeded_is_noop` `test: cancel_ready_with_future_deadline_does_not_start_later` `gap-closed-by: retry_due_twice_does_not_double_runnable` |
@@ -187,7 +190,13 @@ exactly-once must make the executor idempotent.
 | Cancel Running + Pending sibling | Running Cancelled; pending never starts | `cancel_mid_run_running_sees_token_pending_never_starts` / `cancel_running_pending_sibling_never_starts` | cancel |
 | Cancel Waiting | Cancelled; later resume `ResumeAfterCancel` | `cancel_while_waiting_is_cancelled` | cancel |
 | Cancel already terminal | no-op; still Succeeded / Failed | `cancel_already_terminal_is_noop` / `cancel_after_failed_stays_failed` / `double_cancel_is_noop_and_start_node_rejects_unknown_and_pending` | no-op |
-| Drop handle | graph Cancelled, not detached | `dropping_execution_handle_cancels_graph_not_detach` / `drop_handle_cancels_unique_owner` | Drop = cancel |
+| Drop handle | graph Cancelled, not detached; `running_count` 0 | `dropping_execution_handle_cancels_graph_not_detach` / `drop_handle_cancels_unique_owner`; **gap-closed-by:** `drop_handle_returns_permits_running_waiting_ready_timer` | Drop = cancel + abort |
+| Drop Runtime then last handle | JoinSet aborted; stored snapshot Cancelled, counts 0 | **gap-closed-by:** `drop_runtime_then_drop_handle_does_not_leak` | handle owns tasks |
+| 50 sequential starts on one Runtime | each terminal `running_count` 0; next start runs | **gap-closed-by:** `fifty_sequential_executions_do_not_leak_permits` | per-scheduler permits |
+| Panic then inspect counts | executor/policy panic → counts 0 | **gap-closed-by:** `panic_paths_release_permits` | permit release |
+| RetryDue after cancel | no-op, still Cancelled | `retry_due_after_cancel_does_not_wake_dead_execution` | no wake into dead run |
+| `ctx.sleep` + cancel | sleep returns; no 60s wait | `sleep_returns_when_cancel_fires` | select on token |
+| SpawnSet Drop | inflight execute aborted | `drop_aborts_inflight_execute` | RAII abort |
 | Cancel vs in-flight retry timer | Ready with future deadline does not start later | `cancel_ready_with_future_deadline_does_not_start_later` | cancel |
 | Cancel bound | hang ignoring cancel ends within `DEFAULT_CANCEL_BOUND` | `hang_ignore_cancel_ends_within_documented_bound` / `cancel_twice_then_bound_still_cancels_hang`; **gap-closed-by:** `cancel_ignore_cancel_fanout_meets_bound` (`cancel_under_load_64` uses hang(false) and does **not** prove the bound) | abort |
 | Inspect after cancel | Cancelled snapshot, not panic | `inspect_after_cancel_returns_cancelled_not_error` | snapshot |

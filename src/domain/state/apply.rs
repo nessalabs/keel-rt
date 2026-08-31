@@ -52,6 +52,9 @@ impl Execution {
                 effect.changed = true;
             }
             ApplyCmd::RetryDue { node_id } => {
+                if self.cancelled {
+                    return Ok(effect);
+                }
                 let Some(slot) = self.definition.slot(&node_id) else {
                     return Ok(effect);
                 };
@@ -236,12 +239,12 @@ impl Execution {
             PolicyDecision::Accept => {}
         }
 
-        match &outcome {
+        match outcome {
             NodeOutcome::Succeeded(bytes) => {
                 {
                     let n = &mut self.nodes[slot.0];
                     n.output = Some(bytes.clone());
-                    n.last_outcome = Some(outcome.clone());
+                    n.last_outcome = Some(NodeOutcome::Succeeded(bytes));
                     n.last_error = None;
                 }
                 self.set_state(slot, NodeState::Succeeded);
@@ -253,7 +256,7 @@ impl Execution {
             NodeOutcome::Waiting { token } => {
                 let token = {
                     let n = &mut self.nodes[slot.0];
-                    let token = n.resume_token.clone().unwrap_or_else(|| token.clone());
+                    let token = n.resume_token.take().unwrap_or(token);
                     n.resume_token = Some(token.clone());
                     n.last_outcome = Some(NodeOutcome::Waiting {
                         token: token.clone(),
@@ -280,7 +283,7 @@ impl Execution {
                 {
                     let n = &mut self.nodes[slot.0];
                     n.last_error = Some(NodeError::new("timed out"));
-                    n.last_outcome = Some(outcome);
+                    n.last_outcome = Some(NodeOutcome::TimedOut);
                 }
                 self.set_state(slot, NodeState::TimedOut);
                 effect.events.push(DomainEvent::NodeTimedOut {

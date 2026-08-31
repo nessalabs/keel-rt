@@ -19,6 +19,20 @@ Keep `tokio::sync::mpsc::unbounded_channel` for the apply inbox. Document the
 implicit bound (concurrency + handle ops) in `docs/ARCHITECTURE.md` and on
 the channel type.
 
+## Ownership (RAII)
+
+| Holder | What it owns | Drop |
+|---|---|---|
+| `ExecutionHandle` | sender clone | If not consumed by `wait`: send `Cancel`. Always send `Shutdown`. |
+| Scheduler (`ChannelPark`) | **receiver** | End of `run` / panic: `SpawnSet` Drop aborts execute tasks; cancel-bound sleep is aborted. `recv` on a closed channel is `Shutdown`. |
+| Scheduler | sender clone | Cancel-bound timer. Aborted in `Scheduler::Drop`. |
+| Execute task | sender clone | Sends `NodeFinished`, then the clone drops. |
+| `Runtime` | none of the inbox | Drop does **not** cancel in-flight executions. The **handle** owns cancel/JoinSet. |
+
+Last sender drop closes the channel. A live handle keeps a sender, so the
+apply loop stays up until the handle is dropped (or `wait` consumes it and
+then Drop still sends `Shutdown`).
+
 ## Alternatives considered
 
 - **Bounded mpsc.** Loses to deadlock on `resume`/`inspect` when apply is

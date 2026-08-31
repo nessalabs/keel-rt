@@ -70,6 +70,8 @@ impl StateStore for MemoryStore {
     }
 
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        // Mutex is not held across `.await`. The async fn awaits nothing while
+        // `g` is live; poison recovery stays in `lock()`.
         let mut g = self.lock();
         match g.get_mut(exec.id()) {
             Some(stored) => {

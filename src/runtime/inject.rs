@@ -35,6 +35,12 @@ pub(crate) enum Event {
 /// apply (a bounded channel can deadlock `resume` / `inspect`). Capacity is
 /// implicit: in-flight executes ≤ concurrency, plus handle messages. See
 /// `docs/adr/0001-unbounded-apply-inbox.md`.
+///
+/// Ownership: [`crate::runtime::handle::ExecutionHandle`] holds a sender clone
+/// (Drop sends `Cancel` if not consumed, then always `Shutdown`). The
+/// scheduler task holds the receiver (`ChannelPark`) and another sender
+/// (cancel-bound timer). Each execute task holds a sender for `NodeFinished`.
+/// Last sender drop closes the channel; `recv` then yields `Shutdown`.
 pub(crate) type EventTx = mpsc::UnboundedSender<Event>;
 pub(crate) type EventRx = mpsc::UnboundedReceiver<Event>;
 

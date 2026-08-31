@@ -48,6 +48,23 @@ impl ExecutionSnapshot {
             fallback: None,
         }
     }
+
+    /// Nodes in [`NodeState::Running`]. Each holds a concurrency permit.
+    /// Equals in-flight execute tasks; Waiting is not counted (permit released).
+    pub fn running_count(&self) -> usize {
+        self.nodes
+            .values()
+            .filter(|n| matches!(n.state, NodeState::Running { .. }))
+            .count()
+    }
+
+    /// Nodes in [`NodeState::Waiting`]. Permit already returned to the cap.
+    pub fn waiting_count(&self) -> usize {
+        self.nodes
+            .values()
+            .filter(|n| matches!(n.state, NodeState::Waiting { .. }))
+            .count()
+    }
 }
 
 impl fmt::Display for ExecutionSnapshot {
@@ -244,5 +261,45 @@ mod tests {
         assert!(snap(ExecutionState::Succeeded, NodeState::Cancelled).contains("Cancelled"));
         assert!(snap(ExecutionState::Succeeded, NodeState::TimedOut).contains("TimedOut"));
         assert!(snap(ExecutionState::Succeeded, NodeState::Succeeded).contains("Succeeded"));
+    }
+
+    #[test]
+    fn running_and_waiting_counts_match_node_states() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            NodeId::new("r"),
+            NodeSnapshot {
+                state: NodeState::Running { attempt: 1 },
+                output: None,
+                attempt: 1,
+                resume_token: None,
+                last_error: None,
+            },
+        );
+        nodes.insert(
+            NodeId::new("w"),
+            NodeSnapshot {
+                state: NodeState::Waiting {
+                    token: ResumeToken::issue(ExecutionId::new(), NodeId::new("w"), 1),
+                    attempt: 1,
+                },
+                output: None,
+                attempt: 1,
+                resume_token: None,
+                last_error: None,
+            },
+        );
+        nodes.insert(NodeId::new("s"), empty_node());
+        let snap = ExecutionSnapshot {
+            schema_version: SCHEMA_VERSION,
+            revision: 1,
+            execution_id: ExecutionId::new(),
+            workflow_id: WorkflowId::new("c"),
+            state: ExecutionState::Running,
+            nodes,
+            node_order: vec![NodeId::new("r"), NodeId::new("w"), NodeId::new("s")],
+        };
+        assert_eq!(snap.running_count(), 1);
+        assert_eq!(snap.waiting_count(), 1);
     }
 }

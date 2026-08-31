@@ -38,6 +38,7 @@ pub(crate) struct Scheduler {
     cancel_bound: Duration,
     tx: EventTx,
     bound_armed: bool,
+    cancel_bound_task: Option<tokio::task::AbortHandle>,
     last_persisted: u64,
 }
 
@@ -81,6 +82,7 @@ impl Scheduler {
             cancel_bound,
             tx,
             bound_armed: false,
+            cancel_bound_task: None,
             last_persisted: 0,
         }
     }
@@ -169,6 +171,7 @@ impl Scheduler {
             }
             Event::Shutdown => {
                 self.spawn.abort_all();
+                debug_assert_eq!(self.spawn.inflight_len(), 0);
                 return true;
             }
         }
@@ -283,13 +286,27 @@ impl Scheduler {
             return;
         }
         self.bound_armed = true;
+        self.spawn.abort_all();
         let tx = self.tx.clone();
         let bound = self.cancel_bound;
         // Wall time, not Clock: hang-bound must fire even if FakeClock is paused.
-        tokio::spawn(async move {
+        // Owned: aborted in `Drop` so it cannot wake a dead execution.
+        let handle = tokio::spawn(async move {
             tokio::time::sleep(bound).await;
             let _ = tx.send(Event::ForceCancelBound);
         });
-        self.spawn.abort_all();
+        self.cancel_bound_task = Some(handle.abort_handle());
+    }
+
+    fn abort_cancel_bound(&mut self) {
+        if let Some(h) = self.cancel_bound_task.take() {
+            h.abort();
+        }
+    }
+}
+
+impl Drop for Scheduler {
+    fn drop(&mut self) {
+        self.abort_cancel_bound();
     }
 }

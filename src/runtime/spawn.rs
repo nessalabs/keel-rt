@@ -60,6 +60,16 @@ impl SpawnSet {
     pub(crate) fn forget(&mut self, slot: NodeSlot) {
         self.inflight[slot.0] = None;
     }
+
+    pub(crate) fn inflight_len(&self) -> usize {
+        self.inflight.iter().filter(|h| h.is_some()).count()
+    }
+}
+
+impl Drop for SpawnSet {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -87,5 +97,78 @@ impl<F: Future> Future for CatchUnwind<F> {
             Ok(Poll::Pending) => Poll::Pending,
             Err(e) => Poll::Ready(Err(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::ids::{ExecutionId, NodeId, ResumeToken};
+    use crate::domain::outcome::NodeOutcome;
+    use crate::runtime::executor::{ExecutionContext, FunctionExecutor};
+    use crate::runtime::inject;
+    use crate::runtime::time::SystemClock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drop_aborts_inflight_execute() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = inject::channel();
+        let mut set = SpawnSet::new(tx, 1);
+        let exec = FunctionExecutor::new("h", {
+            let dropped = dropped.clone();
+            let started = started.clone();
+            move |_ctx: ExecutionContext| {
+                let dropped = dropped.clone();
+                let started = started.clone();
+                async move {
+                    let _g = DropFlag(dropped);
+                    started.store(true, Ordering::SeqCst);
+                    std::future::pending::<NodeOutcome>().await
+                }
+            }
+        });
+        let ctx = ExecutionContext {
+            execution_id: ExecutionId::new(),
+            node_id: NodeId::new("h"),
+            attempt: 1,
+            inputs: Default::default(),
+            cancel: CancellationToken::new(),
+            resume_token: ResumeToken::issue(ExecutionId::new(), NodeId::new("h"), 1),
+            clock: Arc::new(SystemClock),
+        };
+        set.spawn(NodeSlot(0), Arc::new(exec), ctx);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if started.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("execute started");
+        assert_eq!(set.inflight_len(), 1);
+        drop(set);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if dropped.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("SpawnSet Drop must abort inflight execute");
     }
 }

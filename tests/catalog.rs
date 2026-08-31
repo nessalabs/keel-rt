@@ -1462,3 +1462,258 @@ async fn hourglass_neck_fail_cancels_sinks_and_terminates() {
         );
     }
 }
+
+// --- RAII / permit + task leak ------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn drop_handle_returns_permits_running_waiting_ready_timer() {
+    // Running
+    let store = MemoryStore::new();
+    let mut run = WorkflowTest::new()
+        .store(store.clone())
+        .concurrency(2)
+        .node("h", ScriptedExecutor::new("h").hang(false))
+        .start()
+        .await;
+    tokio::time::timeout(BOUND, run.scripted("h").wait_until_hanging())
+        .await
+        .expect("hang");
+    assert_eq!(run.snapshot().await.running_count(), 1);
+    assert_eq!(run.snapshot().await.waiting_count(), 0);
+    run.drop_handle();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(snap) = run.stored_snapshot().await {
+                if snap.state == ExecutionState::Cancelled
+                    && snap.running_count() == 0
+                    && snap.waiting_count() == 0
+                {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop handle Running: permits returned, no Running leftover");
+
+    // Waiting
+    let store = MemoryStore::new();
+    let mut run = WorkflowTest::new()
+        .store(store.clone())
+        .node("w", ScriptedExecutor::new("w").wait())
+        .start()
+        .await;
+    within(run.wait_stable()).await;
+    assert_eq!(run.execution_state().await, ExecutionState::Waiting);
+    assert_eq!(run.snapshot().await.running_count(), 0);
+    assert_eq!(run.snapshot().await.waiting_count(), 1);
+    run.drop_handle();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(snap) = run.stored_snapshot().await {
+                if snap.state == ExecutionState::Cancelled && snap.waiting_count() == 0 {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop handle Waiting: waiting_count 0");
+
+    // Ready { runnable_at } mid-timer
+    let store = MemoryStore::new();
+    let test = WorkflowTest::new()
+        .store(store.clone())
+        .policy(RetryPolicy::new(3, Duration::from_millis(100)))
+        .node(
+            "r",
+            ScriptedExecutor::new("r")
+                .fail("once")
+                .succeed(Bytes::from_static(b"ok")),
+        );
+    let clock = test.fake_clock();
+    let mut run = test.start().await;
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if matches!(
+                run.state("r").await,
+                NodeState::Ready {
+                    runnable_at: Some(_)
+                }
+            ) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("parked retry");
+    assert_eq!(run.snapshot().await.running_count(), 0);
+    run.drop_handle();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(snap) = run.stored_snapshot().await {
+                if snap.state == ExecutionState::Cancelled {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop mid-timer");
+    clock.advance(Duration::from_secs(1));
+    tokio::task::yield_now().await;
+    let snap = run.stored_snapshot().await.expect("stored");
+    assert_eq!(snap.state, ExecutionState::Cancelled);
+    assert_eq!(snap.running_count(), 0);
+    assert!(matches!(
+        snap.node(&NodeId::new("r")).map(|n| &n.state),
+        Some(NodeState::Cancelled)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn drop_runtime_then_drop_handle_does_not_leak() {
+    let store = MemoryStore::new();
+    let def = WorkflowDefinition::builder("wf")
+        .node("h", "h")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register(ScriptedExecutor::new("h").hang(false))
+        .build();
+    let handle = rt.start(def).expect("start");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if handle.inspect().await.running_count() == 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("running");
+    let id = handle.inspect().await.execution_id.clone();
+    drop(rt);
+    assert_eq!(handle.inspect().await.running_count(), 1);
+    drop(handle);
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(Some(snap)) = store.get(&id).await {
+                if snap.state == ExecutionState::Cancelled && snap.running_count() == 0 {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("last handle Drop owns JoinSet abort + permit return");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn panic_paths_release_permits() {
+    let boom = within(
+        WorkflowTest::new()
+            .concurrency(1)
+            .node("boom", ScriptedExecutor::new("boom").panic())
+            .node("sib", ok("sib"))
+            .run(),
+    )
+    .await;
+    assert_eq!(boom.execution_state().await, ExecutionState::Failed);
+    assert_eq!(boom.snapshot().await.running_count(), 0);
+    assert_eq!(boom.snapshot().await.waiting_count(), 0);
+
+    let policy = within(
+        WorkflowTest::new()
+            .concurrency(1)
+            .policy(PanicPolicy)
+            .node("a", ok("a"))
+            .run(),
+    )
+    .await;
+    assert_eq!(policy.execution_state().await, ExecutionState::Failed);
+    assert_eq!(policy.snapshot().await.running_count(), 0);
+
+    let sink_ok = within(
+        WorkflowTest::new()
+            .node("a", ok("a"))
+            .run(),
+    )
+    .await;
+    assert_eq!(sink_ok.snapshot().await.running_count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fifty_sequential_executions_do_not_leak_permits() {
+    let rt = Runtime::builder()
+        .concurrency(2)
+        .register_fn("ok", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .register(ScriptedExecutor::new("wait").wait())
+        .build();
+    for i in 0..50 {
+        let def = WorkflowDefinition::builder(format!("seq-{i}"))
+            .node("a", "ok")
+            .build()
+            .unwrap();
+        let handle = rt.start(def).expect("start");
+        let snap = handle.inspect().await;
+        assert!(snap.running_count() <= 2);
+        assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    }
+    let wait_def = WorkflowDefinition::builder("wait")
+        .node("w", "wait")
+        .build()
+        .unwrap();
+    let handle = rt.start(wait_def).expect("start");
+    assert_eq!(within(handle.wait_stable()).await, ExecutionState::Waiting);
+    let snap = handle.inspect().await;
+    assert_eq!(snap.running_count(), 0, "Waiting must not hold a permit");
+    assert_eq!(snap.waiting_count(), 1);
+    handle.cancel().await;
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+    // Handle consumed by wait(); next start must not stall on a leaked permit.
+    let def = WorkflowDefinition::builder("after")
+        .node("a", "ok")
+        .node("b", "ok")
+        .build()
+        .unwrap();
+    let handle = rt.start(def).expect("start");
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn memory_store_concurrent_get_during_persist_does_not_deadlock() {
+    let store = MemoryStore::new();
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    let id = handle.inspect().await.execution_id.clone();
+    let getter = async {
+        for _ in 0..64 {
+            let _ = store.get(&id).await;
+            tokio::task::yield_now().await;
+        }
+    };
+    let (state, _) = tokio::join!(handle.wait(), getter);
+    assert_eq!(state, ExecutionState::Succeeded);
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().running_count(),
+        0
+    );
+}

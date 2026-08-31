@@ -942,6 +942,45 @@ mod tests {
     }
 
     #[test]
+    fn retry_due_after_cancel_does_not_wake_dead_execution() {
+        use crate::domain::policy::RetryPolicy;
+        let mut ex = linear();
+        let p = RetryPolicy::new(3, std::time::Duration::from_millis(10));
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("once")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(_)
+            }
+        ));
+        ex.apply(ApplyCmd::Cancel, &p, now).unwrap();
+        let rev = ex.revision();
+        let effect = ex
+            .apply(ApplyCmd::RetryDue { node_id: "a".into() }, &p, Timestamp(10))
+            .unwrap();
+        assert!(!effect.changed);
+        assert_eq!(ex.revision(), rev);
+        assert_eq!(ex.state(), ExecutionState::Cancelled);
+        assert!(matches!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Cancelled
+        ));
+    }
+
+    #[test]
     fn force_cancel_running_aborts_and_cancels_execution() {
         let mut ex = linear();
         let now = Timestamp(0);

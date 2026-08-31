@@ -24,8 +24,15 @@ pub struct ExecutionContext {
 
 impl ExecutionContext {
     /// Sleep on the execution clock (FakeClock in tests, system clock in apps).
+    /// Returns when `duration` elapses **or** [`Self::cancel`] fires, so a
+    /// cancelled execution does not wake into more user work. Abort of the
+    /// execute task still drops this future if the executor ignores cancel.
     pub async fn sleep(&self, duration: Duration) {
-        self.clock.sleep(duration).await;
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {}
+            _ = self.clock.sleep(duration) => {}
+        }
     }
 }
 
@@ -83,7 +90,42 @@ impl ExecutorRegistry {
         self.inner.insert(exec.id(), exec);
     }
 
-    pub fn get(&self, id: &ExecutorId) -> Option<Arc<dyn Executor>> {
+    pub     fn get(&self, id: &ExecutorId) -> Option<Arc<dyn Executor>> {
         self.inner.get(id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::time::SystemClock;
+
+    fn ctx(cancel: CancellationToken) -> ExecutionContext {
+        ExecutionContext {
+            execution_id: ExecutionId::new(),
+            node_id: NodeId::new("n"),
+            attempt: 1,
+            inputs: HashMap::new(),
+            cancel,
+            resume_token: ResumeToken::issue(ExecutionId::new(), NodeId::new("n"), 1),
+            clock: Arc::new(SystemClock),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sleep_returns_when_cancel_fires() {
+        let cancel = CancellationToken::new();
+        let ctx = ctx(cancel.clone());
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), ctx.sleep(Duration::from_secs(60)))
+            .await
+            .expect("ctx.sleep must return on cancel, not wait the full duration");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sleep_zero_completes_without_cancel() {
+        ctx(CancellationToken::new())
+            .sleep(Duration::ZERO)
+            .await;
     }
 }

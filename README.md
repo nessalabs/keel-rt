@@ -47,7 +47,16 @@ inspect. **Drop cancels.** `wait()` is terminal only; Waiting is not done.
 Unknown executor ids fail at `start` (named in the error) — nothing runs.
 
 `ExecutionSnapshot::iter_nodes()` walks **definition order**. `HashMap` lookup
-via `.node(id)` is unchanged.
+via `.node(id)` is unchanged. `running_count()` / `waiting_count()` are the
+in-flight observability (Running holds a permit; Waiting does not).
+
+## Allocator
+
+The library does **not** set a global allocator. Production binaries that run
+the kernel under many threads should consider jemalloc (`tikv-jemallocator`)
+in the *binary*, not by depending on a keel-rt default. Enable the optional
+`jemalloc` crate feature only in that target. Numbers and how to reproduce:
+[`benches/JEMALLOC.md`](benches/JEMALLOC.md).
 
 ## Build and test
 
