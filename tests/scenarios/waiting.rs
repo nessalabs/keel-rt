@@ -59,7 +59,7 @@ async fn resume_reinvoke_same_attempt() {
 
     assert_eq!(run.scripted("a").attempts(), vec![1]);
     let token = run.resume_token("a").await;
-    assert_eq!(token.attempt, 1);
+    assert_eq!(token.attempt(), 1);
     run.resume(token, Resume::Reinvoke).await.unwrap();
     run.wait_stable().await;
 

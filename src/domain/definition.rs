@@ -35,12 +35,6 @@ pub enum Join {
     AllDone,
 }
 
-/// Phase 1 only: an edge is a hard AND-join predecessor.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EdgePredicate {
-    Always,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeDef {
     pub id: NodeId,
@@ -49,11 +43,11 @@ pub struct NodeDef {
     pub join: Join,
 }
 
+/// Hard predecessor edge. Phase 1 has no edge predicates.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     pub from: NodeId,
     pub to: NodeId,
-    pub predicate: EdgePredicate,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -75,7 +69,7 @@ pub enum DefinitionError {
 /// Both default to fail-fast / AND (`FailExecution`, `AllSucceeded`).
 #[derive(Clone, Debug)]
 pub struct WorkflowDefinition {
-    pub id: WorkflowId,
+    id: WorkflowId,
     on_failure: OnFailure,
     nodes: Vec<NodeDef>,
     edges: Vec<Edge>,
@@ -95,6 +89,10 @@ impl WorkflowDefinition {
             on_failure: OnFailure::FailExecution,
             node_joins: Vec::new(),
         }
+    }
+
+    pub fn id(&self) -> &WorkflowId {
+        &self.id
     }
 
     pub fn on_failure(&self) -> OnFailure {
@@ -202,7 +200,6 @@ impl WorkflowDefinitionBuilder {
         self.edges.push(Edge {
             from: from.into(),
             to: to.into(),
-            predicate: EdgePredicate::Always,
         });
         self
     }
@@ -363,7 +360,7 @@ mod tests {
             .node("a", "e")
             .build()
             .unwrap();
-        assert_eq!(def.id.as_str(), "burst-7");
+        assert_eq!(def.id().as_str(), "burst-7");
     }
 
     #[test]

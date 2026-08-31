@@ -46,7 +46,7 @@ fn builder_accepts_owned_string() {
         .node(NodeId::new(format!("n{}", 1)), "e")
         .build()
         .unwrap();
-    assert_eq!(def.id.as_str(), "burst-3");
+    assert_eq!(def.id().as_str(), "burst-3");
     assert!(def.node(&NodeId::new("n1")).is_some());
 }
 

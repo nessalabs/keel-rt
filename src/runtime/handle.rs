@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 ///
 /// - [`wait`](Self::wait) — block until **terminal** (`Succeeded` / `Failed` /
 ///   `Cancelled` / `Completed`). Consumes the handle so Drop does not cancel.
-/// - [`wait_stable`](Self::wait_stable) — HITL wait: returns on terminal **or**
+/// - [`wait_stable`](Self::wait_stable) — returns on terminal **or**
 ///   [`Waiting`](crate::ExecutionState::Waiting). Waiting is not done; call
 ///   [`resume`](Self::resume) then `wait`.
 /// - **Drop cancels** (JoinSet semantics). It does not detach. Hold the handle
@@ -59,7 +59,7 @@ impl ExecutionHandle {
     /// `Cancelled`, or `Completed`). Consumes the handle so Drop does not cancel.
     ///
     /// Does **not** return on [`Waiting`](crate::ExecutionState::Waiting) — use
-    /// [`wait_stable`](Self::wait_stable) for HITL.
+    /// [`wait_stable`](Self::wait_stable) then [`resume`](Self::resume).
     pub async fn wait(mut self) -> ExecutionState {
         self.consumed = true;
         loop {
@@ -73,7 +73,7 @@ impl ExecutionHandle {
         }
     }
 
-    /// Wait until terminal **or** Waiting (HITL / executor yield).
+    /// Wait until terminal **or** Waiting (executor yield).
     /// Waiting is not a successful finish — resume, then [`wait`](Self::wait).
     pub async fn wait_stable(&self) -> ExecutionState {
         let mut state = self.state.clone();

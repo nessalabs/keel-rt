@@ -10,7 +10,8 @@ pub(crate) enum Event {
     NodeFinished {
         node_id: NodeId,
         attempt: u32,
-        result: Result<NodeOutcome, JoinKind>,
+        /// `Err` is a panic payload string from the execute task.
+        result: Result<NodeOutcome, String>,
     },
     Resume {
         token: ResumeToken,
@@ -29,15 +30,10 @@ pub(crate) enum Event {
     Shutdown,
 }
 
-#[derive(Debug)]
-pub(crate) enum JoinKind {
-    Panic(String),
-    /// Aborted execute tasks are usually dropped without a join. Kept so a
-    /// late cancelled join is ignored when `Execution` already set `cancelled`.
-    #[allow(dead_code)]
-    Cancelled,
-}
-
+/// Apply-loop inbox. Unbounded so execute tasks and handle ops never wait on
+/// apply (a bounded channel can deadlock `resume` / `inspect`). Capacity is
+/// implicit: in-flight executes ≤ concurrency, plus handle messages. See
+/// `docs/adr/0001-unbounded-apply-inbox.md`.
 pub(crate) type EventTx = mpsc::UnboundedSender<Event>;
 pub(crate) type EventRx = mpsc::UnboundedReceiver<Event>;
 

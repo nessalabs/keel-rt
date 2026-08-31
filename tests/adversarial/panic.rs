@@ -2,7 +2,7 @@
 
 use super::common::{ok, within};
 use bytes::Bytes;
-use keel_rt::domain::policy::Policy;
+use keel_rt::Policy;
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
 use keel_rt::{
     DomainEvent, ExecutionState, FnSink, FunctionExecutor, NodeOutcome, NodeState, Runtime,

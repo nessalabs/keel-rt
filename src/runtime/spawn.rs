@@ -1,6 +1,6 @@
 use crate::domain::ids::NodeId;
 use crate::runtime::executor::{ExecutionContext, Executor};
-use crate::runtime::inject::{Event, EventTx, JoinKind};
+use crate::runtime::inject::{Event, EventTx};
 use std::collections::HashMap;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -32,7 +32,7 @@ impl SpawnSet {
         let handle = tokio::spawn(async move {
             let result = match CatchUnwind(AssertUnwindSafe(exec.execute(ctx))).await {
                 Ok(outcome) => Ok(outcome),
-                Err(payload) => Err(JoinKind::Panic(panic_message(payload))),
+                Err(payload) => Err(panic_message(payload)),
             };
             let _ = tx.send(Event::NodeFinished {
                 node_id,
@@ -76,6 +76,9 @@ impl<F: Future> Future for CatchUnwind<F> {
     type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Safety: `CatchUnwind` is `!Unpin` only because of `F`. We never
+        // move `F` after pinning; this is a standard pin projection to the
+        // inner future.
         let inner = unsafe { self.map_unchecked_mut(|s| &mut s.0 .0) };
         match catch_unwind(AssertUnwindSafe(|| inner.poll(cx))) {
             Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),

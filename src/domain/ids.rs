@@ -151,9 +151,9 @@ impl fmt::Display for ExecutorId {
 /// Bound to `(execution, node, attempt)` plus a nonce so tokens are not interchangeable.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResumeToken {
-    pub execution_id: ExecutionId,
-    pub node_id: NodeId,
-    pub attempt: u32,
+    execution_id: ExecutionId,
+    node_id: NodeId,
+    attempt: u32,
     nonce: u64,
 }
 
@@ -167,6 +167,18 @@ impl ResumeToken {
             attempt,
             nonce: TOKEN_SEQ.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    pub fn execution_id(&self) -> &ExecutionId {
+        &self.execution_id
+    }
+
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    pub fn attempt(&self) -> u32 {
+        self.attempt
     }
 
     pub fn nonce(&self) -> u64 {

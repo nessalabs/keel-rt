@@ -1,5 +1,5 @@
 use crate::domain::events::DomainEvent;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: &DomainEvent);
@@ -22,27 +22,6 @@ where
 {
     fn emit(&self, event: &DomainEvent) {
         (self.0)(event);
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct RecordingSink {
-    events: Arc<Mutex<Vec<DomainEvent>>>,
-}
-
-impl RecordingSink {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn events(&self) -> Vec<DomainEvent> {
-        self.events.lock().expect("recording sink").clone()
-    }
-}
-
-impl EventSink for RecordingSink {
-    fn emit(&self, event: &DomainEvent) {
-        self.events.lock().expect("recording sink").push(event.clone());
     }
 }
 

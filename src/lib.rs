@@ -17,8 +17,8 @@
 //! Use [`ExecutionState::is_successful_finish`] (not `== Succeeded`) so
 //! FailSubtree [`Completed`](ExecutionState::Completed) counts as ok.
 
-pub mod domain;
-pub mod runtime;
+pub(crate) mod domain;
+pub(crate) mod runtime;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
@@ -29,7 +29,9 @@ pub use domain::ids::{ExecutionId, ExecutorId, NodeId, ResumeToken, WorkflowId};
 pub use domain::outcome::{NodeError, NodeOutcome, Resume};
 pub use domain::policy::{AcceptPolicy, NeverWaitPolicy, Policy, PolicyDecision, RetryPolicy};
 pub use domain::snapshot::{ExecutionSnapshot, NodeSnapshot, SCHEMA_VERSION};
-pub use domain::state::{ApplyError, ExecutionState, NodeState};
+pub use domain::state::{
+    ApplyCmd, ApplyEffect, ApplyError, Execution, ExecutionState, NodeState,
+};
 pub use domain::time::Timestamp;
 pub use runtime::executor::{ExecutionContext, Executor, FunctionExecutor};
 pub use runtime::handle::ExecutionHandle;

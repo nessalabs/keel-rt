@@ -2,7 +2,7 @@
 
 use super::common::{ok, within};
 use bytes::Bytes;
-use keel_rt::domain::state::{ApplyCmd, Execution};
+use keel_rt::{ApplyCmd, Execution};
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
 use keel_rt::{
     AcceptPolicy, ExecutionState, NodeId, NodeOutcome, NodeState, RetryPolicy, WorkflowDefinition,

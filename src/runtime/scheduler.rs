@@ -3,12 +3,11 @@
 
 use crate::domain::definition::WorkflowDefinition;
 use crate::domain::ids::{NodeId, NodeSlot};
-use crate::domain::outcome::NodeOutcome;
 use crate::domain::policy::Policy;
 use crate::domain::state::{ApplyCmd, Execution, ExecutionState};
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry};
-use crate::runtime::inject::{Event, EventTx, JoinKind};
-use crate::runtime::park::{ChannelPark, Park};
+use crate::runtime::inject::{Event, EventTx};
+use crate::runtime::park::ChannelPark;
 use crate::runtime::sink::EventSink;
 use crate::runtime::spawn::SpawnSet;
 use crate::runtime::store::StateStore;
@@ -119,21 +118,12 @@ impl Scheduler {
                             outcome: Ok(outcome),
                         });
                     }
-                    Err(JoinKind::Panic(msg)) => {
+                    Err(msg) => {
                         self.apply_cmd(ApplyCmd::FinishNode {
                             node_id,
                             attempt,
                             outcome: Err(msg),
                         });
-                    }
-                    Err(JoinKind::Cancelled) => {
-                        if !self.exec.is_cancelled() {
-                            self.apply_cmd(ApplyCmd::FinishNode {
-                                node_id,
-                                attempt,
-                                outcome: Ok(NodeOutcome::failed("cancelled")),
-                            });
-                        }
                     }
                 }
                 self.dispatch();
@@ -271,18 +261,9 @@ impl Scheduler {
     }
 
     fn launch_slot(&mut self, slot: NodeSlot, id: NodeId) {
-        let Some(exec) = self.executors[slot.0].clone() else {
-            let executor_id = self.exec.definition.executor_at(slot);
-            let attempt = self.exec.attempt_at(slot);
-            let _ = self.tx.send(Event::NodeFinished {
-                node_id: id,
-                attempt,
-                result: Ok(NodeOutcome::failed(format!(
-                    "no executor registered for {executor_id}"
-                ))),
-            });
-            return;
-        };
+        let exec = self.executors[slot.0]
+            .clone()
+            .expect("Runtime::start rejected unregistered executor ids");
         let token = self
             .exec
             .resume_token_at(slot)
@@ -315,6 +296,7 @@ impl Scheduler {
         self.bound_armed = true;
         let tx = self.tx.clone();
         let bound = self.cancel_bound;
+        // Wall time, not Clock: hang-bound must fire even if FakeClock is paused.
         tokio::spawn(async move {
             tokio::time::sleep(bound).await;
             let _ = tx.send(Event::ForceCancelBound);

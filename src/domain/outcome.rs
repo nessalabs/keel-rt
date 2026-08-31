@@ -64,7 +64,7 @@ impl fmt::Display for NodeOutcome {
         match self {
             Self::Succeeded(b) => write!(f, "Succeeded({} bytes)", b.len()),
             Self::Failed(e) => write!(f, "Failed({e})"),
-            Self::Waiting { token } => write!(f, "Waiting({})", token.node_id),
+            Self::Waiting { token } => write!(f, "Waiting({})", token.node_id()),
             Self::TimedOut => write!(f, "TimedOut"),
         }
     }

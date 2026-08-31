@@ -1,5 +1,5 @@
-//! I/O-fault harness (Tokio `test-util` analog). No sockets, HTTP, or Agent
-//! types — faults are [`NodeOutcome`]s driven by [`FakeClock`](crate::testing::FakeClock).
+//! I/O-fault harness (Tokio `test-util` analog). No sockets or product
+//! resource types — faults are [`NodeOutcome`]s driven by [`FakeClock`](crate::testing::FakeClock).
 //!
 //! [`NetFault`] composes onto [`ScriptedExecutor`]. `Delay` sleeps on the
 //! execution clock and is aborted if [`CancellationToken`] fires first.

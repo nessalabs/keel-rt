@@ -42,7 +42,11 @@ impl ExecutionSnapshot {
     /// `(id, snapshot)` in **definition order**. Falls back to sorted HashMap
     /// keys if `node_order` is empty (legacy persisted snapshots).
     pub fn iter_nodes(&self) -> impl Iterator<Item = (&NodeId, &NodeSnapshot)> + '_ {
-        self.iter_ordered()
+        OrderedIter {
+            snap: self,
+            idx: 0,
+            fallback: None,
+        }
     }
 }
 
@@ -60,18 +64,6 @@ impl fmt::Display for ExecutionSnapshot {
             write!(f, "\n  {id} {}", format_node(&n.state))?;
         }
         Ok(())
-    }
-}
-
-impl ExecutionSnapshot {
-    /// Definition order when `node_order` is populated; otherwise HashMap keys
-    /// sorted by id (stable, not definition order).
-    pub fn iter_ordered(&self) -> impl Iterator<Item = (&NodeId, &NodeSnapshot)> + '_ {
-        OrderedIter {
-            snap: self,
-            idx: 0,
-            fallback: None,
-        }
     }
 }
 

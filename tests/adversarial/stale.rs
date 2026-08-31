@@ -2,7 +2,7 @@
 
 use super::common::{hang, ok, within};
 use bytes::Bytes;
-use keel_rt::domain::state::{ApplyCmd, Execution};
+use keel_rt::{ApplyCmd, Execution};
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
 use keel_rt::{
     AcceptPolicy, ApplyError, ExecutionState, NodeId, NodeOutcome, NodeState, Resume, ResumeToken,

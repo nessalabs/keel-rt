@@ -42,7 +42,7 @@ let state = rt.run(def).await?;           // start + wait; no handle to drop-can
 assert!(state.is_successful_finish());    // Succeeded *or* Completed (FailSubtree)
 ```
 
-`start` returns a handle when you need HITL (`wait_stable` + `resume`) or
+`start` returns a handle when you need `wait_stable` + `resume` or
 inspect. **Drop cancels.** `wait()` is terminal only; Waiting is not done.
 Unknown executor ids fail at `start` (named in the error) — nothing runs.
 

@@ -17,8 +17,7 @@
 //! ```
 
 use bytes::Bytes;
-use keel_rt::domain::policy::AcceptPolicy;
-use keel_rt::domain::state::{ApplyCmd, Execution};
+use keel_rt::{AcceptPolicy, ApplyCmd, Execution};
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
 use keel_rt::{
     ExecutionContext, ExecutionState, FunctionExecutor, NodeId, NodeOutcome, NodeState,

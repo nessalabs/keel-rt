@@ -170,7 +170,7 @@ impl Execution {
             .collect();
         Self {
             id: ExecutionId::new(),
-            workflow_id: definition.id.clone(),
+            workflow_id: definition.id().clone(),
             definition,
             state: ExecutionState::Created,
             nodes,
@@ -772,7 +772,7 @@ impl Execution {
         }
         if self.state.is_terminal() {
             if let Resume::Complete(ref outcome) = resume {
-                if let Some(n) = self.node(&token.node_id) {
+                if let Some(n) = self.node(token.node_id()) {
                     if matches!(n.state, NodeState::Succeeded) {
                         if let Some(prev) = &n.last_outcome {
                             if prev.equivalent(outcome) {
@@ -788,8 +788,8 @@ impl Execution {
 
         let slot = self
             .definition
-            .slot(&token.node_id)
-            .ok_or_else(|| ApplyError::UnknownNode(token.node_id.clone()))?;
+            .slot(token.node_id())
+            .ok_or_else(|| ApplyError::UnknownNode(token.node_id().clone()))?;
         let node = &self.nodes[slot.0];
 
         match &node.state {
@@ -818,16 +818,16 @@ impl Execution {
                 self.set_state(
                     slot,
                     NodeState::Running {
-                        attempt: token.attempt,
+                        attempt: token.attempt(),
                     },
                 );
                 effect.changed = true;
-                self.apply_outcome(slot, &token.node_id, outcome, policy, now, effect)?;
+                self.apply_outcome(slot, token.node_id(), outcome, policy, now, effect)?;
             }
             Resume::Reinvoke => {
                 self.nodes[slot.0].reinvoke = true;
                 self.set_state(slot, NodeState::Ready { runnable_at: None });
-                effect.newly_runnable.push(token.node_id);
+                effect.newly_runnable.push(token.node_id().clone());
                 effect.changed = true;
             }
         }
