@@ -1210,6 +1210,166 @@ async fn store_error_on_terminal_write_keeps_in_memory_succeeded() {
     );
 }
 
+/// Transient persist `Err` of the terminal, then `wait` + Drop (Shutdown).
+/// `last_persisted = revision` on persist fail used to skip retry; Shutdown
+/// did not flush. The store stayed Running after `wait` returned Succeeded,
+/// so a later resume re-invoked work the caller already observed as done.
+#[tokio::test(flavor = "current_thread")]
+async fn transient_terminal_persist_err_shutdown_flushes_succeeded() {
+    struct FailFirstTerminal {
+        inner: MemoryStore,
+        terminal_attempts: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl StateStore for FailFirstTerminal {
+        async fn put(
+            &self,
+            snapshot: &keel_rt::ExecutionSnapshot,
+        ) -> Result<(), StoreError> {
+            self.inner.put(snapshot).await
+        }
+        async fn get(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            if exec.state().is_terminal() {
+                let n = self.terminal_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == 1 {
+                    return Err(StoreError::Message("busy terminal".into()));
+                }
+            }
+            self.inner.persist(exec).await
+        }
+        async fn workflow_definition(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::WorkflowDefinition>, StoreError> {
+            self.inner.workflow_definition(id).await
+        }
+    }
+    let inner = MemoryStore::new();
+    let terminal_attempts = Arc::new(AtomicUsize::new(0));
+    let store = FailFirstTerminal {
+        inner: inner.clone(),
+        terminal_attempts: terminal_attempts.clone(),
+    };
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store)
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    drop(rt);
+    tokio::task::yield_now().await;
+    assert_eq!(
+        inner.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Succeeded,
+        "clean shutdown must retry a transient terminal persist Err so the store matches wait()"
+    );
+    assert!(
+        terminal_attempts.load(Ordering::SeqCst) >= 2,
+        "Shutdown must retry the failed terminal persist, got {}",
+        terminal_attempts.load(Ordering::SeqCst)
+    );
+}
+
+/// Drop-cancel persist `Err` once, then Shutdown. File/store must be Cancelled,
+/// not left Running so resume re-invokes work the handle cancelled.
+#[tokio::test(flavor = "current_thread")]
+async fn transient_cancel_persist_err_shutdown_flushes_cancelled() {
+    struct FailFirstCancel {
+        inner: MemoryStore,
+        cancel_attempts: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl StateStore for FailFirstCancel {
+        async fn put(
+            &self,
+            snapshot: &keel_rt::ExecutionSnapshot,
+        ) -> Result<(), StoreError> {
+            self.inner.put(snapshot).await
+        }
+        async fn get(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            if exec.state() == ExecutionState::Cancelled {
+                let n = self.cancel_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == 1 {
+                    return Err(StoreError::Message("busy cancel".into()));
+                }
+            }
+            self.inner.persist(exec).await
+        }
+        async fn workflow_definition(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::WorkflowDefinition>, StoreError> {
+            self.inner.workflow_definition(id).await
+        }
+    }
+    let inner = MemoryStore::new();
+    let cancel_attempts = Arc::new(AtomicUsize::new(0));
+    let store = FailFirstCancel {
+        inner: inner.clone(),
+        cancel_attempts: cancel_attempts.clone(),
+    };
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store)
+        .register(ScriptedExecutor::new("a").hang(false))
+        .build();
+    let handle = rt.start(def).expect("start");
+    let id = handle.execution_id().clone();
+    within(async {
+        loop {
+            if let Some(s) = inner.get(&id).await.unwrap() {
+                if matches!(
+                    s.node(&NodeId::new("a")).map(|n| &n.state),
+                    Some(NodeState::Running { .. })
+                ) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    drop(handle);
+    within(async {
+        loop {
+            if let Some(s) = inner.get(&id).await.unwrap() {
+                if s.state == ExecutionState::Cancelled {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        cancel_attempts.load(Ordering::SeqCst) >= 2,
+        "Shutdown must retry the failed cancel persist, got {}",
+        cancel_attempts.load(Ordering::SeqCst)
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn fat_bytes_join_input_is_refcount_not_copy() {
     let fat = Bytes::from(vec![9u8; 64 * 1024]);

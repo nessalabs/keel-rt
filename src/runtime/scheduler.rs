@@ -242,6 +242,11 @@ impl Scheduler {
             Event::Shutdown => {
                 self.spawn.abort_all();
                 debug_assert_eq!(self.spawn.inflight_len(), 0);
+                // Retry a persist that failed on the last apply (transient
+                // store Err). `wait` already announced in-memory; without
+                // this flush the file stays at the previous revision and
+                // resume re-invokes work the caller observed as done/cancelled.
+                self.persist_then_emit().await;
                 return true;
             }
         }
@@ -287,7 +292,9 @@ impl Scheduler {
     }
 
     /// Persist the durable snapshot, then announce. A failed persist keeps
-    /// in-memory apply and does not emit (do not announce a non-durable fact).
+    /// in-memory apply and does not emit (do not announce a non-durable fact
+    /// on the sink). `last_persisted` advances only on persist `Ok`. Shutdown
+    /// retries a failed last persist so a clean `wait`/Drop matches the file.
     /// No persist queue — ADR 0001 still applies.
     async fn persist_then_emit(&mut self) {
         let events = std::mem::take(&mut self.pending_events);
@@ -312,12 +319,13 @@ impl Scheduler {
             }
             Ok(Err(e)) => {
                 debug!(error = %e, "StateStore::put failed; in-memory state kept");
-                self.last_persisted = self.exec.revision();
+                // Do not advance last_persisted: the next persist_then_emit
+                // (including Shutdown) must retry this revision. Treating Err
+                // as durable left the file at Running after wait() Succeeded.
                 false
             }
             Err(_) => {
                 debug!("StateStore::persist panicked; in-memory state kept");
-                self.last_persisted = self.exec.revision();
                 false
             }
         }
