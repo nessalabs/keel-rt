@@ -11,6 +11,9 @@ categories = ["asynchronous"]
 [features]
 default = []
 test-util = []
+# Install jemalloc only in a binary/example that enables this feature.
+# The library (`lib.rs`) never sets `#[global_allocator]`.
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
 async-trait = "0.1"
@@ -22,6 +25,7 @@ tokio-util = { version = "0.7.13", features = ["rt"] }
 tracing = "0.1.41"
 # Rust 1.83 cannot parse edition2024 manifests pulled by latest indexmap.
 indexmap = "=2.7.1"
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [dev-dependencies]
 keel-rt = { path = ".", features = ["test-util"] }

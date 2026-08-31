@@ -4,6 +4,9 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+Allocator experiment (release example, not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
+Library default remains the system allocator. jemalloc is opt-in on a binary.
+
 ## Hunt re-measure (2026-08-31)
 
 Tests + catalog only. No scheduler / apply / persist change. Gate: no median
