@@ -301,6 +301,20 @@ impl Execution {
         &self.dirty_list
     }
 
+    /// Nodes that changed since create or the last successful persist.
+    /// File adapters write these instead of cloning the whole graph (ADR 0002).
+    pub fn dirty_nodes(&self) -> Vec<(NodeId, NodeSnapshot)> {
+        self.dirty_list
+            .iter()
+            .map(|slot| {
+                (
+                    self.definition.id_at(*slot).clone(),
+                    self.node_snapshot_at(*slot),
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn clear_dirty(&mut self) {
         for s in self.dirty_list.drain(..) {
             self.dirty[s.0] = 0;
@@ -991,6 +1005,18 @@ mod tests {
             ex.node(&NodeId::new("a")).unwrap().state,
             NodeState::Cancelled
         ));
+    }
+
+    #[test]
+    fn dirty_nodes_lists_slots_changed_by_apply() {
+        let mut ex = linear();
+        assert!(ex.dirty_nodes().is_empty());
+        ex.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        let dirty = ex.dirty_nodes();
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0].0.as_str(), "a");
+        assert!(matches!(dirty[0].1.state, NodeState::Ready { .. }));
     }
 
     #[test]
