@@ -122,3 +122,37 @@ No new kernel bugs. HITL duplicate-Complete must reuse the same payload
 (`ConflictingComplete` otherwise). Retrying Research and Waiting Critic
 must not share a diamond if the park probe waits for Waiting before the
 clock advances.
+
+## Resilience / I/O-fault harness (this run)
+
+`tests/resilience.rs`. `NetFault` on `ScriptedExecutor` + `FakeClock` (no
+sockets). Fail-fast stays **execution-wide**. `siblings_survive_timeout_same_dag`
+is `#[ignore = "requires failure scopes"]`.
+
+| fault | scheduler | this node | same-exec siblings | other executions |
+|---|---|---|---|---|
+| Timeout + Accept | alive | TimedOut | Cancelled | n/a |
+| Timeout + Retry | alive | Ready then Succeeded | may run (permit released) | n/a |
+| Reset + Retry | alive | Ready then Succeeded | may run | n/a |
+| Delay + AND-join | alive | Running then Succeeded | join stays Pending | n/a |
+| Timeout in 1 of 100 execs | alive | that exec Failed | n/a | other 99 Succeeded |
+| mixed 32 / conc 8 | alive | retry-then-succeed | peak Running = 8 | n/a |
+
+| test | debug |
+|---|---:|
+| timeout_accept_fail_fasts_execution | 0.14 ms |
+| timeout_retry_releases_permit_then_succeeds | 0.26 ms |
+| delay_and_join_waits_for_slow_pred | 0.26 ms |
+| reset_retry_then_success | 0.21 ms |
+| timeout_isolates_one_of_100_executions | 7.52 ms |
+| mixed_faults_retry_then_succeed | 0.86 ms (peak Running 8) |
+| timeout_after_clock_while_running | 0.30 ms |
+| delay_aborts_on_cancel | 0.26 ms |
+
+```bash
+cargo test --test resilience -- --nocapture --test-threads=1
+```
+
+100 sequential diamonds: MemoryStore keys by `ExecutionId`. The TimedOut
+execution stays Failed after the other 99 Succeeded. That is how a crawl
+stays resilient today — N executions, not continue-on-error in one DAG.

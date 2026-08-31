@@ -41,7 +41,7 @@ fn format_ms(d: Duration) -> String {
 }
 
 fn diamond_def(i: usize) -> WorkflowDefinition {
-    WorkflowDefinition::builder(format!("research-{i}"))
+    WorkflowDefinition::builder(format!("research-{i}").as_str())
         .node("research", "research")
         .node("summarizer", "ok")
         .node("critic", "ok")
