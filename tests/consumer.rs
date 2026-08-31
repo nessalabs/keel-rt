@@ -4,8 +4,10 @@
 
 use bytes::Bytes;
 use keel_rt::{
-    Clock, ExecutionContext, ExecutionState, Join, MemoryStore, NodeId, NodeOutcome, OnFailure,
-    Runtime, StartError, WorkflowDefinition,
+    AcceptPolicy, ApplyCmd, ApplyError, Clock, DomainEvent, Execution, ExecutionContext,
+    ExecutionState, FnSink, Join, MemoryStore, NeverWaitPolicy, NodeId, NodeOutcome, NoopStore,
+    OnFailure, Policy, PolicyDecision, ResumeToken, Runtime, StartError, StateStore, Timestamp,
+    WorkflowDefinition,
 };
 use std::time::Duration;
 
@@ -174,4 +176,145 @@ async fn completed_is_successful_finish_failed_is_not() {
     let failed = fail_rt.run(boom).await.expect("start");
     assert_eq!(failed, ExecutionState::Failed);
     assert!(!failed.is_successful_finish());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn noop_store_put_get_are_empty() {
+    let store = NoopStore;
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    let id = handle.inspect().await.execution_id.clone();
+    handle.wait().await;
+    assert!(store.get(&id).await.unwrap().is_none());
+    let dummy = keel_rt::ExecutionSnapshot {
+        schema_version: keel_rt::SCHEMA_VERSION,
+        revision: 1,
+        execution_id: id.clone(),
+        workflow_id: keel_rt::WorkflowId::new("wf"),
+        state: ExecutionState::Succeeded,
+        nodes: Default::default(),
+        node_order: Vec::new(),
+    };
+    store.put(&dummy).await.unwrap();
+    assert!(store.get(&id).await.unwrap().is_none(), "NoopStore never retains");
+}
+
+#[test]
+fn definition_walk_and_unknown_id_is_empty() {
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "e")
+        .node("b", "e")
+        .edge("a", "b")
+        .build()
+        .unwrap();
+    assert_eq!(def.edges().len(), 1);
+    assert_eq!(def.sources(), vec![NodeId::new("a")]);
+    assert_eq!(def.predecessors(&NodeId::new("b")), vec![NodeId::new("a")]);
+    assert_eq!(def.successors(&NodeId::new("a")), vec![NodeId::new("b")]);
+    assert!(def.predecessors(&NodeId::new("ghost")).is_empty());
+    assert!(def.successors(&NodeId::new("ghost")).is_empty());
+}
+
+#[test]
+fn node_outcome_helpers_and_display() {
+    let ok = NodeOutcome::succeeded(Bytes::from_static(b"xy"));
+    let fail = NodeOutcome::failed("boom");
+    let token = ResumeToken::issue(keel_rt::ExecutionId::new(), NodeId::new("n"), 1);
+    let wait = NodeOutcome::Waiting { token: token.clone() };
+    assert!(ok.is_success());
+    assert!(!fail.is_success());
+    assert!(ok.equivalent(&NodeOutcome::succeeded(Bytes::from_static(b"xy"))));
+    assert!(fail.equivalent(&NodeOutcome::failed("boom")));
+    assert!(NodeOutcome::TimedOut.equivalent(&NodeOutcome::TimedOut));
+    assert!(wait.equivalent(&NodeOutcome::Waiting { token }));
+    assert!(!ok.equivalent(&fail));
+    assert_eq!(ok.to_string(), "Succeeded(2 bytes)");
+    assert!(fail.to_string().contains("boom"));
+    assert!(wait.to_string().contains("Waiting(n)"));
+    assert_eq!(NodeOutcome::TimedOut.to_string(), "TimedOut");
+}
+
+#[test]
+fn never_wait_accepts_success_rejects_waiting() {
+    let p = NeverWaitPolicy;
+    let token = ResumeToken::issue(keel_rt::ExecutionId::new(), NodeId::new("n"), 1);
+    assert_eq!(
+        p.decide(&NodeOutcome::succeeded(Bytes::new()), 1),
+        PolicyDecision::Accept
+    );
+    assert_eq!(
+        p.decide(&NodeOutcome::Waiting { token }, 1),
+        PolicyDecision::Reject
+    );
+}
+
+#[test]
+fn timestamp_round_trip_and_display() {
+    let t = Timestamp::from_millis(1500);
+    assert_eq!(t.as_millis(), 1500);
+    assert_eq!(t.to_string(), "1500");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fn_sink_display_names_start_and_success() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .sink(FnSink(move |e: &DomainEvent| {
+            log.lock().unwrap().push(e.to_string());
+        }))
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    assert!(rt.run(def).await.unwrap().is_successful_finish());
+    let lines = seen.lock().unwrap().clone();
+    assert!(
+        lines.iter().any(|s| s.starts_with("execution started")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|s| s.contains("node a succeeded")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|s| s.starts_with("execution succeeded")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn apply_start_twice_is_illegal_unknown_retry_is_noop() {
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "e")
+        .build()
+        .unwrap();
+    let mut ex = Execution::new(def);
+    let now = Timestamp::from_millis(0);
+    let p = AcceptPolicy;
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    let err = ex.apply(ApplyCmd::Start, &p, now).unwrap_err();
+    assert!(matches!(err, ApplyError::Illegal(_)));
+    assert!(ex.executor_id(&NodeId::new("a")).is_some());
+    assert!(ex.executor_id(&NodeId::new("ghost")).is_none());
+    assert!(ex.inputs_for(&NodeId::new("ghost")).is_empty());
+    let late = ex
+        .apply(ApplyCmd::RetryDue { node_id: "ghost".into() }, &p, now)
+        .unwrap();
+    assert!(!late.changed);
+    let idle = ex.apply(ApplyCmd::ForceCancelRunning, &p, now).unwrap();
+    assert!(!idle.changed);
 }

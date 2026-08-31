@@ -160,4 +160,25 @@ mod tests {
         assert!(snap.to_string().contains("page-00"));
         assert!(snap.to_string().contains("page-19"));
     }
+
+    #[test]
+    fn iter_nodes_legacy_empty_order_sorts_keys() {
+        let a = NodeId::new("z-last");
+        let b = NodeId::new("a-first");
+        let mut nodes = HashMap::new();
+        nodes.insert(a.clone(), empty_node());
+        nodes.insert(b.clone(), empty_node());
+        let snap = ExecutionSnapshot {
+            schema_version: SCHEMA_VERSION,
+            revision: 1,
+            execution_id: ExecutionId::new(),
+            workflow_id: WorkflowId::new("legacy"),
+            state: ExecutionState::Failed,
+            nodes,
+            node_order: Vec::new(),
+        };
+        let got: Vec<&str> = snap.iter_nodes().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(got, vec!["a-first", "z-last"]);
+        assert!(snap.to_string().contains("Failed"));
+    }
 }
