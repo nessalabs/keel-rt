@@ -1,3 +1,8 @@
+[workspace]
+members = [".", "crates/keel-rt-sqlite"]
+exclude = ["benches/jemalloc_compare"]
+resolver = "2"
+
 [package]
 name = "keel-rt"
 version = "0.1.0"

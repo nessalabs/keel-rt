@@ -1,0 +1,18 @@
+[package]
+name = "keel-rt-sqlite"
+version = "0.1.0"
+edition = "2021"
+description = "sqlite StateStore adapter for keel-rt (sibling crate; not the kernel)"
+license = "MIT"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+keel-rt = { path = "../.." }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+bytes = { version = "1.9", features = ["serde"] }
+keel-rt = { path = "../..", features = ["test-util"] }
+tokio = { version = "1.43", features = ["full", "test-util"] }
