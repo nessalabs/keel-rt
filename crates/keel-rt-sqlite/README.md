@@ -32,3 +32,7 @@ let fast = SqliteStore::open_fast("/tmp/keel-fast.db")?; // NORMAL
   only; unchanged Pending rows are not deleted.
 - `wal_checkpoint(TRUNCATE)` runs after COMMIT of a **terminal** snapshot,
   never inside the transaction.
+
+Standing load / messy-user attacks (not coverage):
+`cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture`
+and [`docs/CHAOS_LOG.md`](../../docs/CHAOS_LOG.md).

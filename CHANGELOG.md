@@ -1,5 +1,16 @@
 # Changelog
 
+## Standing sqlite chaos pack (`chaos/load-p2`)
+
+`crates/keel-rt-sqlite/tests/chaos.rs` is the standing breaker: thousands of
+short jobs, 256/2k-wide AND-join crash/resume, diamond farm + retry + HITL,
+burst/idle/burst, fat vs 1-byte, start-crash-resume storms, two Runtimes on
+one file, 1pm/4pm `FakeClock` AND-join, drop-handle mid-persist, policy/sink/
+executor/persist panic. Nothing broke on the first pass. Numbers:
+[`docs/CHAOS_LOG.md`](docs/CHAOS_LOG.md). CI job `chaos-sqlite` (not coverage).
+256-wide resume under 32 concurrent starts is **sqlite-bound** (~474 ms idle
+and under load) — the 50-diamond −32% loop is start/drop bound.
+
 ## Sqlite persist ≥50% (phase-2/resume)
 
 `keel-rt-sqlite` no longer dumps the whole graph JSON on every persist.

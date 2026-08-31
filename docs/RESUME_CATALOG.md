@@ -67,6 +67,7 @@ Sqlite adapter lines are not kernel `src/`.
 | 10k-wide snapshot resume | release only (debug ~350 s extrapolated; 2k debug is 14 s) | `test: resume_10k_wide_snapshot_release_within_bound` |
 
 Numbers: [`benches/BASELINE.md`](../benches/BASELINE.md) (sqlite vs MemoryStore, labeled).
+Standing high-load / messy-user attacks (not coverage): [`docs/CHAOS_LOG.md`](CHAOS_LOG.md).
 
 ## Documented no-fence
 

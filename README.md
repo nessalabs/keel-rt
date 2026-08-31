@@ -74,6 +74,7 @@ Accepted leftovers: [`docs/adr/`](docs/adr/).
 Phase 1 failure catalog (every interrupt / retry / race / empty / drop):
 [`docs/FAILURE_CATALOG.md`](docs/FAILURE_CATALOG.md).
 Phase 2 resume / persist hunt: [`docs/RESUME_CATALOG.md`](docs/RESUME_CATALOG.md).
+Standing sqlite load breaker: [`docs/CHAOS_LOG.md`](docs/CHAOS_LOG.md).
 
 ## Coverage
 
@@ -125,12 +126,15 @@ isolating one Timeout, mixed Delay/Timeout/Reset under concurrency 8.
 `tests/scenarios/failure_scope.rs` locks `OnFailure::FailSubtree` + `Join::AllDone`
 without changing the default fail-fast tests.
 
-Sqlite file recovery and resume stress:
+Sqlite file recovery, resume stress, and the standing chaos pack:
 
 ```bash
 cargo test -p keel-rt-sqlite --lib --test resume -- --test-threads=1
 just stress-resume
+just chaos-sqlite
 ```
+
+Load / messy-user attacks and numbers: [`docs/CHAOS_LOG.md`](docs/CHAOS_LOG.md).
 
 ```bash
 cargo test --test adversarial -- --test-threads=1
