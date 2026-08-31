@@ -734,6 +734,136 @@ async fn inspect_during_blocking_persist_completes_after_persist() {
     within(handle.wait()).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn persist_succeeds_before_execution_succeeded_is_emitted() {
+    struct OrderStore {
+        inner: MemoryStore,
+        persisted_success: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl StateStore for OrderStore {
+        async fn put(
+            &self,
+            snapshot: &keel_rt::ExecutionSnapshot,
+        ) -> Result<(), StoreError> {
+            self.inner.put(snapshot).await
+        }
+        async fn get(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            self.inner.persist(exec).await?;
+            if exec.state() == ExecutionState::Succeeded {
+                self.persisted_success.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+    let persisted_success = Arc::new(AtomicBool::new(false));
+    let announced_before_persist = Arc::new(AtomicBool::new(false));
+    let flag = persisted_success.clone();
+    let announced = announced_before_persist.clone();
+    let store = OrderStore {
+        inner: MemoryStore::new(),
+        persisted_success: persisted_success.clone(),
+    };
+    let inner = store.inner.clone();
+    let sink = keel_rt::FnSink(move |e: &DomainEvent| {
+        if matches!(e, DomainEvent::ExecutionSucceeded { .. })
+            && !flag.load(Ordering::SeqCst)
+        {
+            announced.store(true, Ordering::SeqCst);
+        }
+    });
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store)
+        .sink(sink)
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    let id = handle.inspect().await.execution_id.clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    assert!(
+        !announced_before_persist.load(Ordering::SeqCst),
+        "ExecutionSucceeded must not be announced before the snapshot is durable"
+    );
+    assert_eq!(
+        inner.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn persist_panic_after_write_keeps_terminal_and_does_not_emit() {
+    struct WriteThenPanic {
+        inner: MemoryStore,
+    }
+    #[async_trait::async_trait]
+    impl StateStore for WriteThenPanic {
+        async fn put(
+            &self,
+            snapshot: &keel_rt::ExecutionSnapshot,
+        ) -> Result<(), StoreError> {
+            self.inner.put(snapshot).await
+        }
+        async fn get(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            self.inner.persist(exec).await?;
+            if exec.state() == ExecutionState::Succeeded {
+                panic!("after durable write");
+            }
+            Ok(())
+        }
+    }
+    let inner = MemoryStore::new();
+    let seen_success = Arc::new(AtomicBool::new(false));
+    let flag = seen_success.clone();
+    let sink = keel_rt::FnSink(move |e: &DomainEvent| {
+        if matches!(e, DomainEvent::ExecutionSucceeded { .. }) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    });
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(WriteThenPanic {
+            inner: inner.clone(),
+        })
+        .sink(sink)
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let handle = rt.start(def).expect("start");
+    let id = handle.inspect().await.execution_id.clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    assert!(
+        !seen_success.load(Ordering::SeqCst),
+        "must not announce a persist that panicked after the write"
+    );
+    assert_eq!(
+        inner.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Succeeded,
+        "terminal must remain in the store after persist-then-panic"
+    );
+}
+
 // --- Display -------------------------------------------------------------------
 
 #[test]

@@ -139,9 +139,9 @@ Dropping the handle is pinned by `dropping_execution_handle_cancels_graph_not_de
 | Policy panic | node Failed, execution **Failed** (fail-fast even under FailSubtree), scheduler alive | `policy_decide_panic_does_not_kill_scheduler`; **gap-closed-by:** `policy_panic_fail_fasts_even_under_fail_subtree` | catch_unwind then fail-fast |
 | Sink panic | execution Succeeded, later emits continue | `event_sink_panic_kernel_survives_and_progresses` | catch_unwind |
 | Sink blocking | `emit` is sync on apply; stalls inspect until emit returns; inbox send does not deadlock | **gap-closed-by:** `eventsink_blocking_does_not_deadlock_inspect` | stall / backpressure |
-| Store persist panic | in-memory Succeeded | `persist_panic_does_not_kill_execution` | catch_unwind; no rollback |
-| Store persist `Err` (mid-apply) | in-memory Succeeded | `failing_store_put_does_not_roll_back_in_memory` / `failing_store_every_put_diamond_still_succeeds` | log + skip |
-| Store persist `Err` on **terminal** write | in-memory Succeeded; terminal put attempted | **gap-closed-by:** `store_error_on_terminal_write_keeps_in_memory_succeeded` | skip; no rollback |
+| Store persist panic | in-memory Succeeded; no DomainEvent | `persist_panic_does_not_kill_execution` / `persist_panic_after_write_keeps_terminal_and_does_not_emit` | catch_unwind; no emit |
+| Store persist `Err` (mid-apply) | in-memory Succeeded; no DomainEvent | `failing_store_put_does_not_roll_back_in_memory` / `failing_store_every_put_diamond_still_succeeds` | log + skip emit |
+| Store persist `Err` on **terminal** write | in-memory Succeeded; terminal persist attempted; no emit | **gap-closed-by:** `store_error_on_terminal_write_keeps_in_memory_succeeded` | skip emit; no rollback |
 | MemoryStore mutex poison | next persist recovers | `poisoned_mutex_recovers_on_next_persist` | `into_inner` |
 | Clock `now` panic (scheduler death) | inspect stopped snapshot; wait `Cancelled` | `panicking_clock_inspect_is_stopped_and_wait_is_cancelled` | Cancelled |
 
@@ -249,7 +249,7 @@ exactly-once must make the executor idempotent.
 | Trigger | Observable | Test | Handling |
 |---|---|---|---|
 | Inspect while persist blocks | inspect completes after persist; no deadlock | `inspect_during_blocking_persist_completes_after_persist` | unbounded inbox; backpressure |
-| Persist `Err` | in-memory apply kept | `failing_store_put_does_not_roll_back_in_memory` | skip persist |
+| Persist `Err` | in-memory apply kept; sink not told | `failing_store_put_does_not_roll_back_in_memory` | skip persist and emit |
 
 A bounded apply inbox would deadlock `resume`/`inspect` when apply is inside
 `persist`. The inbox stays unbounded. A stuck persist stalls inspect until it

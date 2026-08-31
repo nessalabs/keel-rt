@@ -19,7 +19,7 @@ src/domain/          rules. No tokio, no runtime, no std::net.
 
 src/runtime/         bundle. May import domain. Never imported by domain.
   runtime.rs         Runtime / RuntimeBuilder / StartError
-  scheduler.rs       event loop: apply → dispatch → persist. No policy rules.
+  scheduler.rs       event loop: apply → dispatch → persist → emit. No policy rules.
   spawn.rs           one tokio::spawn per execute; completions are Events
   park.rs            wait for Event or retry deadline (Clock)
   inject.rs          Event + unbounded mpsc (see docs/adr/0001)
