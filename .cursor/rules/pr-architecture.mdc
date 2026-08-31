@@ -1,0 +1,29 @@
+---
+description: Blocking PR requirement — architecture mermaids and user-behavior diffs
+alwaysApply: true
+---
+
+# PR description is a blocking requirement
+
+Do not open, update, or mark a keel-rt PR ready without the sections in
+`.github/pull_request_template.md`. This is not a nit.
+
+Required on **every** PR:
+
+1. Two mermaid diagrams of **this branch**, generated from real `src/` +
+   `lib.rs` re-exports (no invented modules/types):
+   - (a) repo/module flowchart with `testing → runtime → domain`
+   - (b) UML class diagram of the public run loop:
+     RuntimeBuilder → Runtime → ExecutionHandle → Execution,
+     WorkflowDefinition, Executor, Policy, StateStore, EventSink, NodeOutcome,
+     ExecutionState
+2. If structure or public API changed vs `main`: the **same two diagrams for
+   before (`main`)** and **after (this branch)**. First baseline may ship
+   current diagrams only (`docs/ARCHITECTURE.md`) and say so.
+3. User-behavior diffs for start/wait/cancel/resume/fail/retry/inspect, always
+   in the shape: “When a caller runs X, it used to Y. Now it Z.” Unchanged
+   refactors still say that Y and Z are the same.
+
+Copy diagrams from `docs/ARCHITECTURE.md` only when they still match this
+branch; otherwise regenerate from `src/domain/mod.rs`, `src/runtime/mod.rs`,
+`src/testing/mod.rs`, `src/lib.rs`.

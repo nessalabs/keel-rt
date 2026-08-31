@@ -171,3 +171,44 @@ fn lib_does_not_export_module_trees() {
         "runtime must not be a public module"
     );
 }
+
+#[test]
+fn pr_template_and_agents_require_architecture_and_behavior() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("When a caller runs X, it used to Y. Now it Z."));
+    assert!(agents.contains("RuntimeBuilder"));
+
+    let tmpl = fs::read_to_string(root.join(".github/pull_request_template.md")).unwrap();
+    assert!(tmpl.contains("## Architecture (before)"));
+    assert!(tmpl.contains("## Architecture (after)"));
+    assert!(tmpl.contains("## User behavior (when X, used to Y, now Z)"));
+    for verb in ["start", "wait", "cancel", "resume", "fail", "retry", "inspect"] {
+        assert!(tmpl.contains(verb), "template missing {verb}");
+    }
+
+    let arch = fs::read_to_string(root.join("docs/ARCHITECTURE.md")).unwrap();
+    assert!(arch.contains("```mermaid"));
+    assert!(arch.contains("flowchart TB"));
+    assert!(arch.contains("classDiagram"));
+    let lib = fs::read_to_string(src_root().join("lib.rs")).unwrap();
+    for name in [
+        "RuntimeBuilder",
+        "Runtime",
+        "ExecutionHandle",
+        "Execution",
+        "WorkflowDefinition",
+        "Executor",
+        "Policy",
+        "StateStore",
+        "EventSink",
+        "NodeOutcome",
+        "ExecutionState",
+    ] {
+        assert!(lib.contains(name), "lib.rs missing {name}");
+        assert!(arch.contains(name), "ARCHITECTURE mermaid missing {name}");
+    }
+    assert!(arch.contains("src/domain/"));
+    assert!(arch.contains("src/runtime/"));
+    assert!(arch.contains("src/testing/"));
+}

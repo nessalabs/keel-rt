@@ -52,6 +52,7 @@ via `.node(id)` is unchanged.
 ## Build and test
 
 Module map and absences: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+PR rules (mermaid + behavior diffs): [`AGENTS.md`](AGENTS.md).
 Accepted leftovers: [`docs/adr/`](docs/adr/).
 
 ## Coverage

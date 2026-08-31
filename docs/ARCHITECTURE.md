@@ -40,6 +40,154 @@ between crate modules.
 (used by apply-only benches and stale/timer packs). Inspect live runs through
 `ExecutionHandle` / `ExecutionSnapshot`.
 
+These two diagrams are the **committed baseline** for PRs (`AGENTS.md`).
+Regenerate from `src/**/mod.rs` + `src/lib.rs` re-exports — do not invent modules
+or types.
+
+### (a) Repo / module map
+
+```mermaid
+flowchart TB
+  subgraph crate["keel-rt  lib.rs re-exports"]
+    ROOT["pub use: WorkflowDefinition Runtime RuntimeBuilder<br/>ExecutionHandle Execution Executor Policy<br/>StateStore EventSink Clock NodeOutcome ExecutionState"]
+  end
+
+  subgraph testing["src/testing/  feature test-util"]
+    Tclock[clock]
+    Tfail[failpoint]
+    Tfaults[faults]
+    Tharness[harness]
+    Trec[recording]
+    Tscript[scripted]
+    Tstore[store]
+  end
+
+  subgraph runtime["src/runtime/  may import domain"]
+    Rrt[runtime]
+    Rsched[scheduler]
+    Rspawn[spawn]
+    Rpark[park]
+    Rinj[inject]
+    Rhandle[handle]
+    Rexec[executor]
+    Rstore[store]
+    Rsink[sink]
+    Rtime[time]
+  end
+
+  subgraph domain["src/domain/  no tokio / runtime / std::net"]
+    Ddef[definition]
+    Dids[ids]
+    Dout[outcome]
+    Dpol[policy]
+    Dsnap[snapshot]
+    Dstate["state/  mod.rs + apply.rs"]
+    Dev[events]
+    Dtime[time]
+  end
+
+  ROOT --> testing
+  ROOT --> runtime
+  ROOT --> domain
+  testing --> runtime
+  testing --> domain
+  runtime --> domain
+```
+
+### (b) Public run-loop types
+
+Ports are traits. `Scheduler` / `Park` / `inject::Event` are crate-private and
+stay off this diagram.
+
+```mermaid
+classDiagram
+  class RuntimeBuilder {
+    +register_fn(id, f) RuntimeBuilder
+    +register(Executor) RuntimeBuilder
+    +store(StateStore) RuntimeBuilder
+    +policy(Policy) RuntimeBuilder
+    +sink(EventSink) RuntimeBuilder
+    +clock(Clock) RuntimeBuilder
+    +concurrency(n) RuntimeBuilder
+    +cancel_bound(d) RuntimeBuilder
+    +build() Runtime
+  }
+  class Runtime {
+    +start(WorkflowDefinition) Result~ExecutionHandle, StartError~
+    +run(WorkflowDefinition) Result~ExecutionState, StartError~
+  }
+  class ExecutionHandle {
+    <<must_use Drop cancels>>
+    +wait() ExecutionState
+    +wait_stable() ExecutionState
+    +cancel()
+    +resume(ResumeToken, Resume) Result
+    +inspect() ExecutionSnapshot
+  }
+  class Execution {
+    +apply(ApplyCmd, Policy, Timestamp) Result~ApplyEffect, ApplyError~
+    +snapshot() ExecutionSnapshot
+  }
+  class WorkflowDefinition {
+    +builder(id) WorkflowDefinitionBuilder
+    +on_failure() OnFailure
+  }
+  class Executor {
+    <<trait>>
+    +id() ExecutorId
+    +execute(ExecutionContext) NodeOutcome
+  }
+  class Policy {
+    <<trait>>
+    +decide(NodeOutcome, attempt) PolicyDecision
+  }
+  class StateStore {
+    <<trait>>
+    +put(ExecutionSnapshot)
+    +get(ExecutionId)
+    +persist(Execution)
+  }
+  class EventSink {
+    <<trait>>
+    +emit(DomainEvent)
+  }
+  class Clock {
+    <<trait>>
+    +now() Timestamp
+    +sleep(Duration)
+  }
+  class NodeOutcome {
+    <<enum>>
+    Succeeded
+    Failed
+    Waiting
+    TimedOut
+  }
+  class ExecutionState {
+    <<enum>>
+    Created Running Waiting
+    Succeeded Failed Cancelled Completed
+    +is_terminal() bool
+    +is_successful_finish() bool
+  }
+  class FunctionExecutor
+  FunctionExecutor ..|> Executor
+  RuntimeBuilder --> Runtime : build
+  Runtime --> ExecutionHandle : start
+  Runtime ..> WorkflowDefinition : start/run
+  Runtime --> Executor
+  Runtime --> Policy
+  Runtime --> StateStore
+  Runtime --> EventSink
+  Runtime --> Clock
+  ExecutionHandle --> ExecutionState : wait
+  ExecutionHandle --> Execution : apply loop
+  Execution --> WorkflowDefinition
+  Execution --> ExecutionState
+  Executor ..> NodeOutcome : execute
+  Policy ..> NodeOutcome : decide
+```
+
 ## Absences (structure tests hold these)
 
 - No Agent, HTTP, SQL, crawl, or HITL **types** in `src/`.
