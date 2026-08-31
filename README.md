@@ -65,15 +65,11 @@ Floor: **100%** of executable lines in `src/domain/`, `src/runtime/`, and
 just coverage
 # or:
 ./scripts/coverage.sh
-# llvm-cov integer twin:
-cargo llvm-cov --lib \
-  --test adversarial --test consumer --test graph --test resilience \
-  --test scenarios --test stress --test stress_uneven --test structure \
-  --test workloads \
-  --ignore-filename-regex 'src/testing/|\.cargo/|/tests/|/examples/' \
-  --fail-under-lines 100 \
-  -- --test-threads=1
 ```
+
+`./scripts/coverage.sh` runs the same llvm-cov suite as CI and then the
+python gate (`fail_under_lines=100`, empty allowlist). The gate OR-merges
+lcov hits across test binaries; that is the 100% number.
 
 CI (`.github/workflows/ci.yml`) fails the `coverage` job when:
 

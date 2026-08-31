@@ -620,13 +620,13 @@ mod tests {
             now,
         )
         .unwrap();
-        match &ex.node(&NodeId::new("a")).unwrap().state {
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().state,
             NodeState::Ready {
-                runnable_at: Some(at),
-            } => assert_eq!(*at, Timestamp(1050)),
-            NodeState::Waiting { .. } => panic!("retry delay must not be Waiting"),
-            other => panic!("expected Ready with runnable_at, got {other:?}"),
-        }
+                runnable_at: Some(Timestamp(1050))
+            },
+            "retry delay must be Ready {{ runnable_at }}, not Waiting"
+        );
         assert_eq!(ex.state, ExecutionState::Running);
         let (at, id) = ex.next_deadline().expect("deadline on aggregate");
         assert_eq!(at, Timestamp(1050));
@@ -1122,6 +1122,39 @@ mod tests {
                 ApplyCmd::Resume {
                     token,
                     resume: Resume::Reinvoke,
+                },
+                &p,
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, ApplyError::ResumeAfterCancel);
+    }
+
+    #[test]
+    fn resume_complete_on_failed_node_after_execution_failed() {
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
+            .unwrap();
+        let token = ex.resume_token(&NodeId::new("a")).unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("a")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Failed);
+        let err = ex
+            .apply(
+                ApplyCmd::Resume {
+                    token,
+                    resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
                 },
                 &p,
                 now,

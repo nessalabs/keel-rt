@@ -2,10 +2,13 @@
 # src/testing/ is the test-util harness and does not count.
 # Do not lower floor_lines_pct without an ADR.
 #
-# Measured after 100% kernel line gate: every executable line in
+# Measured after 100% kernel line gate: every lcov DA executable line in
 # src/domain, src/runtime, and src/lib.rs is hit by the default suite
 # (lib + adversarial/consumer/graph/resilience/scenarios/stress/
-# stress_uneven/structure/workloads; not stress_100k).
+# stress_uneven/structure/workloads; not stress_100k). Hits are OR-merged
+# across cargo test CGUs (lib tests vs integration tests). Native
+# `cargo llvm-cov report` can show a slightly lower % (closing-brace
+# regions / per-CGU AND); the python gate is the 100% check.
 # Branch (lcov BRF) is 0 with this llvm-cov/llvm-tools pair — not gated.
 
 floor_lines_pct=100

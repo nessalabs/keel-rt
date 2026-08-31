@@ -126,3 +126,40 @@ fn empty_snapshot() -> ExecutionSnapshot {
         node_order: Vec::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_closed_keeps_terminal_and_maps_live_to_cancelled() {
+        assert_eq!(
+            state_after_watch_closed(ExecutionState::Succeeded),
+            ExecutionState::Succeeded
+        );
+        assert_eq!(
+            state_after_watch_closed(ExecutionState::Failed),
+            ExecutionState::Failed
+        );
+        assert_eq!(
+            state_after_watch_closed(ExecutionState::Completed),
+            ExecutionState::Completed
+        );
+        assert_eq!(
+            state_after_watch_closed(ExecutionState::Cancelled),
+            ExecutionState::Cancelled
+        );
+        assert_eq!(
+            state_after_watch_closed(ExecutionState::Running),
+            ExecutionState::Cancelled
+        );
+        assert_eq!(
+            state_after_watch_closed(ExecutionState::Created),
+            ExecutionState::Cancelled
+        );
+        assert_eq!(
+            state_after_watch_closed(ExecutionState::Waiting),
+            ExecutionState::Cancelled
+        );
+    }
+}

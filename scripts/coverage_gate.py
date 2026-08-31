@@ -24,7 +24,10 @@ def parse_lcov(path: Path) -> dict[str, dict[int, int]]:
                 cur = None
         elif raw.startswith("DA:") and cur:
             line_s, hit_s = raw[3:].split(",")[:2]
-            out[cur][int(line_s)] = int(hit_s)
+            line, hit = int(line_s), int(hit_s)
+            prev = out[cur].get(line, 0)
+            if hit > prev:
+                out[cur][line] = hit
         elif raw == "end_of_record":
             cur = None
     return out

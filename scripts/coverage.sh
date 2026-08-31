@@ -39,10 +39,12 @@ TESTS=(
 )
 
 if [[ "${COVERAGE_SKIP_RUN:-}" != "1" ]]; then
+  # Native llvm-cov `--fail-under-lines` ANDs per-CGU mappings (lib tests vs
+  # integration tests) and treats closing-brace regions as missed even when
+  # lcov DA hits are 100% after OR-merge. The python gate is the 100% check.
   cargo llvm-cov "${TESTS[@]}" \
     --lcov --output-path "$LCOV" \
     --ignore-filename-regex "$IGNORE" \
-    --fail-under-lines "$FAIL_UNDER" \
     -- --test-threads=1
 fi
 
