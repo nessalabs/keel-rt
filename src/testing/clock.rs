@@ -67,10 +67,42 @@ impl Clock for FakeClock {
         }
         let target = self.now().saturating_add(duration);
         loop {
+            // Subscribe before re-checking now(): an advance between a
+            // failed check and notified() would otherwise be lost.
+            let notified = self.tick.notified();
             if self.now() >= target {
                 return;
             }
-            self.tick.notified().await;
+            notified.await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sleep_does_not_lose_advance_notify() {
+        for i in 0..200 {
+            let clock = Arc::new(FakeClock::new());
+            let sleeper_clock = clock.clone();
+            let sleeper = tokio::spawn(async move {
+                sleeper_clock.sleep(Duration::from_millis(5)).await;
+            });
+            let advancer_clock = clock.clone();
+            let advancer = tokio::spawn(async move {
+                for _ in 0..20 {
+                    advancer_clock.advance(Duration::from_millis(1));
+                    tokio::task::yield_now().await;
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), sleeper)
+                .await
+                .unwrap_or_else(|_| panic!("lost FakeClock wakeup on iter {i}"))
+                .expect("sleeper join");
+            advancer.await.expect("advancer join");
         }
     }
 }

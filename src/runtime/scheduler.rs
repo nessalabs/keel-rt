@@ -9,10 +9,11 @@ use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry};
 use crate::runtime::inject::{Event, EventTx};
 use crate::runtime::park::ChannelPark;
 use crate::runtime::sink::EventSink;
-use crate::runtime::spawn::SpawnSet;
+use crate::runtime::spawn::{CatchUnwind, SpawnSet};
 use crate::runtime::store::StateStore;
 use crate::runtime::time::Clock;
 use std::collections::VecDeque;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -228,10 +229,14 @@ impl Scheduler {
         if self.exec.revision() == self.last_persisted {
             return;
         }
-        if let Err(e) = self.store.persist(&self.exec).await {
-            debug!(error = %e, "StateStore::put failed; in-memory state kept");
-        } else {
-            self.exec.clear_dirty();
+        match CatchUnwind(AssertUnwindSafe(self.store.persist(&self.exec))).await {
+            Ok(Ok(())) => self.exec.clear_dirty(),
+            Ok(Err(e)) => {
+                debug!(error = %e, "StateStore::put failed; in-memory state kept");
+            }
+            Err(_) => {
+                debug!("StateStore::persist panicked; in-memory state kept");
+            }
         }
         self.last_persisted = self.exec.revision();
     }

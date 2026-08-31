@@ -32,7 +32,10 @@ Unchanged (say so on PRs that only refactor):
 
 - When a caller runs **wait**, it used to return only on terminal
   (`Succeeded` / `Failed` / `Cancelled` / `Completed`). Now it still does.
-  Waiting is not done; use `wait_stable` then `resume`.
+  Waiting is not done; use `wait_stable` then `resume`. If the scheduler
+  task dies without a terminal publish, wait / wait_stable used to return
+  the last watch value (`Created` / `Running` / `Waiting`). Now they return
+  `Cancelled`, matching `inspect`'s stopped snapshot.
 - When a caller runs **cancel** or drops `ExecutionHandle`, it used to cancel
   the execution (not detach). Now it still does. The handle is not `Clone`.
 - When a caller runs **resume**, it used to `Complete` or `Reinvoke` a waiting
@@ -44,7 +47,13 @@ Unchanged (say so on PRs that only refactor):
 - When a caller runs **retry**, it used to become `Ready { runnable_at }`,
   never Waiting. Now it still does. Waiting still releases the permit.
 - When a caller runs **inspect**, it used to return an `ExecutionSnapshot`
-  keyed by `NodeId`. Now it still does.
+  keyed by `NodeId`. Now it still does. After scheduler death it used to
+  depend on whether the inbox send or the oneshot failed first; both paths
+  are the stopped snapshot (`workflow_id = "stopped"`, `Cancelled`).
+- When `StateStore::persist` panics, it used to tear down the apply loop
+  (unlike `persist` returning `Err`, which kept in-memory progress). Now a
+  persist panic is caught like `EventSink::emit` panic: in-memory apply
+  continues.
 - When CI runs **coverage**, it used to pass at 93.2% with allowlisted kernel
   lines. Now it fails unless kernel `src/` (not `src/testing/`) is 100%
   executable lines. Wait / cancel / resume / fail / retry / inspect are

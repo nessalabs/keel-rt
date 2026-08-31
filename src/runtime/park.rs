@@ -23,7 +23,10 @@ impl ChannelPark {
                     return Event::Timer { node_id };
                 }
                 let wait = when.saturating_duration_since(now);
+                // Inbox first, then timer. If the deadline is also due, the
+                // next park sees `when <= now` and fires Timer without waiting.
                 tokio::select! {
+                    biased;
                     ev = self.rx.recv() => ev.unwrap_or(Event::Shutdown),
                     _ = self.clock.sleep(wait) => Event::Timer { node_id },
                 }

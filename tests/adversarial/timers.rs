@@ -70,6 +70,12 @@ async fn two_nodes_same_retry_deadline_both_run() {
 /// the later deadline armed (`at > now` break) instead of firing it early.
 #[tokio::test(flavor = "current_thread")]
 async fn two_nodes_staggered_retry_deadlines_both_run() {
+    for i in 0..16 {
+        two_nodes_staggered_retry_deadlines_once(i).await;
+    }
+}
+
+async fn two_nodes_staggered_retry_deadlines_once(iter: u32) {
     let test = WorkflowTest::new()
         .concurrency(2)
         .node(
@@ -104,6 +110,12 @@ async fn two_nodes_staggered_retry_deadlines_both_run() {
         }
     })
     .await;
+    match run.state("fast").await {
+        NodeState::Ready {
+            runnable_at: Some(at),
+        } => assert_eq!(at, keel_rt::Timestamp::from_millis(100)),
+        other => panic!("iter {iter}: fast retry deadline must be t=100, got {other:?}"),
+    }
     clock.advance(Duration::from_millis(50));
     within(async {
         loop {
@@ -119,15 +131,18 @@ async fn two_nodes_staggered_retry_deadlines_both_run() {
         }
     })
     .await;
-    assert!(
-        matches!(
-            run.state("fast").await,
-            NodeState::Ready {
-                runnable_at: Some(_)
-            }
-        ),
-        "fast must still be waiting on the later clock tick"
-    );
+    match run.state("fast").await {
+        NodeState::Ready {
+            runnable_at: Some(at),
+        } => assert_eq!(at, keel_rt::Timestamp::from_millis(100)),
+        other => panic!("iter {iter}: fast must still be waiting at t=100, got {other:?}"),
+    }
+    match run.state("slow").await {
+        NodeState::Ready {
+            runnable_at: Some(at),
+        } => assert_eq!(at, keel_rt::Timestamp::from_millis(150)),
+        other => panic!("iter {iter}: slow retry deadline must be t=150, got {other:?}"),
+    }
     clock.advance(Duration::from_millis(50));
     within(async {
         loop {
@@ -138,20 +153,25 @@ async fn two_nodes_staggered_retry_deadlines_both_run() {
         }
     })
     .await;
-    assert!(
-        matches!(
-            run.state("slow").await,
-            NodeState::Ready {
-                runnable_at: Some(_)
-            }
+    match run.state("slow").await {
+        NodeState::Ready {
+            runnable_at: Some(at),
+        } => assert_eq!(
+            at,
+            keel_rt::Timestamp::from_millis(150),
+            "iter {iter}: slow's later deadline must not fire with fast's timer"
         ),
-        "slow's later deadline must not fire with fast's timer"
-    );
+        other => panic!("iter {iter}: slow must still be Ready at t=150 after fast succeeds, got {other:?}"),
+    }
     clock.advance(Duration::from_millis(50));
     within(run.wait_stable()).await;
-    assert_eq!(run.execution_state().await, ExecutionState::Succeeded);
-    assert_eq!(run.scripted("fast").attempts(), vec![1, 2]);
-    assert_eq!(run.scripted("slow").attempts(), vec![1, 2]);
+    assert_eq!(
+        run.execution_state().await,
+        ExecutionState::Succeeded,
+        "iter {iter}"
+    );
+    assert_eq!(run.scripted("fast").attempts(), vec![1, 2], "iter {iter}");
+    assert_eq!(run.scripted("slow").attempts(), vec![1, 2], "iter {iter}");
 }
 
 #[tokio::test(flavor = "current_thread")]

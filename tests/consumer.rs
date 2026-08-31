@@ -5,10 +5,11 @@
 use bytes::Bytes;
 use keel_rt::{
     AcceptPolicy, ApplyCmd, ApplyError, Clock, DomainEvent, Execution, ExecutionContext,
-    ExecutionState, FnSink, Join, MemoryStore, NeverWaitPolicy, NodeId, NodeOutcome, NoopStore,
-    OnFailure, Policy, PolicyDecision, ResumeToken, Runtime, StartError, StateStore, Timestamp,
-    WorkflowDefinition, DEFAULT_CANCEL_BOUND,
+    ExecutionState, FnSink, Join, MemoryStore, NeverWaitPolicy, NodeId, NodeOutcome, NodeState,
+    NoopStore, OnFailure, Policy, PolicyDecision, ResumeToken, Runtime, StartError, StateStore,
+    Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::test(flavor = "current_thread")]
@@ -497,7 +498,7 @@ async fn policy_store_sink_arc_and_box_adapters_run() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn inspect_after_store_panic_returns_stopped_snapshot_and_wait_unblocks() {
+async fn persist_panic_does_not_kill_execution() {
     struct PanicStore;
     #[async_trait::async_trait]
     impl keel_rt::StateStore for PanicStore {
@@ -521,35 +522,85 @@ async fn inspect_after_store_panic_returns_stopped_snapshot_and_wait_unblocks() 
         }
     }
 
-    let def = WorkflowDefinition::builder("wf")
-        .node("a", "a")
-        .build()
-        .unwrap();
-    let rt = Runtime::builder()
-        .store(PanicStore)
-        .register_fn("a", |_ctx: ExecutionContext| async {
-            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
-        })
-        .build();
-    let handle = rt.start(def).expect("start");
-    let stable = tokio::time::timeout(Duration::from_secs(2), handle.wait_stable())
-        .await
-        .expect("wait_stable must not hang after scheduler panic");
-    assert!(
-        !stable.is_terminal() || stable == ExecutionState::Cancelled,
-        "watch-closed wait_stable returns current state, got {stable:?}"
-    );
-    let snap = handle.inspect().await;
-    assert_eq!(snap.workflow_id.as_str(), "stopped");
-    assert_eq!(snap.state, ExecutionState::Cancelled);
-    assert!(snap.nodes.is_empty());
-    let state = tokio::time::timeout(Duration::from_secs(2), handle.wait())
-        .await
-        .expect("wait must not hang after scheduler panic");
-    assert!(
-        !state.is_terminal() || state == ExecutionState::Cancelled,
-        "watch-closed wait returns current state, got {state:?}"
-    );
+    // Catch persist panics like EventSink panics. Repeat: dispatch vs persist
+    // interleaving must not leak a non-Succeeded wait.
+    for i in 0..32 {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "a")
+            .build()
+            .unwrap();
+        let rt = Runtime::builder()
+            .store(PanicStore)
+            .register_fn("a", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let state = tokio::time::timeout(Duration::from_secs(2), rt.run(def))
+            .await
+            .unwrap_or_else(|_| panic!("iter {i}: run hung after persist panic"))
+            .expect("start");
+        assert_eq!(
+            state,
+            ExecutionState::Succeeded,
+            "iter {i}: persist panic must keep in-memory progress, got {state:?}"
+        );
+    }
+}
+
+struct PanicClock;
+
+#[async_trait::async_trait]
+impl Clock for PanicClock {
+    fn now(&self) -> Timestamp {
+        panic!("clock now");
+    }
+    async fn sleep(&self, _duration: Duration) {
+        panic!("clock sleep");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn panicking_clock_inspect_is_stopped_and_wait_is_cancelled() {
+    // Scheduler death with a live handle: inspect is the stopped snapshot,
+    // wait/wait_stable are Cancelled — not whatever last watch value happened
+    // to be. Repeat to catch Created vs Running vs Cancelled flakes.
+    for i in 0..32 {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "a")
+            .build()
+            .unwrap();
+        let rt = Runtime::builder()
+            .clock(Arc::new(PanicClock))
+            .register_fn("a", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let handle = rt.start(def).expect("start");
+        let stable = tokio::time::timeout(Duration::from_secs(2), handle.wait_stable())
+            .await
+            .unwrap_or_else(|_| panic!("iter {i}: wait_stable hung after clock panic"));
+        assert_eq!(
+            stable,
+            ExecutionState::Cancelled,
+            "iter {i}: wait_stable after scheduler death, got {stable:?}"
+        );
+        let snap = handle.inspect().await;
+        assert_eq!(
+            snap.workflow_id.as_str(),
+            "stopped",
+            "iter {i}: inspect must not return a live snapshot after scheduler death"
+        );
+        assert_eq!(snap.state, ExecutionState::Cancelled);
+        assert!(snap.nodes.is_empty(), "iter {i}");
+        let state = tokio::time::timeout(Duration::from_secs(2), handle.wait())
+            .await
+            .unwrap_or_else(|_| panic!("iter {i}: wait hung after clock panic"));
+        assert_eq!(
+            state,
+            ExecutionState::Cancelled,
+            "iter {i}: wait after scheduler death, got {state:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -593,7 +644,20 @@ async fn cancel_twice_then_bound_still_cancels_hang() {
         })
         .build();
     let handle = rt.start(def).expect("start");
-    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snap = handle.inspect().await;
+            if matches!(
+                snap.node(&NodeId::new("h")).map(|n| &n.state),
+                Some(NodeState::Running { .. })
+            ) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("hang node must be Running before cancel");
     handle.cancel().await;
     handle.cancel().await;
     tokio::time::sleep(DEFAULT_CANCEL_BOUND + Duration::from_millis(80)).await;

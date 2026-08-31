@@ -60,6 +60,11 @@ impl ExecutionHandle {
     ///
     /// Does **not** return on [`Waiting`](crate::ExecutionState::Waiting) — use
     /// [`wait_stable`](Self::wait_stable) then [`resume`](Self::resume).
+    ///
+    /// If the scheduler task dies without publishing a terminal state (bug in
+    /// a port, e.g. `Clock::now` panics), this returns [`Cancelled`] — the same
+    /// signal [`inspect`](Self::inspect) uses for a stopped run. It does not
+    /// return a leftover `Created` / `Running` / `Waiting` watch value.
     pub async fn wait(mut self) -> ExecutionState {
         self.consumed = true;
         loop {
@@ -68,7 +73,7 @@ impl ExecutionHandle {
                 return current;
             }
             if self.state.changed().await.is_err() {
-                return *self.state.borrow();
+                return state_after_watch_closed(*self.state.borrow());
             }
         }
     }
@@ -83,7 +88,7 @@ impl ExecutionHandle {
                 return current;
             }
             if state.changed().await.is_err() {
-                return *state.borrow();
+                return state_after_watch_closed(*state.borrow());
             }
         }
     }
@@ -97,6 +102,14 @@ impl Drop for ExecutionHandle {
             let _ = self.tx.send(Event::Cancel);
         }
         let _ = self.tx.send(Event::Shutdown);
+    }
+}
+
+fn state_after_watch_closed(current: ExecutionState) -> ExecutionState {
+    if current.is_terminal() {
+        current
+    } else {
+        ExecutionState::Cancelled
     }
 }
 

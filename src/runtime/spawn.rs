@@ -72,7 +72,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-struct CatchUnwind<F>(AssertUnwindSafe<F>);
+pub(crate) struct CatchUnwind<F>(pub(crate) AssertUnwindSafe<F>);
 
 impl<F: Future> Future for CatchUnwind<F> {
     type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
