@@ -7,6 +7,20 @@ Median of 7 iterations unless noted.
 Allocator experiment (release example, not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
 Library default remains the system allocator. jemalloc is opt-in on a binary.
 
+## RAII re-measure (2026-08-31)
+
+SpawnSet/cancel-bound Drop, `ctx.sleep` park-until-abort, `running_count`.
+No scheduler algorithm change. Gate: no median >10% vs hunt column.
+
+| bench | previous this run | this run | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 (debug median n=7) | 4.160 ms | 4.237 ms | +1.9% |
+| deep_chain_128 (debug median n=7) | 1.839 ms | 1.940 ms | +5.5% |
+| diamond_10k (debug median n=7) | 149.718 ms | 157.509 ms | +5.2% |
+| apply_only (debug median n=7) | 15.080 ms | 14.366 ms | −4.7% |
+
+All four inside the 10% band. **No revert.**
+
 ## Hunt re-measure (2026-08-31)
 
 Tests + catalog only. No scheduler / apply / persist change. Gate: no median
