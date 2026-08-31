@@ -36,22 +36,31 @@ Sqlite adapter lines are not kernel `src/`.
 | Fail-fast crash after Failed persist | resume stays Failed; no resurrect | `test: crash_after_fail_fast_stays_failed` `test: resume_failed_execution_stays_failed` |
 | Crash after Running persist | file reopens (no leaked lock); Running re-invoked | `test: crash_after_running_persist_releases_lock_and_reinvokes` `test: crash_during_b_running_reinvokes_b_not_a` |
 | Drop handle after Running persist | **graph** cancel; resume stays Cancelled (not crash) | `test: drop_handle_after_running_persist_cancels_not_reinvoke` |
-| Fat `Bytes` snapshot | MemoryStore refcount; sqlite JSON copy preserves bytes | `test: fat_bytes_resume_join_is_refcount` `test: fat_bytes_sqlite_round_trip_preserves_bytes` `test: fat_bytes_join_input_is_refcount_not_copy` |
-| Sqlite busy / locked / truncated / empty | typed `StoreError` or empty db + unknown id; no panic | `test: locked_file_is_typed_error_not_panic` `test: truncated_file_is_typed_error` `test: empty_file_opens_as_new_store` `test: corrupt_snapshot_json_is_typed_error` |
+| Fat `Bytes` snapshot | MemoryStore refcount; sqlite JSON copy preserves bytes | `test: fat_bytes_resume_join_is_refcount` `test: fat_bytes_sqlite_round_trip_preserves_bytes` `test: fat_payloads_64kib_times_eight_persist_resume` `test: fat_payloads_64kib_times_32_persist_resume_within_bound` `test: fat_bytes_join_input_is_refcount_not_copy` |
+| Sqlite busy / locked / truncated / empty | typed `StoreError` or empty db + unknown id; no panic | `test: locked_file_is_typed_error_not_panic` `test: persist_under_lock_returns_within_busy_bound` `test: truncated_file_is_typed_error` `test: empty_file_opens_as_new_store` `test: corrupt_snapshot_json_is_typed_error` |
+| Torn WAL / crash mid-`put` (uncommitted BEGIN) | typed error or successful recover; never a silent wrong terminal | `test: truncated_wal_does_not_invent_a_terminal` `test: crash_mid_put_rolls_back_uncommitted_and_does_not_invent_terminal` |
+| Incremental persist after first write | Pending nodes stay in the file (dirty list is not the whole graph) | `test: incremental_persist_keeps_pending_nodes` |
+| Two connections persist two executions, one file | no panic; `Ok` ⇒ row exists; `SQLITE_BUSY` is typed | `test: concurrent_persist_two_executions_same_file_no_panic` |
+| Hourglass neck Running crash/resume | sources not re-run; sinks run after neck | `test: crash_hourglass_neck_running_resume_runs_sinks_not_sources` `test: crash_resume_hourglass_256_within_bound` |
 | `resume` unknown id | `ResumeError::UnknownExecution` | `test: resume_unknown_id_is_unknown_execution` `test: resume_unknown_id_on_file` |
 | MemoryStore after “process death” | new store has no history | `test: memory_store_does_not_survive_process_death` |
-| 50 sequential start-crash-resume diamonds, one file | no leaked handles / sqlite locks | `test: fifty_start_crash_resume_diamonds_one_file` |
-| Crash/resume same diamond N times | attempt climbs only on the in-flight node | `test: crash_resume_same_diamond_attempt_climbs_only_on_inflight` |
+| 50–200 sequential start-crash-resume diamonds, one file | no leaked locks; WAL checkpointed (`TRUNCATE` on terminal) | `test: fifty_start_crash_resume_diamonds_one_file` `test: two_hundred_start_crash_resume_wal_bounded` |
+| Crash/resume same diamond N times | attempt climbs only on the in-flight node | `test: crash_resume_same_diamond_attempt_climbs_only_on_inflight` `test: twenty_diamond_repeat_crash_resume_within_bound` |
 
 ## Stress (CI `stress-resume`)
 
 | Shape | Bound | Proof |
 |---|---|---|
-| Resume 256-wide Ready snapshot (debug, n=3) | 30s per sample; median recorded | `test: resume_256_wide_snapshot_within_bound` |
-| 1000 sequential 1-node DAGs, resume last | 90s | `test: one_thousand_sequential_dags_resume_last` |
-| 50 start-crash-resume diamonds, one file | 60s | `test: fifty_start_crash_resume_diamonds_one_file` |
-| Same diamond crash/resume N=8 | attempt climbs; src not re-run | `test: crash_resume_same_diamond_attempt_climbs_only_on_inflight` |
-| 10k-node snapshot resume | not gated (debug budget); like `stress_100k` | not in default / `stress-resume` |
+| Resume 256-wide Ready snapshot (debug, n=3) | 8s per sample; median recorded | `test: resume_256_wide_snapshot_within_bound` |
+| Persist 256-wide first + incremental Start | 8s | `test: persist_256_wide_apply_within_bound` |
+| Hourglass-256 crash/resume | 20s | `test: crash_resume_hourglass_256_within_bound` |
+| 1000 sequential 1-node DAGs, resume last | 30s | `test: one_thousand_sequential_dags_resume_last` |
+| 50 start-crash-resume diamonds, one file | 10s; WAL < 8 MiB | `test: fifty_start_crash_resume_diamonds_one_file` |
+| 200 start-crash-resume diamonds, one file | 40s; WAL bounded | `test: two_hundred_start_crash_resume_wal_bounded` |
+| Same diamond crash/resume N=8 / N=20 | attempt climbs; src not re-run | `test: crash_resume_same_diamond_attempt_climbs_only_on_inflight` `test: twenty_diamond_repeat_crash_resume_within_bound` |
+| Fat 64KiB × 32 persist+resume | 10s | `test: fat_payloads_64kib_times_32_persist_resume_within_bound` |
+| 2k-wide snapshot resume (debug) | 120s | `test: resume_2k_wide_snapshot_debug_within_bound` |
+| 10k-wide snapshot resume | release only (debug ~350 s extrapolated; 2k debug is 14 s) | `test: resume_10k_wide_snapshot_release_within_bound` |
 
 Numbers: [`benches/BASELINE.md`](../benches/BASELINE.md) (sqlite vs MemoryStore, labeled).
 

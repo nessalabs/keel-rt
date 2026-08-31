@@ -1,5 +1,14 @@
 # Changelog
 
+## Sqlite persist ≥50% (phase-2/resume)
+
+`keel-rt-sqlite` no longer dumps the whole graph JSON on every persist.
+WAL, one transaction per apply, dirty node rows after the first write.
+When a caller resumes a 256-wide snapshot it used to take **1.008 s**
+debug median on this machine; now **272 ms** (−73%). Crash-after-CAS,
+torn WAL, and `SQLITE_BUSY` stay typed. MemoryStore benches unchanged
+(≤10% vs RAII). Kernel coverage 100%.
+
 ## Phase 2 snapshot resume
 
 At-least-once resume from the last CAS snapshot. `Runtime::resume(&id)`.

@@ -122,6 +122,13 @@ isolating one Timeout, mixed Delay/Timeout/Reset under concurrency 8.
 `tests/scenarios/failure_scope.rs` locks `OnFailure::FailSubtree` + `Join::AllDone`
 without changing the default fail-fast tests.
 
+Sqlite file recovery and resume stress:
+
+```bash
+cargo test -p keel-rt-sqlite --lib --test resume -- --test-threads=1
+just stress-resume
+```
+
 ```bash
 cargo test --test adversarial -- --test-threads=1
 cargo test --test stress -- --nocapture

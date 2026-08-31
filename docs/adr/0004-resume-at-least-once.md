@@ -54,8 +54,9 @@ Tests prove terminals are not lost if persist succeeded and emit did not
 (persist-then-panic). ADR 0001 still applies: do not add a persist queue
 to hide sqlite latency.
 
-Watch for: a second store that needs dirty-slot persist. Until then,
-sqlite writes the full snapshot JSON (ADR 0002 stays MemoryStore-only).
+`keel-rt-sqlite` is that second store: WAL, one transaction per persist,
+dirty node rows after the first write (ADR 0002). It does not serialize the
+whole graph on every event.
 
 **No process fence.** `AlreadyActive` is per `Runtime`. Two runtimes on
 one sqlite file can both resume and both re-invoke a Running node

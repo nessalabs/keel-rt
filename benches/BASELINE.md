@@ -8,6 +8,57 @@ Allocator experiment (not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
 This crate does not pick an allocator and has no `jemalloc` feature.
 current_thread sys vs jemalloc was noise — not recommended.
 
+## Sqlite persist/resume ≥50% (2026-08-31)
+
+WAL + one `BEGIN IMMEDIATE` per persist; after the first write only dirty
+node rows are upserted (`Execution::dirty_nodes`). `synchronous=NORMAL`
+(process-kill after COMMIT; crash-after-CAS still green). Terminal persist
+`wal_checkpoint(TRUNCATE)`. Schema: `executions` + `nodes` + `definitions`
+(no full-graph JSON blob). Architecture after = before (sqlite stays a
+sibling crate). MemoryStore still uses `dirty_slots` — not this path.
+
+**Before** (this machine, commit before the sqlite rewrite; debug):
+
+| bench | before | bound then |
+|---|---:|---:|
+| sqlite 256-wide resume (debug median n=3) | **1.008 s** (984 / 1008 / 1082 ms) | 30 s |
+| sqlite 50 diamond crash-resume | **424 ms** | 60 s |
+| sqlite 1000 sequential last-resume | ~201 µs (pack ~6 s) | 90 s |
+
+Earlier reports on this branch: 963 ms / 1.689 s for 256-wide. The 50%
+target uses **this machine, this commit** (1.008 s → ≤ ~504 ms).
+
+**After** (same VM, `cargo test -p keel-rt-sqlite --test resume_stress -- --test-threads=1 --nocapture`):
+
+| bench | after | vs before | CI bound |
+|---|---:|---:|---:|
+| sqlite 256-wide resume (debug median n=3) | **272 ms** (261 / 272 / 286 ms) | **−73%** | 8 s |
+| sqlite 50 diamond crash-resume | 288 ms (WAL 0 B after terminals) | −32% | 10 s |
+| sqlite persist 256-wide first snapshot | 3.8 ms | (new) | 8 s |
+| sqlite persist 256-wide incremental Start | 2.4 ms | (new) | 8 s |
+| sqlite hourglass-256 crash-resume | 770 ms | (new) | 20 s |
+| sqlite 20 diamond-repeat crash-resume | 25 ms | (new) | 40 s |
+| sqlite fat 64KiB × 32 persist+resume | 311 ms | (new) | 10 s |
+| sqlite 200 start-crash-resume, one file | 1.25 s (WAL end/peak 0 B) | (new) | 40 s |
+| sqlite 1000 sequential last-resume | 276 µs | | 30 s |
+| sqlite 2k-wide snapshot resume (debug) | 14.0 s | (new; CI gated) | 120 s |
+| sqlite 10k-wide snapshot resume (release) | 23.8 s | debug 10k would be ~350 s (quadratic load of all rows; not in 60 s) | 60 s release-only |
+
+256-wide resume **meets ≥50%** (1.008 s → 272 ms). 50-diamond is a smaller
+win because the loop is mostly start/crash/runtime drop, not snapshot JSON.
+
+MemoryStore hot path (quiet machine, n=7) vs RAII 4.237 / 1.940 / 157.509 /
+14.366 ms: **4.277 / 1.897 / 160.881 / 14.375 ms** (+0.9% / −2.2% / +2.1% /
++0.1%). All ≤10%. **No revert.** Sqlite was not sped up by slowing the kernel.
+
+Crash pack still green: uncommitted mid-`put` rolls back (no invented
+terminal), torn WAL does not invent a terminal, `SQLITE_BUSY` returns a
+typed `StoreError` in <500 ms with a 50 ms busy timeout, two Runtimes on
+one file stay unfenced, incremental persist keeps Pending nodes.
+
+When a caller resumes a 256-wide sqlite snapshot, it used to take **1.008 s**
+debug median; now **272 ms**.
+
 ## Phase 2 resume re-measure (2026-08-31)
 
 Persist-before-emit, CAS, `Runtime::resume`. Definition hash is lazy
