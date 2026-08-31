@@ -1,0 +1,173 @@
+//! Holds absences: domain imports nothing outward; `src/` has no product
+//! resource identifiers; crate modules are acyclic.
+//!
+//! `cargo test --test structure -- --test-threads=1`
+
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn rust_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn src_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
+fn rel(p: &Path) -> String {
+    p.strip_prefix(src_root())
+        .unwrap_or(p)
+        .display()
+        .to_string()
+}
+
+fn contains_word(src: &str, word: &str) -> bool {
+    let b = src.as_bytes();
+    let w = word.as_bytes();
+    let mut i = 0;
+    while i + w.len() <= b.len() {
+        if &b[i..i + w.len()] == w {
+            let before = i == 0 || !is_ident(b[i - 1]);
+            let after = i + w.len() == b.len() || !is_ident(b[i + w.len()]);
+            if before && after {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_ident(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// First crate-level module after `crate::` (`domain`, `runtime`, `testing`).
+fn crate_mod_refs(src: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut rest = src;
+    while let Some(idx) = rest.find("crate::") {
+        rest = &rest[idx + "crate::".len()..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+#[test]
+fn domain_imports_nothing_outward() {
+    for p in rust_files(&src_root().join("domain")) {
+        let s = fs::read_to_string(&p).unwrap();
+        let r = rel(&p);
+        assert!(
+            !s.contains("tokio::") && !s.contains("use tokio"),
+            "{r} must not import tokio"
+        );
+        assert!(!s.contains("std::net"), "{r} must not import std::net");
+        assert!(
+            !s.contains("crate::runtime"),
+            "{r} must not import runtime"
+        );
+        assert!(
+            !s.contains("crate::testing"),
+            "{r} must not import testing"
+        );
+    }
+}
+
+#[test]
+fn src_has_no_product_resource_identifiers() {
+    for word in ["Agent", "HTTP", "HITL", "Sql", "crawl"] {
+        for p in rust_files(&src_root()) {
+            let s = fs::read_to_string(&p).unwrap();
+            assert!(
+                !contains_word(&s, word),
+                "{} contains banned identifier {word}",
+                rel(&p)
+            );
+        }
+    }
+}
+
+#[test]
+fn crate_modules_are_acyclic() {
+    let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+    for p in rust_files(&src_root()) {
+        let rel_path = rel(&p);
+        let from = if rel_path.starts_with("domain") {
+            "domain"
+        } else if rel_path.starts_with("runtime") {
+            "runtime"
+        } else if rel_path.starts_with("testing") {
+            "testing"
+        } else {
+            "root"
+        };
+        let s = fs::read_to_string(&p).unwrap();
+        for to in crate_mod_refs(&s) {
+            if matches!(to.as_str(), "domain" | "runtime" | "testing") && to != from {
+                edges.entry(from.to_string()).or_default().insert(to);
+            }
+        }
+    }
+
+    if let Some(tos) = edges.get("domain") {
+        assert!(
+            !tos.contains("runtime") && !tos.contains("testing"),
+            "domain imports {tos:?}"
+        );
+    }
+    if let Some(tos) = edges.get("runtime") {
+        assert!(!tos.contains("testing"), "runtime imports testing");
+    }
+
+    // No 2-cycles among domain/runtime/testing/root that reverse the arrow.
+    assert!(
+        !edges
+            .get("domain")
+            .map(|t| t.contains("runtime"))
+            .unwrap_or(false),
+        "domain → runtime"
+    );
+}
+
+#[test]
+fn lib_does_not_export_module_trees() {
+    let lib = fs::read_to_string(src_root().join("lib.rs")).unwrap();
+    assert!(
+        lib.contains("pub(crate) mod domain"),
+        "domain must be crate-private"
+    );
+    assert!(
+        lib.contains("pub(crate) mod runtime"),
+        "runtime must be crate-private"
+    );
+    assert!(
+        !lib.contains("pub mod domain"),
+        "domain must not be a public module"
+    );
+    assert!(
+        !lib.contains("pub mod runtime"),
+        "runtime must not be a public module"
+    );
+}
