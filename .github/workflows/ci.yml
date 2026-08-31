@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.83.0
-      - name: Default suite (no 100k)
+      - name: Default suite (no 100k, no resume_stress)
         run: |
           cargo test -p keel-rt --lib \
             --test adversarial --test catalog --test consumer --test graph \
@@ -32,16 +32,18 @@ jobs:
             --test scenarios --test stress --test stress_uneven --test structure \
             --test workloads \
             -- --test-threads=1
-          cargo test -p keel-rt-sqlite -- --test-threads=1
+          cargo test -p keel-rt-sqlite --lib --test resume --test structure \
+            -- --test-threads=1
 
-  stress-100k:
+  adversarial:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.83.0
-      - name: 100k scale (no coverage instrumentation)
-        run: cargo test --test stress_100k -- --test-threads=1 --nocapture
+      - name: Adversarial + resume hunt
+        run: |
+          cargo test -p keel-rt --test adversarial -- --test-threads=1
+          cargo test -p keel-rt-sqlite --test resume -- --test-threads=1
 
   coverage:
     runs-on: ubuntu-latest
@@ -72,3 +74,21 @@ jobs:
             coverage/lcov.info
             coverage/BASELINE
           if-no-files-found: warn
+
+  stress-resume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.83.0
+      - name: Sqlite resume stress
+        run: cargo test -p keel-rt-sqlite --test resume_stress -- --test-threads=1 --nocapture
+
+  stress-100k:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.83.0
+      - name: 100k scale (no coverage instrumentation)
+        run: cargo test --test stress_100k -- --test-threads=1 --nocapture

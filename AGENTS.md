@@ -61,3 +61,19 @@ the same). Do not omit a verb because “it was only a rename.”
   100%; `coverage/BASELINE` allowlist stays empty.
 - One reason per commit. Imperative, module prefix.
 - `FailSubtree` / `Join::AllDone` stay definition-only opt-in.
+
+## Blocking: Phase 2+ review gate
+
+A persist / resume / store behavior change is **not reviewable** until all
+of the following are true. Structure tests pin the names.
+
+- Architecture mermaids before/after and user-behavior diffs (sections above).
+- A **named** crash-resume test on a real sqlite file for any persist/resume
+  behavior change (`crates/keel-rt-sqlite/tests/resume.rs` or
+  `tests/adversarial/resume.rs`). Do not mock `StateStore` for recovery.
+- CI jobs **test**, **adversarial**, **coverage**, **stress-resume** green.
+  `stress-100k` stays its own uninstrumented job. No `continue-on-error`.
+- Catalog: `docs/RESUME_CATALOG.md` has a `test:` name for every hunt row.
+  Zero MISSING.
+
+`just coverage` / `just stress-resume` / `just stress-100k`.

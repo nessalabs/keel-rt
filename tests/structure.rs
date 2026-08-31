@@ -245,3 +245,43 @@ fn pr_template_and_agents_require_architecture_and_behavior() {
     assert!(arch.contains("src/runtime/"));
     assert!(arch.contains("src/testing/"));
 }
+
+#[test]
+fn ci_and_agents_name_phase2_review_jobs() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    for job in [
+        "test:",
+        "adversarial:",
+        "coverage:",
+        "stress-resume:",
+        "stress-100k:",
+    ] {
+        assert!(ci.contains(job), "ci.yml missing job {job}");
+    }
+    assert!(
+        !ci.contains("continue-on-error"),
+        "ci.yml must not skip a red job"
+    );
+    assert!(
+        ci.contains("--test resume_stress"),
+        "stress-resume job must run the sqlite resume stress pack"
+    );
+    assert!(
+        ci.contains("--test adversarial"),
+        "adversarial job must run the kernel pack"
+    );
+
+    let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("Phase 2+ review gate"));
+    assert!(agents.contains("stress-resume"));
+    assert!(agents.contains("docs/RESUME_CATALOG.md"));
+
+    let tmpl = fs::read_to_string(root.join(".github/pull_request_template.md")).unwrap();
+    assert!(tmpl.contains("## Phase 2+ review gate"));
+    assert!(tmpl.contains("stress-resume"));
+
+    let rule = fs::read_to_string(root.join(".cursor/rules/pr-architecture.mdc")).unwrap();
+    assert!(rule.contains("Phase 2+ review gate"));
+    assert!(rule.contains("stress-resume"));
+}
