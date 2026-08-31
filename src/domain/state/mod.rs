@@ -1010,6 +1010,8 @@ mod tests {
     #[test]
     fn dirty_nodes_lists_slots_changed_by_apply() {
         let mut ex = linear();
+        assert_eq!(ex.dirty_nodes().len(), 2);
+        ex.clear_dirty();
         assert!(ex.dirty_nodes().is_empty());
         ex.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
             .unwrap();

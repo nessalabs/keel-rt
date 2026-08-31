@@ -682,8 +682,15 @@ mod tests {
             .edge("a", "b")
             .build()
             .unwrap();
-        let mut exec = Execution::new(def);
+        let exec = Execution::new(def);
         store.persist(&exec).await.unwrap();
+        let def = store
+            .workflow_definition(exec.id())
+            .await
+            .unwrap()
+            .unwrap();
+        let snap = store.get(exec.id()).await.unwrap().unwrap();
+        let mut exec = Execution::from_snapshot(def, snap).unwrap();
         exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
             .unwrap();
         assert_eq!(exec.dirty_nodes().len(), 1);
