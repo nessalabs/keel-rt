@@ -3,13 +3,24 @@
 //! Delete this package without editing `scheduler.rs`. Persist is inline
 //! (no queue) — ADR 0001 still applies.
 //!
-//! Open uses WAL + `synchronous=NORMAL` + `wal_autocheckpoint=1000`. `NORMAL`
-//! is durable for process-kill after `COMMIT` (the crash-after-CAS tests);
-//! it is not an OS-crash `FULL` fsync of every node. One `BEGIN IMMEDIATE`
-//! … `COMMIT` per persist/put — the scheduler already batches the events of
-//! one apply. After the first write, only [`Execution::dirty_nodes`] rows are
-//! upserted (ADR 0002). Terminal persist checkpoints the WAL (`TRUNCATE`) so
-//! start-crash-resume loops on one file do not grow `-wal` without bound.
+//! # Durability
+//!
+//! Default [`SqliteStore::open`] uses WAL + **`synchronous=FULL`**. A COMMIT
+//! that returned is durable across process kill **and** machine power loss of
+//! that txn. Crash-after-CAS tests prove the process-kill half.
+//!
+//! [`SqliteStore::open_fast`] is `synchronous=NORMAL`: process kill after
+//! COMMIT is still recovered (same crash tests); an OS crash or power loss
+//! may drop the last WAL frames. Use it only when you have measured that you
+//! need the extra speed. 256-wide resume under FULL still meets the ≥50%
+//! cut vs the pre-opt 1.008 s baseline (`benches/BASELINE.md`).
+//!
+//! One `BEGIN IMMEDIATE` … `COMMIT` per `persist`/`put` call. The scheduler
+//! already persists once per event (Start+dispatch is one event, not a sqlite
+//! merge of two turns). After the first write, only [`Execution::dirty_nodes`]
+//! rows are upserted — unchanged Pending rows are not deleted (ADR 0002).
+//! `wal_checkpoint(TRUNCATE)` runs **after** a successful COMMIT of a terminal
+//! snapshot, never inside the transaction.
 
 use async_trait::async_trait;
 use keel_rt::{
@@ -42,11 +53,21 @@ CREATE TABLE IF NOT EXISTS definitions (
 );
 ";
 
+/// How hard sqlite fsyncs on COMMIT. See crate docs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqliteSynchronous {
+    /// Process-kill after COMMIT. OS crash / power loss may lose the last txn.
+    Normal,
+    /// `PRAGMA synchronous=FULL`. Last COMMIT survives machine power loss.
+    Full,
+}
+
 /// One connection, shared. Sync sqlite work runs inside async persist
 /// the same way [`keel_rt::MemoryStore`] blocks — no persist queue.
 ///
 /// [`Self::open_with_busy_timeout`] bounds `SQLITE_BUSY`: a locked file is a
-/// typed [`StoreError`], not a hang. Default open waits up to 5s.
+/// typed [`StoreError`], not a hang. Default open waits up to 5s and uses
+/// `synchronous=FULL`. [`Self::open_fast`] is `NORMAL` (process-kill only).
 #[derive(Clone)]
 pub struct SqliteStore {
     path: PathBuf,
@@ -55,7 +76,19 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        Self::open_with_busy_timeout(path, Duration::from_secs(5))
+        Self::open_with(path, Duration::from_secs(5), SqliteSynchronous::Full)
+    }
+
+    /// Same as [`Self::open`] (`synchronous=FULL`). Explicit name for callers.
+    pub fn durable(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open(path)
+    }
+
+    /// `synchronous=NORMAL`. Process-kill after COMMIT still recovers; power
+    /// loss may lose the last WAL frames. Faster than [`Self::open`] on this
+    /// machine (~259 ms vs ~421 ms 256-wide resume debug).
+    pub fn open_fast(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with(path, Duration::from_secs(5), SqliteSynchronous::Normal)
     }
 
     /// Same as [`Self::open`], with a caller-visible busy bound.
@@ -64,12 +97,40 @@ impl SqliteStore {
         path: impl AsRef<Path>,
         busy: Duration,
     ) -> Result<Self, StoreError> {
+        Self::open_with(path, busy, SqliteSynchronous::Full)
+    }
+
+    /// [`Self::open_fast`] with a caller-visible busy bound.
+    pub fn open_fast_with_busy_timeout(
+        path: impl AsRef<Path>,
+        busy: Duration,
+    ) -> Result<Self, StoreError> {
+        Self::open_with(path, busy, SqliteSynchronous::Normal)
+    }
+
+    /// [`Self::durable`] with a caller-visible busy bound.
+    pub fn durable_with_busy_timeout(
+        path: impl AsRef<Path>,
+        busy: Duration,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_busy_timeout(path, busy)
+    }
+
+    pub fn open_with(
+        path: impl AsRef<Path>,
+        busy: Duration,
+        sync: SqliteSynchronous,
+    ) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path).map_err(store_err)?;
         conn.busy_timeout(busy).map_err(store_err)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(store_err)?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
+        let sync_val = match sync {
+            SqliteSynchronous::Normal => "NORMAL",
+            SqliteSynchronous::Full => "FULL",
+        };
+        conn.pragma_update(None, "synchronous", sync_val)
             .map_err(store_err)?;
         conn.pragma_update(None, "wal_autocheckpoint", 1000)
             .map_err(store_err)?;
@@ -128,7 +189,10 @@ impl SqliteStore {
             }
         })();
         let committed = finish_tx(conn, r)?;
+        // TRUNCATE only after COMMIT. Never checkpoint an open transaction
+        // (that would be a durability bug, not a speedup).
         if committed && exec.state().is_terminal() {
+            debug_assert!(conn.is_autocommit());
             checkpoint_wal(conn)?;
         }
         Ok(())
@@ -741,6 +805,207 @@ mod tests {
             }
             Err(_) => {}
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn pragma_sync(store: &SqliteStore) -> i64 {
+        let conn = store.lock().unwrap();
+        conn.query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    async fn reload(store: &SqliteStore, id: &ExecutionId) -> Execution {
+        let def = store.workflow_definition(id).await.unwrap().unwrap();
+        let snap = store.get(id).await.unwrap().unwrap();
+        Execution::from_snapshot(def, snap).unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn open_default_is_synchronous_full() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        // sqlite: 0=OFF 1=NORMAL 2=FULL 3=EXTRA
+        assert_eq!(pragma_sync(&store), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn open_fast_is_synchronous_normal() {
+        let path = tmp();
+        let store = SqliteStore::open_fast(&path).unwrap();
+        assert_eq!(pragma_sync(&store), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_is_synchronous_full() {
+        let path = tmp();
+        let store = SqliteStore::durable(&path).unwrap();
+        assert_eq!(pragma_sync(&store), 2);
+        store.persist(&one_node()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incremental_persist_does_not_delete_unchanged_rows() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .node("b", "e")
+            .edge("a", "b")
+            .build()
+            .unwrap();
+        let exec = Execution::new(def);
+        let id = exec.id().clone();
+        store.persist(&exec).await.unwrap();
+        let n0: i64 = {
+            let conn = store.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM nodes WHERE execution_id = ?1",
+                params![id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(n0, 2);
+        let mut exec = reload(&store, &id).await;
+        exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        store.persist(&exec).await.unwrap();
+        let n1: i64 = {
+            let conn = store.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM nodes WHERE execution_id = ?1",
+                params![id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(n1, n0, "incremental persist must not DELETE unchanged nodes");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn second_uncommitted_persist_does_not_merge_into_first_commit() {
+        let path = tmp();
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let exec = Execution::new(def);
+        let id = exec.id().clone();
+        let first_rev;
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store.persist(&exec).await.unwrap();
+            let mut exec = reload(&store, &id).await;
+            exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+                .unwrap();
+            store.persist(&exec).await.unwrap();
+            first_rev = store.get(&id).await.unwrap().unwrap().revision;
+            assert!(first_rev > 0);
+            {
+                let conn = store.lock().unwrap();
+                conn.execute("BEGIN IMMEDIATE", []).unwrap();
+                conn.execute(
+                    "UPDATE executions SET state = '\"Succeeded\"', revision = 99 WHERE id = ?1",
+                    params![id.as_str()],
+                )
+                .unwrap();
+            }
+            drop(store);
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let snap = store.get(&id).await.unwrap().unwrap();
+        assert_ne!(snap.state, keel_rt::ExecutionState::Succeeded);
+        assert_eq!(snap.revision, first_rev);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_put_after_incremental_dirty_rows_loses() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .node("b", "e")
+            .edge("a", "b")
+            .build()
+            .unwrap();
+        let exec = Execution::new(def);
+        store.persist(&exec).await.unwrap();
+        let mut older = store.get(exec.id()).await.unwrap().unwrap();
+        let mut exec = reload(&store, exec.id()).await;
+        exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        store.persist(&exec).await.unwrap();
+        let keep = store.get(exec.id()).await.unwrap().unwrap().revision;
+        older.revision = 0;
+        let err = store.put(&older).await.unwrap_err();
+        assert_eq!(
+            err,
+            StoreError::Stale {
+                found: keep,
+                attempted: 0
+            }
+        );
+        assert_eq!(
+            store.get(exec.id()).await.unwrap().unwrap().revision,
+            keep
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn checkpoint_runs_only_after_commit_of_terminal() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut exec = one_node();
+        store.persist(&exec).await.unwrap();
+        exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        store.persist(&exec).await.unwrap();
+        assert!(!exec.state().is_terminal());
+        {
+            let conn = store.lock().unwrap();
+            assert!(
+                conn.is_autocommit(),
+                "non-terminal persist must COMMIT before returning"
+            );
+        }
+        exec.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &AcceptPolicy,
+            Timestamp(0),
+        )
+        .unwrap();
+        exec.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(
+                    b"ok",
+                ))),
+            },
+            &AcceptPolicy,
+            Timestamp(0),
+        )
+        .unwrap();
+        assert!(exec.state().is_terminal());
+        store.persist(&exec).await.unwrap();
+        {
+            let conn = store.lock().unwrap();
+            assert!(conn.is_autocommit());
+        }
+        drop(store);
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(
+            store.get(exec.id()).await.unwrap().unwrap().state,
+            keel_rt::ExecutionState::Succeeded
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
