@@ -117,7 +117,7 @@ fn remain_for(def: &WorkflowDefinition, nodes: &[NodeRuntime], slot: NodeSlot) -
 mod tests {
     use super::*;
     use crate::domain::ids::DefinitionHash;
-    use crate::domain::policy::{AcceptPolicy, RetryPolicy};
+    use crate::domain::policy::AcceptPolicy;
     use crate::domain::time::Timestamp;
     use bytes::Bytes;
 

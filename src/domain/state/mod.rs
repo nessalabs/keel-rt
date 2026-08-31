@@ -249,6 +249,11 @@ impl Execution {
         &self.id
     }
 
+    /// Definition this execution was started from. Data, not slot state.
+    pub fn definition(&self) -> &WorkflowDefinition {
+        &self.definition
+    }
+
     pub fn state(&self) -> ExecutionState {
         self.state
     }
