@@ -1,5 +1,8 @@
 //! Hot-path benches for allocator experiments.
 //!
+//! This **example binary** may set `#[global_allocator]` when built with
+//! `--features jemalloc`. The `keel-rt` library never does.
+//!
 //! ```text
 //! cargo run --release --example kernel_benches
 //! cargo run --release --example kernel_benches --features jemalloc
@@ -9,6 +12,7 @@
 //! Tokio default here is **current_thread** (Phase 1). `--multi-thread` is a
 //! one-off experiment and does not change the library scheduler.
 
+// Consumer-binary choice, not the library: only this example installs jemalloc.
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

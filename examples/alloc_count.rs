@@ -5,7 +5,9 @@
 //! ```
 //!
 //! Uses a counting wrapper around the system allocator. Do not combine with
-//! `--features jemalloc` (one `#[global_allocator]` per binary).
+//! `--features jemalloc` on this example (one `#[global_allocator]` per binary).
+//! Enabling `keel-rt/jemalloc` still would not set the library allocator —
+//! `keel-rt` never does.
 
 use bytes::Bytes;
 use keel_rt::{

@@ -52,11 +52,8 @@ in-flight observability (Running holds a permit; Waiting does not).
 
 ## Allocator
 
-The library does **not** set a global allocator. Production binaries that run
-the kernel under many threads should consider jemalloc (`tikv-jemallocator`)
-in the *binary*, not by depending on a keel-rt default. Enable the optional
-`jemalloc` crate feature only in that target. Numbers and how to reproduce:
-[`benches/JEMALLOC.md`](benches/JEMALLOC.md).
+This crate does not pick an allocator; production binaries may set
+`tikv-jemallocator`; see [`benches/JEMALLOC.md`](benches/JEMALLOC.md).
 
 ## Build and test
 

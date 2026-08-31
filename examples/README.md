@@ -1,6 +1,11 @@
 # Examples (not the kernel)
 
-These binaries are **not** part of the `keel-rt` library. They exist so a *consumer* can set `#[global_allocator]` and measure — the library itself never does.
+These binaries are **not** the `keel-rt` library. Allocator choice belongs to
+the **consumer binary**. Default `keel-rt` never sets `#[global_allocator]`.
+The optional `jemalloc` feature exists only so *this* example can install
+jemalloc when you pass `--features jemalloc` (or enable it in *your*
+`Cargo.toml` for this target). Production binaries should depend on
+`tikv-jemallocator` themselves — see [`benches/JEMALLOC.md`](../benches/JEMALLOC.md).
 
 ```bash
 # System allocator, current_thread (Phase 1 default)

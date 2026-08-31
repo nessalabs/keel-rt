@@ -5,7 +5,8 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 Median of 7 iterations unless noted.
 
 Allocator experiment (release example, not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
-Library default remains the system allocator. jemalloc is opt-in on a binary.
+This crate does not pick an allocator. jemalloc is a consumer-binary choice
+(this repo’s examples only, via `--features jemalloc`).
 
 ## RAII re-measure (2026-08-31)
 

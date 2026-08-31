@@ -1,9 +1,19 @@
 # jemalloc vs system allocator
 
-`keel-rt` is a **library**. It does not install `#[global_allocator]`.
+Allocator choice belongs to the **consumer binary**, not `keel-rt`.
+Default `keel-rt` never sets `#[global_allocator]` (`lib.rs` has none;
+the default feature set is empty of allocators).
+
 Production binaries that want jemalloc should depend on `tikv-jemallocator`
-themselves (or enable this crate’s optional `jemalloc` feature **in that
-binary/example only**).
+themselves and put `#[global_allocator]` in *their* `main.rs`. Do not
+expect `keel-rt` to pick one.
+
+The optional crate feature `jemalloc` exists only so **this repo’s**
+examples/benches (`examples/kernel_benches.rs`) can install jemalloc when
+you pass `--features jemalloc`. If a consumer enables
+`keel-rt = { features = ["jemalloc"] }` in *their* `Cargo.toml`, that only
+pulls `tikv-jemallocator` as a dependency — it still does **not** set the
+process allocator.
 
 Tokio remains **current_thread** (Phase 1 FIFO apply loop). A multi-thread
 Tokio runtime is a labelled experiment below; it does not change the
@@ -37,7 +47,8 @@ Release, median of 7 except `wide_100k` (n=1). Instant-succeed executors.
 
 jemalloc is a **small** win on current_thread (single-digit). The hot path is
 mostly the apply loop and slot vectors, not cross-thread allocator
-contention. **Do not switch the library default.**
+contention. **Do not switch anything in the library** — there is no library
+allocator to switch.
 
 ## multi_thread Tokio (experiment)
 
@@ -52,7 +63,7 @@ scheduler contract.
 
 Wide fan-out under multi-thread shows more jemalloc benefit (thread-local
 caches). Chain is almost unchanged. This does **not** justify changing
-current_thread or FIFO.
+current_thread or FIFO, and it does **not** belong in `keel-rt`.
 
 ## Alloc count (system allocator, not a CI gate)
 

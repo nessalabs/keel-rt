@@ -95,11 +95,15 @@ Unchanged (say so on PRs that only refactor):
 - When an executor calls `ExecutionContext::sleep`, it used to wait the full
   duration even after cancel (until task abort). Now cancel parks the sleep
   until abort so a loop cannot busy-spin on current_thread.
-- jemalloc is **opt-in** (`--features jemalloc` on an example/binary).
-  `Runtime::start` is unchanged. The library does not install `#[global_allocator]`.
+- Allocator is the **consumer binary’s** choice, not `keel-rt`’s.
+  Default `keel-rt` never sets `#[global_allocator]`. The optional
+  `jemalloc` feature is only for this repo’s examples/benches (and only
+  if enabled in *that* `Cargo.toml` / `--features`). `Runtime::start` is
+  unchanged.
 - Phase 1 failure catalog: [`docs/FAILURE_CATALOG.md`](FAILURE_CATALOG.md)
   (zero MISSING rows).
 
 Architecture (this change): **after = before**. No module split. New public
 items: `ExecutionSnapshot::running_count` / `waiting_count`. Optional crate
-feature `jemalloc` is not used by `lib.rs`.
+feature `jemalloc` is unused by `lib.rs` (consumer binaries may depend on
+`tikv-jemallocator` themselves).

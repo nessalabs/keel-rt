@@ -11,8 +11,11 @@ categories = ["asynchronous"]
 [features]
 default = []
 test-util = []
-# Install jemalloc only in a binary/example that enables this feature.
-# The library (`lib.rs`) never sets `#[global_allocator]`.
+# Convenience for *this repo's* examples/benches only (`examples/kernel_benches.rs`).
+# Enabling `keel-rt/jemalloc` in a consumer Cargo.toml pulls `tikv-jemallocator`
+# as a dependency and still does **not** install `#[global_allocator]`.
+# Allocator choice belongs to the consumer binary, not this library.
+# Default `keel-rt` never sets `#[global_allocator]` (`lib.rs` has none).
 jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
