@@ -4,7 +4,7 @@ use crate::runtime::time::{Clock, Timestamp};
 use std::sync::Arc;
 
 /// Waits for the next injected event or a snapshot deadline T.
-/// Tests pass a [`Clock`] (FakeClock) so they do not need a real timer driver.
+/// The park sleeps on [`Clock`] so tests can inject a paused clock.
 /// `when <= now` still prefers the inbox (Cancel / Shutdown) over Timer.
 pub(crate) struct ChannelPark {
     rx: EventRx,

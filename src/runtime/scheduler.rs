@@ -415,7 +415,7 @@ impl Scheduler {
         self.spawn.abort_all();
         let tx = self.tx.clone();
         let bound = self.cancel_bound;
-        // Wall time, not Clock: hang-bound must fire even if FakeClock is paused.
+        // Wall time, not Clock: hang-bound must fire even if a test clock is paused.
         // Owned: aborted in `Drop` so it cannot wake a dead execution.
         let handle = tokio::spawn(async move {
             tokio::time::sleep(bound).await;

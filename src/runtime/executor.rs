@@ -23,7 +23,7 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
-    /// Sleep on the execution clock (FakeClock in tests, system clock in apps).
+    /// Sleep on the injected [`Clock`](crate::Clock) (`SystemClock` by default).
     /// If [`Self::cancel`] fires, this parks until the execute task is aborted
     /// so a cancelled run cannot busy-loop back into user work.
     pub async fn sleep(&self, duration: Duration) {

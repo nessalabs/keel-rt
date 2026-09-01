@@ -8,7 +8,8 @@ stays on `RetryPolicy` / `timeout_after`. Waiting stays HITL. Kernel has no cron
 no wall timezone, no sqlite timer table. `Event::NodeTimedOut` already exists;
 do not emit `NodeReady`. Drop handle still cancels park sleepers (RAII).
 Fail-fast / AND-join defaults unchanged. `Recover::RetryFailed` is not a kernel
-command. FakeClock drives timer tests. sqlite persists whatever the snapshot
+command. Domain and runtime name [`Clock`] only; `FakeClock` lives in
+`src/testing` and `tests/`. sqlite persists whatever the snapshot
 already has (`synchronous=FULL` default). Park prefers the apply inbox when T
 is already due (`try_recv`) so Cancel/Shutdown at the same instant as a due
 deadline does not dispatch. `Timestamp::saturating_add` saturates `Duration`

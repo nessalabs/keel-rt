@@ -64,9 +64,10 @@ impl std::fmt::Display for UnregisteredExecutors {
 }
 
 /// Default **wall** time the scheduler waits before aborting execute tasks
-/// that ignore cancel. Not driven by [`Clock`](crate::Clock) — FakeClock
-/// does not stretch this. Tests that wait for cancel should budget at least
-/// this long; production can override via [`RuntimeBuilder::cancel_bound`].
+/// that ignore cancel. Not driven by [`Clock`](crate::Clock) — a paused
+/// test clock does not stretch this. Tests that wait for cancel should
+/// budget at least this long; production can override via
+/// [`RuntimeBuilder::cancel_bound`].
 pub const DEFAULT_CANCEL_BOUND: Duration = Duration::from_millis(50);
 
 /// Runtime bundle. [`OnFailure`](crate::OnFailure) / [`Join`](crate::Join) are

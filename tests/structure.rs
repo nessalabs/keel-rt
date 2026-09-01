@@ -462,15 +462,31 @@ fn resume_enum_has_no_retry_failed() {
     );
 }
 
-/// Park sleeps on Clock (FakeClock in tests), not wall tokio::time.
+/// Park sleeps on Clock, not wall tokio::time.
 #[test]
 fn park_deadline_uses_clock_sleep_not_wall_time() {
     let src = fs::read_to_string(src_root().join("runtime/park.rs")).unwrap();
     assert!(src.contains("self.clock.sleep(wait)"));
     assert!(
         !src.contains("tokio::time::sleep"),
-        "park must not wall-sleep; FakeClock drives T"
+        "park must not wall-sleep; tests inject Clock"
     );
+}
+
+/// FakeClock is test harness (`src/testing`, `tests/`). Domain and runtime
+/// depend on the Clock trait only. A use in scheduler.rs fails this test.
+#[test]
+fn kernel_has_no_fake_clock() {
+    for dir in ["domain", "runtime"] {
+        for p in rust_files(&src_root().join(dir)) {
+            let s = fs::read_to_string(&p).unwrap();
+            assert!(
+                !contains_word(&s, "FakeClock"),
+                "{} names FakeClock; kernel uses Clock, harness owns FakeClock",
+                rel(&p)
+            );
+        }
+    }
 }
 
 #[test]
