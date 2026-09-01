@@ -7,17 +7,35 @@ Median of 7 iterations unless noted.
 ## Phase 5 snapshot deadlines (2026-09-01)
 
 T is `Ready { runnable_at: Some(T) }` on the snapshot. FakeClock park; no
-sqlite timer table. MemoryStore hot path **without timers** (this pack does
-not change persist). Gate: no median >10% vs the persist-err hunt column.
+sqlite timer table. Same machine, debug, `current_thread`, n=7 unless noted.
 
-| bench | previous this run | this run | change |
+### MemoryStore hot path (no timers) vs `main` `da1e6fa`
+
+| bench | main `da1e6fa` | phase-5/timers | change |
 |---|---:|---:|---:|
-| wide_fan_out_256 (debug median n=7) | 4.328 ms | 4.360 ms | +0.7% |
-| deep_chain_128 (debug median n=7) | 1.941 ms | 1.931 ms | −0.5% |
-| diamond_10k (debug median n=7) | 154.715 ms | 154.976 ms | +0.2% |
-| apply_only (debug median n=7) | 14.815 ms | 14.831 ms | +0.1% |
+| wide_fan_out_256 | 4.396 ms | 4.348 ms | **−1.1%** |
+| deep_chain_128 | 1.945 ms | 1.926 ms | **−1.0%** |
+| diamond_10k | 157.270 ms | 163.450 ms | +3.9% |
+| apply_only | 14.857 ms | 14.730 ms | **−0.9%** |
 
-All four inside the 10% band. **No revert.**
+All four inside the 10% band. **No revert.** Diamond variance is the usual
+10k-node noise (a second `main` sample was 166.433 ms).
+
+### With timers (this branch only; `main` has no this pack)
+
+| bench | median | notes |
+|---|---:|---|
+| 256-wide all parked 1ms then fire | 3.269 ms | resume + `FakeClock::advance` + wait |
+| 256-wide mixed immediate + parked | 1.815 ms | half Succeeded, half Ready { T } |
+| park/unpark one node | 0.042 ms | resume parked + advance |
+| no-T start/wait (1 node) | 0.051 ms | Phase 3-shaped hot path |
+| sqlite persist 256 Ready { T } | 4.600 ms | FULL, n=5 |
+| sqlite persist 256 Ready now | 3.572 ms | Start only, n=5 |
+| sqlite 256 parked crash-resume + advance | 390 ms | test wall (apply+persist+reopen+fire) |
+
+Park/unpark is in the noise vs no-T start/wait (both ~50 µs). sqlite persist
+of `runnable_at: Some` is a fatter node body than Start-only Ready now
+(+29% this sample), not a MemoryStore regression.
 
 ## Phase 3 events re-measure (2026-08-31)
 

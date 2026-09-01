@@ -8,16 +8,16 @@
 //! `cargo test --test timers -- --test-threads=1`
 
 use bytes::Bytes;
-use keel_rt::testing::{FakeClock, ScriptedExecutor};
+use keel_rt::testing::{FailingStore, FakeClock, ScriptedExecutor, SequenceStore};
 use keel_rt::{
     AcceptPolicy, ApplyCmd, Clock, Event, Execution, ExecutionContext, ExecutionState, FnSink,
-    MemoryStore, NodeId, NodeOutcome, NodeState, RetryPolicy, Runtime, StateStore, Timestamp,
-    WorkflowDefinition,
+    MemoryStore, NodeId, NodeOutcome, NodeState, OnFailure, RetryPolicy, Runtime, StateStore,
+    Timestamp, WorkflowDefinition,
 };
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BOUND: Duration = Duration::from_secs(5);
 const DELAY: Duration = Duration::from_millis(50);
@@ -40,7 +40,7 @@ fn def_a() -> WorkflowDefinition {
 
 /// Persist a retry-delay snapshot: attempt 1 TimedOut, Ready { T = now+delay }.
 async fn persist_backoff(
-    store: &MemoryStore,
+    store: &impl StateStore,
     delay: Duration,
 ) -> (keel_rt::ExecutionId, Timestamp) {
     let mut ex = Execution::new(def_a());
@@ -515,4 +515,725 @@ async fn memory_store_hot_path_without_timers_does_not_park() {
         Timestamp(0),
         "no FakeClock advance on hot path"
     );
+}
+
+/// Killer: T already due + Cancel in inbox — Cancel must win (park try_recv).
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_when_deadline_already_due_does_not_dispatch() {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let (id, t) = persist_backoff(&store, DELAY).await;
+    clock.set(t);
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock)
+            .policy(RetryPolicy::new(3, DELAY))
+            .register_fn("a", move |_ctx: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    handle.cancel().await;
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "queued Cancel must beat due Timer"
+    );
+}
+
+/// 256 parked Ready {{ T }}, one advance, each node fires once.
+#[tokio::test(flavor = "current_thread")]
+async fn wide_256_parked_advance_once_each_fires_once() {
+    let n = 256usize;
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let mut b = WorkflowDefinition::builder("wide-t");
+    for i in 0..n {
+        b = b.node(format!("w{i}"), "e");
+    }
+    let def = b.build().unwrap();
+    let p = RetryPolicy::new(2, DELAY);
+    let now = Timestamp(0);
+    let mut ex = Execution::new(def);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    for i in 0..n {
+        let id = format!("w{i}");
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: id.clone().into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: id.into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+    }
+    store.persist(&ex).await.unwrap();
+    let id = ex.id().clone();
+    let parked = store
+        .get(&id)
+        .await
+        .unwrap()
+        .unwrap()
+        .nodes
+        .values()
+        .filter(|n| {
+            matches!(
+                n.state,
+                NodeState::Ready {
+                    runnable_at: Some(_)
+                }
+            )
+        })
+        .count();
+    assert_eq!(parked, n, "every worker must carry T");
+
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .concurrency(32)
+            .policy(p)
+            .register_fn("e", move |_ctx: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(fired.load(Ordering::SeqCst), 0);
+    clock.advance(DELAY);
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(fired.load(Ordering::SeqCst), n as u32, "each node once");
+}
+
+/// Mixed: half dispatchable now, half parked. Resume must not fire parked early.
+#[tokio::test(flavor = "current_thread")]
+async fn wide_mixed_immediate_and_parked_resume() {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let def = WorkflowDefinition::builder("mix")
+        .node("now", "now")
+        .node("later", "later")
+        .build()
+        .unwrap();
+    let p = RetryPolicy::new(3, DELAY);
+    let now = Timestamp(0);
+    let mut ex = Execution::new(def);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "later".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    ex.apply(
+        ApplyCmd::FinishNode {
+            node_id: "later".into(),
+            attempt: 1,
+            outcome: Ok(NodeOutcome::TimedOut),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    store.persist(&ex).await.unwrap();
+    let id = ex.id().clone();
+    let now_hits = Arc::new(AtomicU32::new(0));
+    let later_hits = Arc::new(AtomicU32::new(0));
+    let nh = now_hits.clone();
+    let lh = later_hits.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .concurrency(2)
+            .policy(p)
+            .register_fn("now", move |_c: ExecutionContext| {
+                nh.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"n")) }
+            })
+            .register_fn("later", move |_c: ExecutionContext| {
+                lh.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"l")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    within(async {
+        loop {
+            if now_hits.load(Ordering::SeqCst) >= 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(later_hits.load(Ordering::SeqCst), 0, "parked must wait");
+    clock.advance(DELAY);
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(later_hits.load(Ordering::SeqCst), 1);
+}
+
+/// T == now is due. T in the past on restore is due. T far future does not wall-sleep.
+#[tokio::test(flavor = "current_thread")]
+async fn t_equals_now_and_past_due_far_future_does_not_wall_sleep() {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let (id, t) = persist_backoff(&store, DELAY).await;
+    clock.set(t);
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store.clone())
+            .clock(clock.clone())
+            .policy(RetryPolicy::new(3, DELAY))
+            .register_fn("a", move |_c: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(fired.load(Ordering::SeqCst), 1);
+
+    let store = MemoryStore::new();
+    let (id, _) = persist_backoff(&store, DELAY).await;
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp::from_millis(u64::MAX));
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock)
+            .policy(RetryPolicy::new(3, DELAY))
+            .register_fn("a", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+
+    let store = MemoryStore::new();
+    let mut ex = Execution::new(def_a());
+    let p = RetryPolicy::new(3, Duration::from_secs(86400 * 365));
+    let now = Timestamp(0);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "a".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    ex.apply(
+        ApplyCmd::FinishNode {
+            node_id: "a".into(),
+            attempt: 1,
+            outcome: Ok(NodeOutcome::TimedOut),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    store.persist(&ex).await.unwrap();
+    let id = ex.id().clone();
+    let clock = Arc::new(FakeClock::new());
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let wall = Instant::now();
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock)
+            .policy(p)
+            .register_fn("a", move |_c: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(fired.load(Ordering::SeqCst), 0);
+    assert!(
+        wall.elapsed() < Duration::from_millis(200),
+        "far-future T must not real-sleep, elapsed={:?}",
+        wall.elapsed()
+    );
+    handle.cancel().await;
+    within(handle.wait()).await;
+}
+
+/// Overflow Instant: saturating T stays parked; FakeClock does not wall-sleep.
+#[tokio::test(flavor = "current_thread")]
+async fn overflow_t_saturates_and_does_not_real_sleep() {
+    let store = MemoryStore::new();
+    let mut ex = Execution::new(def_a());
+    let p = RetryPolicy::new(3, Duration::from_millis(1));
+    let now = Timestamp(u64::MAX);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "a".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    ex.apply(
+        ApplyCmd::FinishNode {
+            node_id: "a".into(),
+            attempt: 1,
+            outcome: Ok(NodeOutcome::TimedOut),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    match &ex.snapshot().node(&NodeId::new("a")).unwrap().state {
+        NodeState::Ready {
+            runnable_at: Some(at),
+        } => assert_eq!(*at, Timestamp(u64::MAX), "saturating_add must not wrap"),
+        other => panic!("{other:?}"),
+    }
+    store.persist(&ex).await.unwrap();
+    let id = ex.id().clone();
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(u64::MAX));
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock)
+            .policy(p)
+            .register_fn("a", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+}
+
+/// Resume of a parked graph must not persist (last_persisted seeded from snapshot).
+#[tokio::test(flavor = "current_thread")]
+async fn resume_parked_does_not_open_extra_persist() {
+    let store = SequenceStore::new();
+    let (id, _) = persist_backoff(&store, DELAY).await;
+    let before = store.puts().len();
+    assert!(before >= 1);
+    let clock = Arc::new(FakeClock::new());
+    let handle = within(
+        Runtime::builder()
+            .store(store.clone())
+            .clock(clock)
+            .policy(RetryPolicy::new(3, DELAY))
+            .register_fn("a", |_c: ExecutionContext| async {
+                panic!("must stay parked")
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        store.puts().len(),
+        before,
+        "no-op park restore must not persist (last_persisted was 0 if this grows)"
+    );
+    handle.cancel().await;
+    within(handle.wait()).await;
+}
+
+/// NodeTimedOut is announced only after persist Ok.
+#[tokio::test(flavor = "current_thread")]
+async fn node_timed_out_emitted_only_after_persist_ok() {
+    let store = FailingStore::fail_all();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let rt = Runtime::builder()
+        .store(store)
+        .sink(FnSink(move |e: &Event| log.lock().unwrap().push(e.clone())))
+        .register(ScriptedExecutor::new("a").timeout())
+        .build();
+    let handle = rt.start(def_a()).unwrap();
+    within(async {
+        loop {
+            if matches!(
+                handle
+                    .inspect()
+                    .await
+                    .node(&NodeId::new("a"))
+                    .map(|n| &n.state),
+                Some(NodeState::TimedOut)
+            ) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::NodeTimedOut { .. })),
+        "must not announce NodeTimedOut before persist Ok"
+    );
+    handle.cancel().await;
+    let _ = within(handle.wait()).await;
+}
+
+/// Deep chain: first node TimedOut. Fail-fast cancels the rest. FailSubtree
+/// cancels descendants only; execution Completes.
+#[tokio::test(flavor = "current_thread")]
+async fn deep_chain_timeout_fail_fast_vs_fail_subtree() {
+    let chain = |on_failure: OnFailure| {
+        WorkflowDefinition::builder("chain")
+            .on_failure(on_failure)
+            .node("a", "t")
+            .node("b", "ok")
+            .node("c", "ok")
+            .edge("a", "b")
+            .edge("b", "c")
+            .build()
+            .unwrap()
+    };
+    let rt = Runtime::builder()
+        .register(ScriptedExecutor::new("t").timeout())
+        .register_fn("ok", |_c: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let h = rt.start(chain(OnFailure::FailExecution)).unwrap();
+    assert_eq!(within(h.wait()).await, ExecutionState::Failed);
+
+    let rt = Runtime::builder()
+        .register(ScriptedExecutor::new("t").timeout())
+        .register_fn("ok", |_c: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let h = rt.start(chain(OnFailure::FailSubtree)).unwrap();
+    assert_eq!(within(h.wait()).await, ExecutionState::Completed);
+}
+
+/// Sibling timeout_after (Running) + sibling retry park. Crash. Resume keeps T
+/// on the parked node; the Running side re-invokes. Independent — fail-fast
+/// Accept on the timeout sibling would cancel the park.
+#[tokio::test(flavor = "current_thread")]
+async fn retry_backoff_and_timeout_sibling_crash_between() {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let def = WorkflowDefinition::builder("both")
+        .node("park", "park")
+        .node("run", "run")
+        .build()
+        .unwrap();
+    let p = RetryPolicy::new(3, DELAY);
+    let now = Timestamp(0);
+    let mut ex = Execution::new(def);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "park".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    ex.apply(
+        ApplyCmd::FinishNode {
+            node_id: "park".into(),
+            attempt: 1,
+            outcome: Ok(NodeOutcome::TimedOut),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "run".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    store.persist(&ex).await.unwrap();
+    let id = ex.id().clone();
+    let t = match store
+        .get(&id)
+        .await
+        .unwrap()
+        .unwrap()
+        .node(&NodeId::new("park"))
+    {
+        Some(n) => match &n.state {
+            NodeState::Ready {
+                runnable_at: Some(at),
+            } => *at,
+            other => panic!("{other:?}"),
+        },
+        None => panic!("park"),
+    };
+    let park_hits = Arc::new(AtomicU32::new(0));
+    let run_hits = Arc::new(AtomicU32::new(0));
+    let ph = park_hits.clone();
+    let rh = run_hits.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store.clone())
+            .clock(clock.clone())
+            .concurrency(2)
+            .policy(p)
+            .register_fn("park", move |_c: ExecutionContext| {
+                ph.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"p")) }
+            })
+            .register_fn("run", move |_c: ExecutionContext| {
+                rh.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"r")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    within(async {
+        loop {
+            if run_hits.load(Ordering::SeqCst) >= 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(park_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        store
+            .get(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .node(&NodeId::new("park"))
+            .unwrap()
+            .state,
+        NodeState::Ready {
+            runnable_at: Some(t)
+        }
+    );
+    clock.advance(DELAY);
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(park_hits.load(Ordering::SeqCst), 1);
+}
+
+/// Two sleepers: Running timeout_after + parked sibling. Drop drops both.
+#[tokio::test(flavor = "current_thread")]
+async fn two_sleepers_drop_handle_releases_both() {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .clock(clock.clone())
+        .concurrency(2)
+        .policy(RetryPolicy::new(3, Duration::from_secs(60)))
+        .register(ScriptedExecutor::new("run").timeout_after(Duration::from_secs(60)))
+        .register(ScriptedExecutor::new("park").timeout())
+        .build();
+    let def = WorkflowDefinition::builder("sleepers")
+        .node("run", "run")
+        .node("park", "park")
+        .build()
+        .unwrap();
+    let handle = rt.start(def).unwrap();
+    let id = handle.execution_id().clone();
+    within(async {
+        loop {
+            if let Some(snap) = store.get(&id).await.unwrap() {
+                let run = snap.node(&NodeId::new("run")).map(|n| &n.state);
+                let park = snap.node(&NodeId::new("park")).map(|n| &n.state);
+                if matches!(run, Some(NodeState::Running { .. }))
+                    && matches!(
+                        park,
+                        Some(NodeState::Ready {
+                            runnable_at: Some(_)
+                        })
+                    )
+                {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        clock.live_sleeps() >= 2,
+        "executor Delay + park sleeper, got {}",
+        clock.live_sleeps()
+    );
+    drop(handle);
+    within(async {
+        loop {
+            if clock.live_sleeps() == 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+
+/// Advance FakeClock past T while persist is in flight; fire once after persist Ok.
+#[tokio::test(flavor = "current_thread")]
+async fn advance_past_t_while_persist_in_flight_fires_once() {
+    struct HoldPersist {
+        inner: MemoryStore,
+        go: tokio::sync::Notify,
+        holding: AtomicU32,
+    }
+    #[async_trait::async_trait]
+    impl StateStore for HoldPersist {
+        async fn put(
+            &self,
+            snapshot: &keel_rt::ExecutionSnapshot,
+        ) -> Result<(), keel_rt::StoreError> {
+            self.inner.put(snapshot).await
+        }
+        async fn get(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<keel_rt::ExecutionSnapshot>, keel_rt::StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), keel_rt::StoreError> {
+            self.persist_with_events(exec, &[]).await
+        }
+        async fn persist_with_events(
+            &self,
+            exec: &Execution,
+            events: &[Event],
+        ) -> Result<(), keel_rt::StoreError> {
+            if self.holding.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.go.notified().await;
+            }
+            self.inner.persist_with_events(exec, events).await
+        }
+        async fn workflow_definition(
+            &self,
+            id: &keel_rt::ExecutionId,
+        ) -> Result<Option<WorkflowDefinition>, keel_rt::StoreError> {
+            self.inner.workflow_definition(id).await
+        }
+    }
+
+    let clock = Arc::new(FakeClock::new());
+    let store = Arc::new(HoldPersist {
+        inner: MemoryStore::new(),
+        go: tokio::sync::Notify::new(),
+        holding: AtomicU32::new(0),
+    });
+    let dyn_store: Arc<dyn StateStore> = store.clone();
+    let rt = Runtime::builder()
+        .store_arc(dyn_store)
+        .clock(clock.clone())
+        .policy(RetryPolicy::new(2, DELAY))
+        .register(
+            ScriptedExecutor::new("a")
+                .timeout()
+                .succeed(Bytes::from_static(b"ok")),
+        )
+        .build();
+    let handle = rt.start(def_a()).unwrap();
+    within(async {
+        loop {
+            if store.holding.load(Ordering::SeqCst) >= 2 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    clock.advance(DELAY);
+    store.go.notify_waiters();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+}
+
+/// Two Runtimes, one MemoryStore, parked T: still unfenced (both may resume).
+#[tokio::test(flavor = "current_thread")]
+async fn two_runtimes_parked_deadline_are_not_fenced() {
+    let store = MemoryStore::new();
+    let (id, t) = persist_backoff(&store, DELAY).await;
+    let clock = Arc::new(FakeClock::new());
+    clock.set(t);
+    let a = Runtime::builder()
+        .store(store.clone())
+        .clock(clock.clone())
+        .policy(RetryPolicy::new(3, DELAY))
+        .register_fn("a", |_c: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let b = Runtime::builder()
+        .store(store)
+        .clock(clock)
+        .policy(RetryPolicy::new(3, DELAY))
+        .register_fn("a", |_c: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let ha = within(a.resume(&id)).await.unwrap();
+    let hb = within(b.resume(&id)).await;
+    assert!(
+        hb.is_ok(),
+        "AlreadyActive is per Runtime; two runtimes stay unfenced"
+    );
+    let _ = within(ha.wait()).await;
+    if let Ok(h) = hb {
+        let _ = within(h.wait()).await;
+    }
 }

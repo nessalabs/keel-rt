@@ -1981,3 +1981,232 @@ fn crash_after_timeout_persisted_before_dispatch_does_not_double_run() {
     });
     let _ = std::fs::remove_file(&path);
 }
+
+/// Incremental persist after a first snapshot must write `runnable_at` (dirty
+/// slot). Reopen FULL file — T is still there.
+#[test]
+fn incremental_persist_does_not_drop_runnable_at() {
+    let path = tmp();
+    let delay = Duration::from_millis(50);
+    let (id, t) = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let out = rt.block_on(async {
+            let mut ex = Execution::new(
+                WorkflowDefinition::builder("wf")
+                    .node("a", "a")
+                    .build()
+                    .unwrap(),
+            );
+            let p = RetryPolicy::new(3, delay);
+            let now = Timestamp(0);
+            ex.apply(ApplyCmd::Start, &p, now).unwrap();
+            ex.apply(
+                ApplyCmd::StartNode {
+                    node_id: "a".into(),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+            store.persist(&ex).await.unwrap();
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: "a".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::TimedOut),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+            let t = match &ex.snapshot().node(&NodeId::new("a")).unwrap().state {
+                NodeState::Ready {
+                    runnable_at: Some(at),
+                } => *at,
+                other => panic!("{other:?}"),
+            };
+            store.persist(&ex).await.unwrap();
+            (ex.id().clone(), t)
+        });
+        drop(rt);
+        drop(store);
+        out
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        assert_eq!(
+            store
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&NodeId::new("a"))
+                .unwrap()
+                .state,
+            NodeState::Ready {
+                runnable_at: Some(t)
+            }
+        );
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 256 parked T, crash, resume, one advance — each fires once.
+#[test]
+fn crash_resume_256_parked_advance_once_each_once() {
+    let path = tmp();
+    let n = 256usize;
+    let clock = Arc::new(FakeClock::new());
+    let delay = Duration::from_millis(1);
+    let id = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let id = rt.block_on(async {
+            let mut b = WorkflowDefinition::builder("wide-t");
+            for i in 0..n {
+                b = b.node(format!("w{i}"), "e");
+            }
+            let mut ex = Execution::new(b.build().unwrap());
+            let p = RetryPolicy::new(2, delay);
+            let now = Timestamp(0);
+            ex.apply(ApplyCmd::Start, &p, now).unwrap();
+            for i in 0..n {
+                let nid = format!("w{i}");
+                ex.apply(
+                    ApplyCmd::StartNode {
+                        node_id: nid.clone().into(),
+                    },
+                    &p,
+                    now,
+                )
+                .unwrap();
+                ex.apply(
+                    ApplyCmd::FinishNode {
+                        node_id: nid.into(),
+                        attempt: 1,
+                        outcome: Ok(NodeOutcome::TimedOut),
+                    },
+                    &p,
+                    now,
+                )
+                .unwrap();
+            }
+            store.persist(&ex).await.unwrap();
+            ex.id().clone()
+        });
+        drop(rt);
+        drop(store);
+        id
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let rt = current_rt();
+    rt.block_on(async {
+        let parked = store
+            .get(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .nodes
+            .values()
+            .filter(|n| {
+                matches!(
+                    n.state,
+                    NodeState::Ready {
+                        runnable_at: Some(_)
+                    }
+                )
+            })
+            .count();
+        assert_eq!(parked, n);
+        let runtime = Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .concurrency(32)
+            .policy(RetryPolicy::new(2, delay))
+            .register_fn("e", move |_c: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+        clock.advance(delay);
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        assert_eq!(fired.load(Ordering::SeqCst), n as u32);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Persist/resume 256-wide Ready {{ T }} vs Ready now. Prints medians (n=5).
+#[test]
+fn persist_resume_256_runnable_at_set_vs_unset() {
+    fn wide(n: usize) -> WorkflowDefinition {
+        let mut b = WorkflowDefinition::builder("p256");
+        for i in 0..n {
+            b = b.node(format!("w{i}"), "e");
+        }
+        b.build().unwrap()
+    }
+    fn persist_shape(path: &std::path::Path, parked: bool) -> Duration {
+        let n = 256usize;
+        let store = SqliteStore::open(path).unwrap();
+        let rt = current_rt();
+        let d = rt.block_on(async {
+            let mut ex = Execution::new(wide(n));
+            let p = RetryPolicy::new(2, Duration::from_millis(1));
+            let now = Timestamp(0);
+            ex.apply(ApplyCmd::Start, &p, now).unwrap();
+            if parked {
+                for i in 0..n {
+                    let id = format!("w{i}");
+                    ex.apply(
+                        ApplyCmd::StartNode {
+                            node_id: id.clone().into(),
+                        },
+                        &p,
+                        now,
+                    )
+                    .unwrap();
+                    ex.apply(
+                        ApplyCmd::FinishNode {
+                            node_id: id.into(),
+                            attempt: 1,
+                            outcome: Ok(NodeOutcome::TimedOut),
+                        },
+                        &p,
+                        now,
+                    )
+                    .unwrap();
+                }
+            }
+            let t0 = std::time::Instant::now();
+            store.persist(&ex).await.unwrap();
+            t0.elapsed()
+        });
+        drop(rt);
+        d
+    }
+    let mut set = Vec::new();
+    let mut unset = Vec::new();
+    for i in 0..5 {
+        let a = tmp();
+        let b = tmp();
+        set.push(persist_shape(&a, true));
+        unset.push(persist_shape(&b, false));
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+        let _ = i;
+    }
+    set.sort();
+    unset.sort();
+    eprintln!(
+        "sqlite_persist_256 runnable_at_set={} runnable_at_unset={} (median n=5)",
+        set[2].as_secs_f64() * 1000.0,
+        unset[2].as_secs_f64() * 1000.0
+    );
+}

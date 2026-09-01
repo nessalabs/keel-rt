@@ -89,6 +89,8 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "fn crash_resume_full_file_keeps_deadline",
         "fn sqlite_deadline_persist_does_not_drop_or_double_fire",
         "fn crash_after_timeout_persisted_before_dispatch_does_not_double_run",
+        "fn incremental_persist_does_not_drop_runnable_at",
+        "fn crash_resume_256_parked_advance_once_each_once",
     ] {
         assert!(resume.contains(name), "resume.rs missing {name}");
     }

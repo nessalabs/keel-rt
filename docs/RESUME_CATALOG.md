@@ -30,7 +30,10 @@ Sqlite adapter lines are not kernel `src/`.
 | Crash after timeout persisted, before retry dispatch | T still on snapshot; resume does not double-run | `test: crash_after_timeout_persisted_before_dispatch_does_not_double_run` `test: crash_after_accept_timeout_persisted_resume_stays_timed_out` |
 | Backoff retry survives crash | same attempt policy; no extra attempts | `test: backoff_retry_survives_crash_same_attempt_policy` |
 | Cancel / Drop during parked deadline | Cancelled; FakeClock sleeper dropped | `test: cancel_during_parked_deadline_is_cancelled_sleeper_dropped` `test: drop_handle_during_parked_deadline_cancels_sleeper` `test: cancel_ready_with_future_deadline_does_not_start_later` |
-| Persist of deadline drop / double-fire | T round-trips; due-on-resume dispatches once | `test: sqlite_deadline_persist_does_not_drop_or_double_fire` `test: persisted_deadline_already_due_on_resume_runs_once_not_twice` |
+| Persist of deadline drop / double-fire | T round-trips; due-on-resume dispatches once | `test: sqlite_deadline_persist_does_not_drop_or_double_fire` `test: persisted_deadline_already_due_on_resume_runs_once_not_twice` `test: incremental_persist_does_not_drop_runnable_at` |
+| Cancel vs due T same instant | Cancel in inbox beats Timer | `test: cancel_when_deadline_already_due_does_not_dispatch` |
+| 256 parked crash-resume | one advance, each fires once | `test: wide_256_parked_advance_once_each_fires_once` `test: crash_resume_256_parked_advance_once_each_once` |
+| Two Runtimes, parked T | still unfenced | `test: two_runtimes_parked_deadline_are_not_fenced` |
 | Crash during timeout (Running + FakeClock Delay) | re-invoke; advance FakeClock → TimedOut | `test: start_arm_timeout_crash_before_fire_resume_advance_is_timed_out` |
 | Crash after terminal persist | terminal kept; succeeded/failed nodes do not re-run | `test: process_restart_is_new_runtime_same_file` `test: crash_after_fail_fast_stays_failed` |
 | `resume` while first resume still live, concurrent | one `Ok`, one `AlreadyActive` | `test: concurrent_resume_same_id_one_already_active` `test: concurrent_resume_same_runtime_one_already_active` `test: resume_of_live_start_is_already_active` `test: resume_twice_live_is_already_active` |
