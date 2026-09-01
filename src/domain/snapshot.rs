@@ -26,9 +26,12 @@ pub enum SnapshotError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSnapshot {
     pub state: NodeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Bytes>,
     pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_token: Option<ResumeToken>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<NodeError>,
 }
 
@@ -175,8 +178,28 @@ mod tests {
     }
 
     #[test]
+    fn node_snapshot_omits_null_optionals_and_reads_legacy_nulls() {
+        let compact = serde_json::to_string(&empty_node()).unwrap();
+        assert!(
+            !compact.contains("resume_token") && !compact.contains("last_error"),
+            "{compact}"
+        );
+        let legacy = r#"{"state":"Pending","output":null,"attempt":0,"resume_token":null,"last_error":null}"#;
+        let got: NodeSnapshot = serde_json::from_str(legacy).unwrap();
+        assert_eq!(got, empty_node());
+        let ready_now = NodeSnapshot {
+            state: NodeState::Ready { runnable_at: None },
+            ..empty_node()
+        };
+        let body = serde_json::to_string(&ready_now).unwrap();
+        assert!(!body.contains("runnable_at"), "{body}");
+    }
+
+    #[test]
     fn iter_nodes_follows_definition_order() {
-        let order: Vec<NodeId> = (0..20).map(|i| NodeId::new(format!("page-{i:02}"))).collect();
+        let order: Vec<NodeId> = (0..20)
+            .map(|i| NodeId::new(format!("page-{i:02}")))
+            .collect();
         let mut nodes = HashMap::new();
         for id in &order {
             nodes.insert(id.clone(), empty_node());
@@ -267,16 +290,21 @@ mod tests {
             .to_string()
         }
         assert!(snap(ExecutionState::Created, NodeState::Pending).contains("Created"));
-        assert!(snap(ExecutionState::Running, NodeState::Ready { runnable_at: None }).contains("Ready"));
-        assert!(snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Waiting"));
-        assert!(snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Running(1)"));
+        assert!(snap(
+            ExecutionState::Running,
+            NodeState::Ready { runnable_at: None }
+        )
+        .contains("Ready"));
+        assert!(
+            snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Waiting")
+        );
+        assert!(
+            snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Running(1)")
+        );
         let token = ResumeToken::issue(ExecutionId::new(), NodeId::new("n"), 1);
         assert!(snap(
             ExecutionState::Cancelled,
-            NodeState::Waiting {
-                token,
-                attempt: 1
-            }
+            NodeState::Waiting { token, attempt: 1 }
         )
         .contains("Cancelled"));
         assert!(snap(ExecutionState::Completed, NodeState::Failed).contains("Completed"));

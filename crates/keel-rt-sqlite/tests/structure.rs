@@ -91,6 +91,10 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "fn crash_after_timeout_persisted_before_dispatch_does_not_double_run",
         "fn incremental_persist_does_not_drop_runnable_at",
         "fn crash_resume_256_parked_advance_once_each_once",
+        "fn incremental_fire_does_not_overwrite_sibling_runnable_at",
+        "fn busy_on_park_persist_rolls_back_then_t_lands",
+        "fn reader_lock_does_not_block_park_persist",
+        "fn many_park_wakes_wal_stays_bounded",
     ] {
         assert!(resume.contains(name), "resume.rs missing {name}");
     }

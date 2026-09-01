@@ -336,9 +336,21 @@ fn insert_definition(
     let Some(def) = definition else {
         return Ok(());
     };
+    let hash = def.content_hash();
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM definitions WHERE hash = ?1",
+            params![hash.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(store_err)?;
+    if exists.is_some() {
+        return Ok(());
+    }
     conn.execute(
-        "INSERT OR IGNORE INTO definitions (hash, body) VALUES (?1, ?2)",
-        params![def.content_hash().as_str(), def.durable_bytes()],
+        "INSERT INTO definitions (hash, body) VALUES (?1, ?2)",
+        params![hash.as_str(), def.durable_bytes()],
     )
     .map_err(store_err)?;
     Ok(())

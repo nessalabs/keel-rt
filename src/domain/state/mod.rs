@@ -17,6 +17,7 @@ pub enum NodeState {
     /// (`Some(T)`). T is the snapshot deadline for retry backoff (and any
     /// other "not runnable until T" policy). Waiting is an executor yield, not a timer.
     Ready {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         runnable_at: Option<Timestamp>,
     },
     Running {
@@ -344,11 +345,16 @@ impl Execution {
 
     pub(crate) fn node_snapshot_at(&self, slot: NodeSlot) -> NodeSnapshot {
         let n = &self.nodes[slot.0];
+        let resume_token = match &n.state {
+            NodeState::Waiting { token, .. } => Some(token.clone()),
+            NodeState::Running { .. } => n.resume_token.clone(),
+            _ => None,
+        };
         NodeSnapshot {
             state: n.state.clone(),
             output: n.output.clone(),
             attempt: n.attempt,
-            resume_token: n.resume_token.clone(),
+            resume_token,
             last_error: n.last_error.clone(),
         }
     }
@@ -746,6 +752,10 @@ mod tests {
             "retry delay must be Ready {{ runnable_at }}, not Waiting"
         );
         assert_eq!(ex.state, ExecutionState::Running);
+        assert!(
+            ex.snapshot().node(&NodeId::new("a")).unwrap().resume_token.is_none(),
+            "retry park must not persist the stale attempt token"
+        );
         let (at, id) = ex.next_deadline().expect("deadline on aggregate");
         assert_eq!(at, Timestamp(1050));
         assert_eq!(id.as_str(), "a");

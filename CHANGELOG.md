@@ -11,8 +11,11 @@ Fail-fast / AND-join defaults unchanged. `Recover::RetryFailed` is not a kernel
 command. FakeClock drives timer tests. sqlite persists whatever the snapshot
 already has (`synchronous=FULL` default). Park prefers the apply inbox when T
 is already due (`try_recv`) so Cancel/Shutdown at the same instant as a due
-deadline does not dispatch. MemoryStore no-timer medians stay within 10% of
-`main` (`da1e6fa`).
+deadline does not dispatch. `Timestamp::saturating_add` saturates `Duration`
+millis that do not fit in `u64` (`1<<61` seconds used to wrap to T==now).
+Node JSON omits null optionals; a retry park drops the stale attempt token
+(Waiting still carries the token). MemoryStore no-timer medians stay within
+10% of `main` (`da1e6fa`).
 
 ## Phase 3 events (`phase-3/events`)
 

@@ -2152,7 +2152,7 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
         }
         b.build().unwrap()
     }
-    fn persist_shape(path: &std::path::Path, parked: bool) -> Duration {
+    fn persist_shape(path: &std::path::Path, parked: bool) -> (Duration, usize, usize) {
         let n = 256usize;
         let store = SqliteStore::open(path).unwrap();
         let rt = current_rt();
@@ -2184,20 +2184,33 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
                     .unwrap();
                 }
             }
+            let bodies: usize = ex
+                .dirty_nodes()
+                .iter()
+                .map(|(_, n)| serde_json::to_vec(n).unwrap().len())
+                .sum();
             let t0 = std::time::Instant::now();
             store.persist(&ex).await.unwrap();
-            t0.elapsed()
+            (t0.elapsed(), bodies, ex.dirty_nodes().len())
         });
         drop(rt);
         d
     }
     let mut set = Vec::new();
     let mut unset = Vec::new();
+    let mut set_bytes = 0usize;
+    let mut unset_bytes = 0usize;
     for i in 0..5 {
         let a = tmp();
         let b = tmp();
-        set.push(persist_shape(&a, true));
-        unset.push(persist_shape(&b, false));
+        let (dt, bytes, dirty) = persist_shape(&a, true);
+        assert_eq!(dirty, 256);
+        set.push(dt);
+        set_bytes = bytes;
+        let (dt, bytes, dirty) = persist_shape(&b, false);
+        assert_eq!(dirty, 256);
+        unset.push(dt);
+        unset_bytes = bytes;
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
         let _ = i;
@@ -2205,8 +2218,335 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
     set.sort();
     unset.sort();
     eprintln!(
-        "sqlite_persist_256 runnable_at_set={} runnable_at_unset={} (median n=5)",
+        "sqlite_persist_256 runnable_at_set={}ms ({} node-json B) runnable_at_unset={}ms ({} node-json B) (median n=5)",
         set[2].as_secs_f64() * 1000.0,
-        unset[2].as_secs_f64() * 1000.0
+        set_bytes,
+        unset[2].as_secs_f64() * 1000.0,
+        unset_bytes
     );
+}
+
+/// Fire one of 256 parked nodes; incremental persist must not write Ready now
+/// over the other 255 `runnable_at` values.
+#[test]
+fn incremental_fire_does_not_overwrite_sibling_runnable_at() {
+    let path = tmp();
+    let delay = Duration::from_millis(10);
+    let (id, t0, t_last) = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let out = rt.block_on(async {
+            let mut b = WorkflowDefinition::builder("sib");
+            for i in 0..256 {
+                b = b.node(format!("w{i}"), "e");
+            }
+            let mut ex = Execution::new(b.build().unwrap());
+            let p = RetryPolicy::new(2, delay);
+            ex.apply(ApplyCmd::Start, &p, Timestamp(0)).unwrap();
+            for i in 0..256 {
+                let nid = format!("w{i}");
+                let now = if i == 0 { Timestamp(0) } else { Timestamp(50) };
+                ex.apply(
+                    ApplyCmd::StartNode {
+                        node_id: nid.clone().into(),
+                    },
+                    &p,
+                    now,
+                )
+                .unwrap();
+                ex.apply(
+                    ApplyCmd::FinishNode {
+                        node_id: nid.into(),
+                        attempt: 1,
+                        outcome: Ok(NodeOutcome::TimedOut),
+                    },
+                    &p,
+                    now,
+                )
+                .unwrap();
+            }
+            store.persist(&ex).await.unwrap();
+            let id = ex.id().clone();
+            let def = store.workflow_definition(&id).await.unwrap().unwrap();
+            let mut ex = Execution::from_snapshot(def, store.get(&id).await.unwrap().unwrap())
+                .unwrap();
+            ex.apply(
+                ApplyCmd::RetryDue {
+                    node_id: "w0".into(),
+                },
+                &p,
+                Timestamp(10),
+            )
+            .unwrap();
+            assert_eq!(ex.dirty_nodes().len(), 1, "only the fired slot is dirty");
+            store.persist(&ex).await.unwrap();
+            let t_last = match &ex.snapshot().node(&NodeId::new("w255")).unwrap().state {
+                NodeState::Ready {
+                    runnable_at: Some(at),
+                } => *at,
+                other => panic!("{other:?}"),
+            };
+            (id, Timestamp(10), t_last)
+        });
+        drop(rt);
+        drop(store);
+        out
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let snap = store.get(&id).await.unwrap().unwrap();
+        assert!(
+            matches!(
+                snap.node(&NodeId::new("w0")).unwrap().state,
+                NodeState::Ready {
+                    runnable_at: None
+                }
+            ),
+            "fired slot is Ready now"
+        );
+        for i in 1..256 {
+            match &snap.node(&NodeId::new(format!("w{i}"))).unwrap().state {
+                NodeState::Ready {
+                    runnable_at: Some(at),
+                } => {
+                    assert!(*at > t0, "sibling {i} must keep future T, got {at}");
+                }
+                other => panic!("sibling {i} {other:?}"),
+            }
+        }
+        assert_eq!(
+            snap.node(&NodeId::new("w255")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(t_last)
+            }
+        );
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// BUSY on a non-terminal park persist: disk unchanged, then persist Ok keeps T.
+/// Checkpoint is not invoked on park persist.
+#[test]
+fn busy_on_park_persist_rolls_back_then_t_lands() {
+    let path = tmp();
+    let delay = Duration::from_millis(50);
+    let store = SqliteStore::open_with_busy_timeout(&path, Duration::ZERO).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let mut ex = Execution::new(
+            WorkflowDefinition::builder("wf")
+                .node("a", "a")
+                .build()
+                .unwrap(),
+        );
+        let p = RetryPolicy::new(3, delay);
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        store.persist(&ex).await.unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let t = match &ex.snapshot().node(&NodeId::new("a")).unwrap().state {
+            NodeState::Ready {
+                runnable_at: Some(at),
+            } => *at,
+            other => panic!("{other:?}"),
+        };
+        SqliteStore::fail_next_wal_checkpoints(8);
+        store.persist(&ex).await.unwrap();
+        SqliteStore::fail_next_wal_checkpoints(0);
+        assert_eq!(
+            store
+                .get(&ex.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&NodeId::new("a"))
+                .unwrap()
+                .state,
+            NodeState::Ready {
+                runnable_at: Some(t)
+            },
+            "park persist is non-terminal; checkpoint BUSY must not fail it"
+        );
+    });
+    drop(rt);
+    drop(store);
+
+    let store = SqliteStore::open_with_busy_timeout(&path, Duration::ZERO).unwrap();
+    let locker = rusqlite::Connection::open(&path).unwrap();
+    locker.busy_timeout(Duration::ZERO).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let mut ex = Execution::new(
+            WorkflowDefinition::builder("wf2")
+                .node("b", "b")
+                .build()
+                .unwrap(),
+        );
+        let p = RetryPolicy::new(3, delay);
+        ex.apply(ApplyCmd::Start, &p, Timestamp(0)).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            Timestamp(0),
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "b".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            Timestamp(0),
+        )
+        .unwrap();
+        let err = store.persist(&ex).await;
+        assert!(err.is_err(), "write lock must BUSY park persist: {err:?}");
+    });
+    locker.execute_batch("ROLLBACK").unwrap();
+    drop(locker);
+    drop(rt);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// WAL reader does not block a park persist (WAL). T is on disk.
+#[test]
+fn reader_lock_does_not_block_park_persist() {
+    let path = tmp();
+    let delay = Duration::from_millis(50);
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    let id = rt.block_on(async {
+        let mut ex = Execution::new(
+            WorkflowDefinition::builder("wf")
+                .node("a", "a")
+                .build()
+                .unwrap(),
+        );
+        let p = RetryPolicy::new(3, delay);
+        ex.apply(ApplyCmd::Start, &p, Timestamp(0)).unwrap();
+        store.persist(&ex).await.unwrap();
+        ex.id().clone()
+    });
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM nodes;")
+        .unwrap();
+    rt.block_on(async {
+        let snap = store.get(&id).await.unwrap().unwrap();
+        let mut ex = Execution::from_snapshot(
+            store.workflow_definition(&id).await.unwrap().unwrap(),
+            snap,
+        )
+        .unwrap();
+        let p = RetryPolicy::new(3, delay);
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            Timestamp(0),
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            Timestamp(0),
+        )
+        .unwrap();
+        store.persist(&ex).await.unwrap();
+        assert!(matches!(
+            store
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&NodeId::new("a"))
+                .unwrap()
+                .state,
+            NodeState::Ready {
+                runnable_at: Some(_)
+            }
+        ));
+    });
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    drop(rt);
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Many park wakes then terminal: WAL stays bounded (checkpoint after COMMIT).
+#[test]
+fn many_park_wakes_wal_stays_bounded() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let clock = Arc::new(FakeClock::new());
+        let hits = Arc::new(AtomicU32::new(0));
+        let h = hits.clone();
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .clock(clock.clone())
+            .policy(RetryPolicy::new(16, Duration::from_millis(1)))
+            .register_fn("a", move |_c: ExecutionContext| {
+                let n = h.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n < 15 {
+                        NodeOutcome::TimedOut
+                    } else {
+                        NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+                    }
+                }
+            })
+            .build();
+        let handle = runtime.start(
+            WorkflowDefinition::builder("wf")
+                .node("a", "a")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        for _ in 0..16 {
+            clock.advance(Duration::from_millis(1));
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    });
+    drop(rt);
+    drop(store);
+    let mut wal = path.clone();
+    let mut s = wal.into_os_string();
+    s.push("-wal");
+    wal = std::path::PathBuf::from(s);
+    let n = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    assert!(n < 2 * 1024 * 1024, "WAL after 16 park wakes: {n}");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&wal);
 }
