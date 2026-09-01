@@ -462,14 +462,57 @@ fn resume_enum_has_no_retry_failed() {
     );
 }
 
-/// Park sleeps on Clock, not wall tokio::time.
+/// Apply is a tick: given `Clock::now()` (or `now: Timestamp`), a node
+/// with `runnable_at: Some(T)` is dispatchable iff `now >= T`. Domain and
+/// scheduler must not wait. Waiting for T is the Runtime drive loop
+/// (`next_drive_event` selects inbox vs `Clock::wait_until(T)`). That is
+/// the one allowed kernel waiter — Drop of the handle cancels the shell
+/// future (RAII). `ctx.sleep` stays on ExecutionContext for executor
+/// bodies (`executor.rs`); it is not used for timeout/backoff.
 #[test]
-fn park_deadline_uses_clock_sleep_not_wall_time() {
-    let src = fs::read_to_string(src_root().join("runtime/park.rs")).unwrap();
-    assert!(src.contains("self.clock.sleep(wait)"));
+fn apply_path_does_not_sleep() {
     assert!(
-        !src.contains("tokio::time::sleep"),
-        "park must not wall-sleep; tests inject Clock"
+        !src_root().join("runtime/park.rs").exists(),
+        "park.rs was the sleeper; wait lives in runtime.rs drive"
+    );
+    for p in rust_files(&src_root().join("domain")) {
+        let s = fs::read_to_string(&p).unwrap();
+        let r = rel(&p);
+        assert!(
+            !contains_word(&s, "sleep"),
+            "{r} must not name sleep; apply is given now"
+        );
+        assert!(
+            !s.contains("Clock::sleep"),
+            "{r} must not call Clock::sleep"
+        );
+        assert!(
+            !s.contains("tokio::time"),
+            "{r} must not import tokio::time"
+        );
+    }
+    let sched = fs::read_to_string(src_root().join("runtime/scheduler.rs")).unwrap();
+    assert!(
+        !contains_word(&sched, "sleep"),
+        "scheduler.rs must not sleep; Runtime drive waits, apply ticks"
+    );
+    assert!(
+        !sched.contains("Clock::sleep"),
+        "scheduler.rs must not call Clock::sleep"
+    );
+    assert!(
+        !sched.contains("tokio::time"),
+        "scheduler.rs must not use tokio::time (cancel-bound wall sleep is Runtime)"
+    );
+
+    let rt = fs::read_to_string(src_root().join("runtime/runtime.rs")).unwrap();
+    assert!(
+        rt.contains("clock.wait_until(when)"),
+        "Runtime drive is the allowed waiter: inbox vs Clock::wait_until(T)"
+    );
+    assert!(
+        rt.contains("async fn next_drive_event"),
+        "wait loop is next_drive_event in runtime.rs, not the scheduler"
     );
 }
 

@@ -93,4 +93,4 @@ skips emit). Callers that need a lease do it outside the kernel. ADR 0004.
 - Default join is `Join::AllSucceeded`. Default `OnFailure` is `FailExecution`.
 - Waiting is a node state. Retry delay is `Ready { runnable_at }` (snapshot Instant T).
 - Persist succeeds, then the sink is told. No persist queue (ADR 0001).
-- Kernel has no cron, no wall timezone, no sqlite timer table. Park is `Clock::sleep`.
+- Kernel has no cron, no wall timezone, no sqlite timer table. Waiting for T is the Runtime drive (`Clock::wait_until`), not the scheduler.

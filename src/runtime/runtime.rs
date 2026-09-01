@@ -1,13 +1,13 @@
 use crate::domain::definition::WorkflowDefinition;
-use crate::domain::ids::{ExecutionId, ExecutorId};
+use crate::domain::ids::{ExecutionId, ExecutorId, NodeId};
 use crate::domain::outcome::NodeOutcome;
 use crate::domain::policy::{AcceptPolicy, Policy};
 use crate::domain::snapshot::SnapshotError;
 use crate::domain::state::{Execution, ExecutionState};
+use crate::domain::time::Timestamp;
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
 use crate::runtime::handle::{ActiveGuard, ExecutionHandle};
-use crate::runtime::inject::{self, Event};
-use crate::runtime::park::ChannelPark;
+use crate::runtime::inject::{self, Event, EventRx, EventTx};
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::sink::{EventSink, NoopSink};
 use crate::runtime::store::{MemoryStore, StateStore, StoreError};
@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::watch;
+use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
 /// `Runtime::start` / `run` rejected the definition before any node ran.
@@ -63,12 +64,94 @@ impl std::fmt::Display for UnregisteredExecutors {
     }
 }
 
-/// Default **wall** time the scheduler waits before aborting execute tasks
-/// that ignore cancel. Not driven by [`Clock`](crate::Clock) — a paused
-/// test clock does not stretch this. Tests that wait for cancel should
-/// budget at least this long; production can override via
+/// Default **wall** time the Runtime drive waits before aborting execute
+/// tasks that ignore cancel. Not driven by [`Clock`](crate::Clock) — a
+/// paused test clock does not stretch this. Tests that wait for cancel
+/// should budget at least this long; production can override via
 /// [`RuntimeBuilder::cancel_bound`].
 pub const DEFAULT_CANCEL_BOUND: Duration = Duration::from_millis(50);
+
+/// Inbox vs snapshot deadline T. This is the only kernel waiter:
+/// domain/scheduler apply given `now` and never sleep. When T is already
+/// due, prefer the inbox (Cancel / Shutdown) so a queued cancel at the
+/// same instant as a due deadline does not dispatch.
+async fn next_drive_event(
+    rx: &mut EventRx,
+    clock: &dyn Clock,
+    next_timer: Option<(Timestamp, NodeId)>,
+) -> Event {
+    match next_timer {
+        Some((when, node_id)) => {
+            let now = clock.now();
+            if when <= now {
+                return match rx.try_recv() {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Event::Shutdown,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Event::Timer { node_id },
+                };
+            }
+            tokio::select! {
+                biased;
+                ev = rx.recv() => ev.unwrap_or(Event::Shutdown),
+                _ = clock.wait_until(when) => Event::Timer { node_id },
+            }
+        }
+        None => rx.recv().await.unwrap_or(Event::Shutdown),
+    }
+}
+
+/// Wall hang-bound sleeper. Dropped when the drive loop exits (Shutdown
+/// or panic) so it cannot wake a dead execution. Not a Clock wait.
+struct CancelBoundGuard {
+    handle: Option<AbortHandle>,
+}
+
+impl CancelBoundGuard {
+    fn new() -> Self {
+        Self { handle: None }
+    }
+
+    fn arm(&mut self, tx: EventTx, bound: Duration) {
+        if self.handle.is_some() {
+            return;
+        }
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(bound).await;
+            let _ = tx.send(Event::ForceCancelBound);
+        });
+        self.handle = Some(handle.abort_handle());
+    }
+}
+
+impl Drop for CancelBoundGuard {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            h.abort();
+        }
+    }
+}
+
+/// Runtime shell: wait (inbox, Clock::wait_until(T)), then tick apply.
+/// Scheduler is not a sleeper.
+async fn drive(
+    mut scheduler: Scheduler,
+    mut rx: EventRx,
+    clock: Arc<dyn Clock>,
+    cancel_bound: Duration,
+    tx: EventTx,
+) {
+    let mut cancel_bound_guard = CancelBoundGuard::new();
+    loop {
+        let timer = scheduler.next_deadline();
+        let event = next_drive_event(&mut rx, clock.as_ref(), timer).await;
+        if matches!(event, Event::Cancel) {
+            cancel_bound_guard.arm(tx.clone(), cancel_bound);
+        }
+        if scheduler.handle_event(event).await {
+            break;
+        }
+    }
+}
 
 /// Runtime bundle. [`OnFailure`](crate::OnFailure) / [`Join`](crate::Join) are
 /// **not** set here — they belong on [`WorkflowDefinition`](crate::WorkflowDefinition).
@@ -99,7 +182,6 @@ impl Runtime {
         let (tx, rx) = inject::channel();
         let (state_tx, state_rx) = watch::channel(ExecutionState::Created);
         let cancel = CancellationToken::new();
-        let park = ChannelPark::new(rx, self.clock.clone());
         let scheduler = Scheduler::new(
             definition,
             self.policy.clone(),
@@ -107,12 +189,10 @@ impl Runtime {
             self.sink.clone(),
             self.registry.clone(),
             self.clock.clone(),
-            park,
             tx.clone(),
             self.concurrency,
             cancel.clone(),
             state_tx,
-            self.cancel_bound,
         );
         let execution_id = scheduler.execution_id();
         // Documented invariant: `ExecutionId::new` is unique on this Runtime.
@@ -121,7 +201,13 @@ impl Runtime {
             .claim_active(&execution_id)
             .expect("ExecutionId::new is unique on this Runtime");
         let _ = tx.send(Event::Start);
-        tokio::spawn(scheduler.run());
+        tokio::spawn(drive(
+            scheduler,
+            rx,
+            self.clock.clone(),
+            self.cancel_bound,
+            tx.clone(),
+        ));
         Ok(ExecutionHandle {
             execution_id,
             tx,
@@ -142,10 +228,7 @@ impl Runtime {
     /// Rebuild from the store snapshot. At-least-once: a node that was Running
     /// is restored Ready and re-invoked (attempt + 1 at dispatch). Succeeded
     /// nodes never re-run. `start` still always creates a new execution.
-    pub async fn resume(
-        &self,
-        execution_id: &ExecutionId,
-    ) -> Result<ExecutionHandle, ResumeError> {
+    pub async fn resume(&self, execution_id: &ExecutionId) -> Result<ExecutionHandle, ResumeError> {
         let Some(active) = self.claim_active(execution_id) else {
             return Err(ResumeError::AlreadyActive);
         };
@@ -177,7 +260,6 @@ impl Runtime {
         let (tx, rx) = inject::channel();
         let (state_tx, state_rx) = watch::channel(exec.state());
         let cancel = CancellationToken::new();
-        let park = ChannelPark::new(rx, self.clock.clone());
         let scheduler = Scheduler::from_execution(
             exec,
             self.policy.clone(),
@@ -185,15 +267,19 @@ impl Runtime {
             self.sink.clone(),
             self.registry.clone(),
             self.clock.clone(),
-            park,
             tx.clone(),
             self.concurrency,
             cancel.clone(),
             state_tx,
-            self.cancel_bound,
         );
         let _ = tx.send(Event::Restore);
-        tokio::spawn(scheduler.run());
+        tokio::spawn(drive(
+            scheduler,
+            rx,
+            self.clock.clone(),
+            self.cancel_bound,
+            tx.clone(),
+        ));
         Ok(ExecutionHandle {
             execution_id: execution_id.clone(),
             tx,
@@ -324,12 +410,8 @@ impl RuntimeBuilder {
 
     pub fn build(self) -> Runtime {
         Runtime {
-            store: self
-                .store
-                .unwrap_or_else(|| Arc::new(MemoryStore::new())),
-            policy: self
-                .policy
-                .unwrap_or_else(|| Arc::new(AcceptPolicy)),
+            store: self.store.unwrap_or_else(|| Arc::new(MemoryStore::new())),
+            policy: self.policy.unwrap_or_else(|| Arc::new(AcceptPolicy)),
             sink: self.sink.unwrap_or_else(|| Arc::new(NoopSink)),
             registry: self.registry,
             clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
@@ -381,5 +463,51 @@ mod tests {
         assert!(poisoned.is_err());
         let handle = rt.start(tiny()).expect("poisoned active set must recover");
         assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn due_deadline_prefers_queued_cancel() {
+        let (tx, mut rx) = inject::channel();
+        let _ = tx.send(Event::Cancel);
+        let ev = next_drive_event(
+            &mut rx,
+            &SystemClock,
+            Some((Timestamp(0), NodeId::new("a"))),
+        )
+        .await;
+        assert!(
+            matches!(ev, Event::Cancel),
+            "inbox must beat due Timer, got {ev:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn due_deadline_empty_inbox_is_timer() {
+        let (_tx, mut rx) = inject::channel();
+        match next_drive_event(
+            &mut rx,
+            &SystemClock,
+            Some((Timestamp(0), NodeId::new("n"))),
+        )
+        .await
+        {
+            Event::Timer { node_id } => assert_eq!(node_id.as_str(), "n"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn due_deadline_disconnected_inbox_is_shutdown() {
+        let (tx, mut rx) = inject::channel();
+        drop(tx);
+        assert!(matches!(
+            next_drive_event(
+                &mut rx,
+                &SystemClock,
+                Some((Timestamp(0), NodeId::new("a")))
+            )
+            .await,
+            Event::Shutdown
+        ));
     }
 }

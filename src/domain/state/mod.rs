@@ -417,8 +417,8 @@ impl Execution {
         self.nodes[slot.0].resume_token.clone()
     }
 
-    /// Next snapshot deadline T (`Ready { runnable_at: Some(T) }`). Park
-    /// sleeps until this Instant. Waiting is not consulted.
+    /// Next snapshot deadline T (`Ready { runnable_at: Some(T) }`). The
+    /// Runtime drive loop waits until this Instant. Waiting is not consulted.
     pub fn next_deadline(&self) -> Option<(Timestamp, NodeId)> {
         self.next_deadline
             .map(|(ts, slot)| (ts, self.definition.id_at(slot).clone()))

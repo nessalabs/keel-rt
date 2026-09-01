@@ -6,13 +6,15 @@ A node is not runnable until Instant **T**. T is `NodeState::Ready { runnable_at
 on the snapshot so crash-resume sees it. Policy (how long, retry/backoff counts)
 stays on `RetryPolicy` / `timeout_after`. Waiting stays HITL. Kernel has no cron,
 no wall timezone, no sqlite timer table. `Event::NodeTimedOut` already exists;
-do not emit `NodeReady`. Drop handle still cancels park sleepers (RAII).
+do not emit `NodeReady`. Drop handle still cancels the Runtime drive waiter (RAII).
 Fail-fast / AND-join defaults unchanged. `Recover::RetryFailed` is not a kernel
 command. Domain and runtime name [`Clock`] only; `FakeClock` lives in
 `src/testing` and `tests/`. sqlite persists whatever the snapshot
-already has (`synchronous=FULL` default). Park prefers the apply inbox when T
-is already due (`try_recv`) so Cancel/Shutdown at the same instant as a due
-deadline does not dispatch. `Timestamp::saturating_add` saturates `Duration`
+already has (`synchronous=FULL` default). Waiting for T is the Runtime drive
+(`inbox` vs `Clock::wait_until`); domain and scheduler apply given `now` and
+do not sleep. The drive prefers the apply inbox when T is already due
+(`try_recv`) so Cancel/Shutdown at the same instant as a due deadline does
+not dispatch. `Timestamp::saturating_add` saturates `Duration`
 millis that do not fit in `u64` (`1<<61` seconds used to wrap to T==now).
 Node JSON omits null optionals; a retry park drops the stale attempt token
 (Waiting still carries the token). MemoryStore no-timer medians stay within

@@ -8,7 +8,8 @@ use tokio::sync::Notify;
 /// Waiting tests do not need a timer; only retry-delay tests call [`FakeClock::advance`].
 ///
 /// [`Self::live_sleeps`] counts in-flight [`Clock::sleep`](crate::Clock::sleep)
-/// futures (park + executor Delay). Drop of the handle must bring this to 0.
+/// futures (Runtime `wait_until` + executor Delay). Drop of the handle
+/// must bring this to 0.
 #[derive(Debug)]
 pub struct FakeClock {
     now: Mutex<Timestamp>,
@@ -27,8 +28,9 @@ impl FakeClock {
         }
     }
 
-    /// In-flight [`Clock::sleep`](crate::Clock::sleep) futures. Park and
-    /// `timeout_after` / Delay each hold one until the sleeper is dropped.
+    /// In-flight [`Clock::sleep`](crate::Clock::sleep) futures. Runtime
+    /// `wait_until` and `timeout_after` / Delay each hold one until the
+    /// sleeper is dropped.
     pub fn live_sleeps(&self) -> usize {
         self.live_sleeps.load(Ordering::SeqCst)
     }

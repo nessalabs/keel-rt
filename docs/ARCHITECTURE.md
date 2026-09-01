@@ -18,10 +18,9 @@ src/domain/          rules. No tokio, no runtime, no std::net.
   time.rs            Timestamp value object
 
 src/runtime/         bundle. May import domain. Never imported by domain.
-  runtime.rs         Runtime / RuntimeBuilder / StartError / ResumeError
-  scheduler.rs       event loop: apply → dispatch → persist → emit. No policy rules.
+  runtime.rs         Runtime / RuntimeBuilder / drive wait (inbox vs Clock::wait_until)
+  scheduler.rs       apply → dispatch → persist → emit. Given now; does not wait.
   spawn.rs           one tokio::spawn per execute; completions are Events
-  park.rs            wait for Event or snapshot deadline T (Clock)
   inject.rs          Event + unbounded mpsc (see docs/adr/0001)
   handle.rs          ExecutionHandle; Drop cancels; not Clone
   executor.rs        Executor port, FunctionExecutor, ExecutionContext
@@ -66,7 +65,6 @@ flowchart TB
     Rrt[runtime]
     Rsched[scheduler]
     Rspawn[spawn]
-    Rpark[park]
     Rinj[inject]
     Rhandle[handle]
     Rexec[executor]
@@ -96,7 +94,7 @@ flowchart TB
 
 ### (b) Public run-loop types
 
-Ports are traits. `Scheduler` / `Park` / `inject::Event` are crate-private and
+Ports are traits. `Scheduler` / `inject::Event` are crate-private and
 stay off this diagram.
 
 ```mermaid
@@ -169,6 +167,7 @@ classDiagram
     <<trait>>
     +now() Timestamp
     +sleep(Duration)
+    +wait_until(Timestamp)
   }
   class Event {
     <<enum>>
@@ -236,7 +235,7 @@ edit `scheduler.rs`.
 |----------------------------------------------|--------------------------------------------|---------------------------|
 | AND-join / AllDone readiness                 | `definition` + `apply` remain-pred         | scheduler                 |
 | Fail-fast / FailSubtree                      | `definition` (opt-in) + `apply`            | `RuntimeBuilder`          |
-| Retry / reject Waiting                       | a `Policy` impl                            | readiness / park          |
+| Retry / reject Waiting                       | a `Policy` impl                            | readiness / Runtime drive |
 | User work / sleep                            | `Executor` / `ExecutionContext`            | `apply`                   |
 | Persist / dirty slots                        | `StateStore` / `MemoryStore`               | scheduler policy          |
 | File-backed store                            | `crates/keel-rt-sqlite`                    | `scheduler.rs` / kernel `Cargo.toml` |
@@ -269,12 +268,15 @@ edit `scheduler.rs`.
   handle ops; they must not block on apply. Persist is inline, not a queue.
 - **Retry:** `RetryPolicy::max_attempts` is the only retry bound. Delay is Instant
   **T** on `Ready { runnable_at: Some(T) }`, not a wait state and not a sqlite
-  timer row. Resume restores T; if `Clock.now() < T` the scheduler parks
-  (`Clock::sleep`). If `now() >= T`, `RetryDue` then dispatch (or TimedOut
-  when policy Accepts). FakeClock in tests. Drop of the handle aborts the sleeper.
-- **Cancel hang:** `cancel_bound` is **wall** time (`tokio::time::sleep`), not
-  `Clock`. FakeClock does not stretch it. The sleeper is an `AbortHandle` on
-  the scheduler and is aborted in `Drop` (no wake into a dead execution).
+  timer row. Resume restores T. Apply is given `now`: dispatchable iff
+  `now >= T`. If `now < T` the Runtime drive waits (`Clock::wait_until`).
+  If `now >= T`, `RetryDue` then dispatch (or TimedOut when policy Accepts).
+  Tests inject Clock at the Runtime builder. Drop of the handle cancels the
+  drive waiter (RAII).
+- **Cancel hang:** `cancel_bound` is **wall** time (`tokio::time::sleep` in
+  the Runtime drive), not `Clock`. A paused test clock does not stretch it.
+  The sleeper is an `AbortHandle` on the drive loop and is aborted when the
+  drive exits (no wake into a dead execution).
   `SpawnSet` Drop aborts leftover execute tasks (JoinSet, not detach).
 - **Permits:** held only while a node is `Running`. Waiting releases. Inspect
   via [`ExecutionSnapshot::running_count`] / [`waiting_count`].
