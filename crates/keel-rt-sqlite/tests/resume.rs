@@ -8,7 +8,7 @@ use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
     AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionId, ExecutionSnapshot,
     ExecutionState, Join, NodeId, NodeOutcome, NodeState, OnFailure, Resume, ResumeError,
-    RetryPolicy, Runtime, SCHEMA_VERSION, StateStore, StoreError, Timestamp, WorkflowDefinition,
+    RetryPolicy, Runtime, StateStore, StoreError, Timestamp, WorkflowDefinition, SCHEMA_VERSION,
 };
 use keel_rt_sqlite::SqliteStore;
 use std::path::PathBuf;
@@ -31,7 +31,12 @@ fn current_rt() -> tokio::runtime::Runtime {
         .expect("current_thread runtime")
 }
 
-async fn wait_node(store: &SqliteStore, id: &ExecutionId, node: &str, pred: impl Fn(&NodeState) -> bool) {
+async fn wait_node(
+    store: &SqliteStore,
+    id: &ExecutionId,
+    node: &str,
+    pred: impl Fn(&NodeState) -> bool,
+) {
     tokio::time::timeout(BOUND, async {
         loop {
             if let Some(snap) = store.get(id).await.unwrap() {
@@ -142,8 +147,10 @@ fn crash_diamond_join_runs_writer_once() {
                 .unwrap();
             let handle = runtime.start(def).unwrap();
             let id = handle.execution_id().clone();
-            wait_node(&store, &id, "crit", |s| matches!(s, NodeState::Running { .. }))
-                .await;
+            wait_node(&store, &id, "crit", |s| {
+                matches!(s, NodeState::Running { .. })
+            })
+            .await;
             std::mem::forget(handle);
             drop(runtime);
             id
@@ -274,7 +281,12 @@ fn crash_during_retry_delay_does_not_fire_early() {
             let handle = runtime.start(def).unwrap();
             let id = handle.execution_id().clone();
             wait_node(&store, &id, "a", |s| {
-                matches!(s, NodeState::Ready { runnable_at: Some(_) })
+                matches!(
+                    s,
+                    NodeState::Ready {
+                        runnable_at: Some(_)
+                    }
+                )
             })
             .await;
             std::mem::forget(handle);
@@ -394,8 +406,10 @@ fn crash_fail_subtree_pages_stay_failed() {
             let handle = runtime.start(def).unwrap();
             let id = handle.execution_id().clone();
             wait_node(&store, &id, "p1", |s| matches!(s, NodeState::Failed)).await;
-            wait_node(&store, &id, "p2", |s| matches!(s, NodeState::Running { .. }))
-                .await;
+            wait_node(&store, &id, "p2", |s| {
+                matches!(s, NodeState::Running { .. })
+            })
+            .await;
             std::mem::forget(handle);
             drop(runtime);
             id
@@ -538,8 +552,14 @@ fn crash_after_terminal_cas_before_emit_keeps_terminal() {
         let p = AcceptPolicy;
         let now = Timestamp(0);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -640,8 +660,14 @@ fn two_runtimes_same_file_are_not_fenced() {
     let p = AcceptPolicy;
     let now = Timestamp(0);
     ex.apply(ApplyCmd::Start, &p, now).unwrap();
-    ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-        .unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "a".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
     let rt = current_rt();
     rt.block_on(async {
         store_a.persist(&ex).await.unwrap();
@@ -733,8 +759,14 @@ fn fat_bytes_sqlite_round_trip_preserves_bytes() {
     let p = AcceptPolicy;
     let now = Timestamp(0);
     ex.apply(ApplyCmd::Start, &p, now).unwrap();
-    ex.apply(ApplyCmd::StartNode { node_id: "fat".into() }, &p, now)
-        .unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "fat".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
     ex.apply(
         ApplyCmd::FinishNode {
             node_id: "fat".into(),
@@ -808,8 +840,10 @@ fn crash_hourglass_neck_running_resume_runs_sinks_not_sources() {
                 .build();
             let handle = runtime.start(hourglass_def(n)).unwrap();
             let id = handle.execution_id().clone();
-            wait_node(&store, &id, "neck", |s| matches!(s, NodeState::Running { .. }))
-                .await;
+            wait_node(&store, &id, "neck", |s| {
+                matches!(s, NodeState::Running { .. })
+            })
+            .await;
             std::mem::forget(handle);
             drop(runtime);
             id
@@ -841,7 +875,11 @@ fn crash_hourglass_neck_running_resume_runs_sinks_not_sources() {
             .build();
         let handle = runtime.resume(&id).await.unwrap();
         assert_eq!(handle.wait().await, ExecutionState::Succeeded);
-        assert_eq!(src_runs.load(Ordering::SeqCst), 0, "sources already succeeded");
+        assert_eq!(
+            src_runs.load(Ordering::SeqCst),
+            0,
+            "sources already succeeded"
+        );
         assert_eq!(sink_runs.load(Ordering::SeqCst), n as u32);
     });
     let _ = std::fs::remove_file(&path);
@@ -941,8 +979,12 @@ fn concurrent_persist_two_executions_same_file_no_panic() {
         let rt = current_rt();
         rt.block_on(store_b.persist(&ex_b))
     });
-    let ra = ha.join().expect("writer A panicked (SQLITE_BUSY must be typed)");
-    let rb = hb.join().expect("writer B panicked (SQLITE_BUSY must be typed)");
+    let ra = ha
+        .join()
+        .expect("writer A panicked (SQLITE_BUSY must be typed)");
+    let rb = hb
+        .join()
+        .expect("writer B panicked (SQLITE_BUSY must be typed)");
     let store = SqliteStore::open(&path).unwrap();
     let rt = current_rt();
     rt.block_on(async {
@@ -956,8 +998,7 @@ fn concurrent_persist_two_executions_same_file_no_panic() {
                 }
                 Err(StoreError::Message(m)) => {
                     assert!(
-                        m.to_lowercase().contains("locked")
-                            || m.to_lowercase().contains("busy"),
+                        m.to_lowercase().contains("locked") || m.to_lowercase().contains("busy"),
                         "unexpected persist error: {m}"
                     );
                 }
@@ -1038,7 +1079,11 @@ fn incremental_persist_256_wide_succeeded_does_not_drop_pending() {
     let rt = current_rt();
     rt.block_on(async {
         let snap = store.get(&id).await.unwrap().unwrap();
-        assert_eq!(snap.nodes.len(), n + 2, "256 Pending workers must still be rows");
+        assert_eq!(
+            snap.nodes.len(),
+            n + 2,
+            "256 Pending workers must still be rows"
+        );
         assert!(matches!(
             snap.node(&NodeId::new("ok")).unwrap().state,
             NodeState::Succeeded
@@ -1067,7 +1112,10 @@ fn incremental_persist_256_wide_succeeded_does_not_drop_pending() {
             })
             .build();
         let handle = runtime.resume(&id).await.unwrap();
-        wait_node(&store, &id, "hold", |s| matches!(s, NodeState::Running { .. })).await;
+        wait_node(&store, &id, "hold", |s| {
+            matches!(s, NodeState::Running { .. })
+        })
+        .await;
         for i in 0..n {
             let st = store
                 .get(&id)
@@ -1100,10 +1148,7 @@ impl StateStore for FailFirstTerminal {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
         self.inner.put(snapshot).await
     }
-    async fn get(
-        &self,
-        id: &ExecutionId,
-    ) -> Result<Option<ExecutionSnapshot>, StoreError> {
+    async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         self.inner.get(id).await
     }
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
@@ -1155,13 +1200,14 @@ fn transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded() {
                         NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
                     })
                     .build();
-                let handle = runtime.start(
-                    WorkflowDefinition::builder("wf")
-                        .node("a", "a")
-                        .build()
-                        .unwrap(),
-                )
-                .unwrap();
+                let handle = runtime
+                    .start(
+                        WorkflowDefinition::builder("wf")
+                            .node("a", "a")
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
                 let id = handle.execution_id().clone();
                 assert_eq!(handle.wait().await, ExecutionState::Succeeded);
                 drop(runtime);
@@ -1220,10 +1266,7 @@ impl StateStore for FailFirstCancel {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
         self.inner.put(snapshot).await
     }
-    async fn get(
-        &self,
-        id: &ExecutionId,
-    ) -> Result<Option<ExecutionSnapshot>, StoreError> {
+    async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         self.inner.get(id).await
     }
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
@@ -1267,13 +1310,14 @@ fn transient_cancel_persist_err_shutdown_flushes_sqlite_cancelled() {
                 .store(store)
                 .register(ScriptedExecutor::new("a").hang(false))
                 .build();
-            let handle = runtime.start(
-                WorkflowDefinition::builder("wf")
-                    .node("a", "a")
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("a", "a")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
             let id = handle.execution_id().clone();
             wait_node(&inner, &id, "a", |s| matches!(s, NodeState::Running { .. })).await;
             drop(handle);
@@ -1320,10 +1364,7 @@ impl StateStore for FailFirstTwoTerminal {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
         self.inner.put(snapshot).await
     }
-    async fn get(
-        &self,
-        id: &ExecutionId,
-    ) -> Result<Option<ExecutionSnapshot>, StoreError> {
+    async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         self.inner.get(id).await
     }
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
@@ -1681,6 +1722,262 @@ fn checkpoint_busy_after_commit_is_persist_ok_and_resume_sees_succeeded() {
             .build();
         let handle = runtime.resume(&id).await.unwrap();
         assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Phase 5: `SqliteStore::open` is FULL. Crash while parked on T; reopen;
+/// deadline is still on the snapshot; FakeClock must advance to dispatch.
+#[test]
+fn crash_resume_full_file_keeps_deadline() {
+    let path = tmp();
+    let clock = Arc::new(FakeClock::new());
+    let delay = Duration::from_millis(50);
+    let (id, t) = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let out = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .clock(clock.clone())
+                .policy(RetryPolicy::new(3, delay))
+                .register_fn("a", |_c: ExecutionContext| async { NodeOutcome::TimedOut })
+                .build();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("a", "a")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            let id = handle.execution_id().clone();
+            wait_node(&store, &id, "a", |s| {
+                matches!(
+                    s,
+                    NodeState::Ready {
+                        runnable_at: Some(_)
+                    }
+                )
+            })
+            .await;
+            let t = match store
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&NodeId::new("a"))
+            {
+                Some(n) => match n.state {
+                    NodeState::Ready {
+                        runnable_at: Some(at),
+                    } => at,
+                    other => panic!("{other:?}"),
+                },
+                None => panic!("missing node"),
+            };
+            std::mem::forget(handle);
+            drop(runtime);
+            (id, t)
+        });
+        drop(rt);
+        drop(store);
+        out
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let snap = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            snap.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(t)
+            },
+            "FULL file must keep snapshot T"
+        );
+        let fired = Arc::new(AtomicU32::new(0));
+        let f = fired.clone();
+        let runtime = Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .policy(RetryPolicy::new(3, delay))
+            .register_fn("a", move |_c: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "must wait for T");
+        clock.advance(delay);
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Hunt: persist T, reopen, T still there (not dropped). Resume with now >= T
+/// dispatches once, not twice.
+#[test]
+fn sqlite_deadline_persist_does_not_drop_or_double_fire() {
+    let path = tmp();
+    let delay = Duration::from_millis(50);
+    let (id, t) = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let out = rt.block_on(async {
+            let mut ex = Execution::new(
+                WorkflowDefinition::builder("wf")
+                    .node("a", "a")
+                    .build()
+                    .unwrap(),
+            );
+            let p = RetryPolicy::new(3, delay);
+            let now = Timestamp(0);
+            ex.apply(ApplyCmd::Start, &p, now).unwrap();
+            ex.apply(
+                ApplyCmd::StartNode {
+                    node_id: "a".into(),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: "a".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::TimedOut),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+            let t = match &ex.node(&NodeId::new("a")).unwrap().state {
+                NodeState::Ready {
+                    runnable_at: Some(at),
+                } => *at,
+                other => panic!("{other:?}"),
+            };
+            store.persist(&ex).await.unwrap();
+            (ex.id().clone(), t)
+        });
+        drop(rt);
+        drop(store);
+        out
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let clock = Arc::new(FakeClock::new());
+    clock.set(t);
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let rt = current_rt();
+    rt.block_on(async {
+        let snap = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            snap.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(t)
+            },
+            "reopen must not drop T"
+        );
+        let runtime = Runtime::builder()
+            .store(store)
+            .clock(clock)
+            .policy(RetryPolicy::new(3, delay))
+            .register_fn("a", move |_c: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "due T must not double-run");
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Crash after TimedOut+Retry persisted, before dispatch: same as delay park.
+#[test]
+fn crash_after_timeout_persisted_before_dispatch_does_not_double_run() {
+    let path = tmp();
+    let clock = Arc::new(FakeClock::new());
+    let delay = Duration::from_millis(80);
+    let id = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let id = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .clock(clock.clone())
+                .policy(RetryPolicy::new(2, delay))
+                .register(
+                    ScriptedExecutor::new("a")
+                        .timeout()
+                        .succeed(Bytes::from_static(b"ok")),
+                )
+                .build();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("a", "a")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            let id = handle.execution_id().clone();
+            wait_node(&store, &id, "a", |s| {
+                matches!(
+                    s,
+                    NodeState::Ready {
+                        runnable_at: Some(_)
+                    }
+                )
+            })
+            .await;
+            std::mem::forget(handle);
+            drop(runtime);
+            id
+        });
+        drop(rt);
+        drop(store);
+        id
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let attempts = Arc::new(AtomicU32::new(0));
+    let a = attempts.clone();
+    let rt = current_rt();
+    rt.block_on(async {
+        let snap = store.get(&id).await.unwrap().unwrap();
+        assert!(
+            matches!(
+                snap.node(&NodeId::new("a")).unwrap().state,
+                NodeState::Ready {
+                    runnable_at: Some(_)
+                }
+            ),
+            "timeout persisted as Ready {{ T }}, not Waiting/TimedOut yet"
+        );
+        let runtime = Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .policy(RetryPolicy::new(2, delay))
+            .register_fn("a", move |c: ExecutionContext| {
+                a.fetch_add(1, Ordering::SeqCst);
+                let attempt = c.attempt;
+                async move {
+                    assert_eq!(attempt, 2, "no extra attempts invented");
+                    NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+                }
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        clock.advance(delay);
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     });
     let _ = std::fs::remove_file(&path);
 }

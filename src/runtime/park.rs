@@ -1,10 +1,11 @@
+use crate::domain::ids::NodeId;
 use crate::runtime::inject::{Event, EventRx};
 use crate::runtime::time::{Clock, Timestamp};
-use crate::domain::ids::NodeId;
 use std::sync::Arc;
 
-/// Waits for the next injected event or a retry deadline.
+/// Waits for the next injected event or a snapshot deadline T.
 /// Tests pass a [`Clock`] (FakeClock) so they do not need a real timer driver.
+/// `when <= now` returns [`Event::Timer`] immediately (no wall sleep).
 pub(crate) struct ChannelPark {
     rx: EventRx,
     clock: Arc<dyn Clock>,

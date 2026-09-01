@@ -13,9 +13,19 @@ use thiserror::Error;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeState {
     Pending,
-    Ready { runnable_at: Option<Timestamp> },
-    Running { attempt: u32 },
-    Waiting { token: ResumeToken, attempt: u32 },
+    /// Dispatchable now (`runnable_at: None`) or parked until Instant **T**
+    /// (`Some(T)`). T is the snapshot deadline for retry backoff (and any
+    /// other "not runnable until T" policy). Waiting is HITL, not a timer.
+    Ready {
+        runnable_at: Option<Timestamp>,
+    },
+    Running {
+        attempt: u32,
+    },
+    Waiting {
+        token: ResumeToken,
+        attempt: u32,
+    },
     Succeeded,
     Failed,
     Cancelled,
@@ -176,11 +186,22 @@ pub enum ApplyError {
 #[derive(Clone, Debug)]
 pub enum ApplyCmd {
     Start,
-    StartNode { node_id: NodeId },
-    FinishNode { node_id: NodeId, attempt: u32, outcome: Result<NodeOutcome, String> },
-    Resume { token: ResumeToken, resume: Resume },
+    StartNode {
+        node_id: NodeId,
+    },
+    FinishNode {
+        node_id: NodeId,
+        attempt: u32,
+        outcome: Result<NodeOutcome, String>,
+    },
+    Resume {
+        token: ResumeToken,
+        resume: Resume,
+    },
     Cancel,
-    RetryDue { node_id: NodeId },
+    RetryDue {
+        node_id: NodeId,
+    },
     ForceCancelRunning,
 }
 
@@ -390,7 +411,8 @@ impl Execution {
         self.nodes[slot.0].resume_token.clone()
     }
 
-    /// Next retry deadline. Maintained when a node enters `Ready { runnable_at: Some }`.
+    /// Next snapshot deadline T (`Ready { runnable_at: Some(T) }`). Park
+    /// sleeps until this Instant. Waiting is not consulted.
     pub fn next_deadline(&self) -> Option<(Timestamp, NodeId)> {
         self.next_deadline
             .map(|(ts, slot)| (ts, self.definition.id_at(slot).clone()))
@@ -538,8 +560,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -554,8 +582,14 @@ mod tests {
             ex.node(&NodeId::new("c")).unwrap().state,
             NodeState::Pending
         ));
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "b".into(),
@@ -584,8 +618,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex
             .apply(
                 ApplyCmd::FinishNode {
@@ -637,10 +677,22 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex
             .apply(
                 ApplyCmd::FinishNode {
@@ -668,8 +720,14 @@ mod tests {
         let now = Timestamp(1000);
         let p = RetryPolicy::new(3, Duration::from_millis(50));
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -707,8 +765,14 @@ mod tests {
         let now = Timestamp(0);
         let p = BadPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -731,8 +795,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex
             .node(&NodeId::new("a"))
             .unwrap()
@@ -785,8 +855,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex
             .node(&NodeId::new("a"))
             .unwrap()
@@ -837,8 +913,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -849,10 +931,22 @@ mod tests {
             now,
         )
         .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "c".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "c".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex
             .apply(
                 ApplyCmd::FinishNode {
@@ -904,8 +998,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -920,8 +1020,14 @@ mod tests {
             ex.node(&NodeId::new("j")).unwrap().state,
             NodeState::Pending
         ));
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "b".into(),
@@ -937,7 +1043,9 @@ mod tests {
             NodeState::Ready { .. }
         ));
         assert_eq!(ex.inputs_for(&NodeId::new("j")).len(), 1);
-        assert!(!ex.inputs_for(&NodeId::new("j")).contains_key(&NodeId::new("a")));
+        assert!(!ex
+            .inputs_for(&NodeId::new("j"))
+            .contains_key(&NodeId::new("a")));
     }
 
     #[test]
@@ -952,11 +1060,23 @@ mod tests {
         assert!(ex.attempt(&NodeId::new("ghost")).is_none());
         assert!(ex.resume_token(&NodeId::new("ghost")).is_none());
         let pending = ex
-            .apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .apply(
+                ApplyCmd::StartNode {
+                    node_id: "b".into(),
+                },
+                &p,
+                now,
+            )
             .unwrap_err();
         assert!(matches!(pending, ApplyError::Illegal(_)));
         let unknown = ex
-            .apply(ApplyCmd::StartNode { node_id: "ghost".into() }, &p, now)
+            .apply(
+                ApplyCmd::StartNode {
+                    node_id: "ghost".into(),
+                },
+                &p,
+                now,
+            )
             .unwrap_err();
         assert!(matches!(unknown, ApplyError::UnknownNode(_)));
         ex.apply(ApplyCmd::Cancel, &p, now).unwrap();
@@ -975,8 +1095,14 @@ mod tests {
         let p = RetryPolicy::new(3, std::time::Duration::from_millis(10));
         let now = Timestamp(0);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -996,7 +1122,13 @@ mod tests {
         ex.apply(ApplyCmd::Cancel, &p, now).unwrap();
         let rev = ex.revision();
         let effect = ex
-            .apply(ApplyCmd::RetryDue { node_id: "a".into() }, &p, Timestamp(10))
+            .apply(
+                ApplyCmd::RetryDue {
+                    node_id: "a".into(),
+                },
+                &p,
+                Timestamp(10),
+            )
             .unwrap();
         assert!(!effect.changed);
         assert_eq!(ex.revision(), rev);
@@ -1027,8 +1159,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex.apply(ApplyCmd::ForceCancelRunning, &p, now).unwrap();
         let a = ex.definition.slot(&NodeId::new("a")).unwrap();
         assert_eq!(effect.to_abort, vec![a]);
@@ -1054,10 +1192,22 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -1101,10 +1251,22 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -1139,8 +1301,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -1171,8 +1339,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -1195,8 +1369,14 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, ApplyError::ConflictingComplete);
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "b".into(),
@@ -1218,7 +1398,10 @@ mod tests {
             now,
         )
         .unwrap();
-        assert_eq!(ex.revision, rev, "equivalent complete after Succeeded is a no-op");
+        assert_eq!(
+            ex.revision, rev,
+            "equivalent complete after Succeeded is a no-op"
+        );
         let err = ex
             .apply(
                 ApplyCmd::Resume {
@@ -1249,8 +1432,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -1284,8 +1473,14 @@ mod tests {
         let now = Timestamp(0);
         let p = RetryPolicy::new(3, Duration::ZERO);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex
             .apply(
                 ApplyCmd::FinishNode {

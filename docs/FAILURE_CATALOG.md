@@ -237,6 +237,9 @@ exactly-once must make the executor idempotent.
 | `ctx.sleep` uses public Clock | FakeClock sleep, not wall | `ctx_sleep_uses_public_clock` | Clock port |
 | Clock not advancing | retry stays attempt 1 across yields | `paused_clock_retry_does_not_busy_spin` | park on Notify |
 | FakeClock lost-wake | sleep still completes | `sleep_does_not_lose_advance_notify` | subscribe-before-check |
+| Crash while parked on T | restore same `runnable_at`; advance FakeClock to fire | `start_timeout_retry_crash_during_backoff_resume_advance_succeeds` `crash_resume_full_file_keeps_deadline` | snapshot T |
+| Due T on resume | dispatch once, not twice | `persisted_deadline_already_due_on_resume_runs_once_not_twice` `sqlite_deadline_persist_does_not_drop_or_double_fire` | RetryDue + park |
+| Cancel during parked T | Cancelled; live_sleeps == 0 | `cancel_during_parked_deadline_is_cancelled_sleeper_dropped` | RAII Drop |
 
 ## Ids / snapshots / Display
 

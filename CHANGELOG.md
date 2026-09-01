@@ -1,5 +1,16 @@
 # Changelog
 
+## Phase 5 snapshot deadlines (`phase-5/timers`)
+
+A node is not runnable until Instant **T**. T is `NodeState::Ready { runnable_at: Some(T) }`
+on the snapshot so crash-resume sees it. Policy (how long, retry/backoff counts)
+stays on `RetryPolicy` / `timeout_after`. Waiting stays HITL. Kernel has no cron,
+no wall timezone, no sqlite timer table. `Event::NodeTimedOut` already exists;
+do not emit `NodeReady`. Drop handle still cancels park sleepers (RAII).
+Fail-fast / AND-join defaults unchanged. `Recover::RetryFailed` is not a kernel
+command. FakeClock drives timer tests. sqlite persists whatever the snapshot
+already has (`synchronous=FULL` default).
+
 ## Phase 3 events (`phase-3/events`)
 
 Public surface is [`Event`] + [`EventSink`] only (no `EventLog`). Variants:

@@ -48,8 +48,8 @@ fn chaos_log_names_the_standing_pack() {
     ] {
         assert!(log.contains(name), "CHAOS_LOG missing {name}");
     }
-    let chaos = fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/chaos.rs")
-        .unwrap();
+    let chaos =
+        fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/chaos.rs").unwrap();
     for name in [
         "fn two_thousand_short_jobs_one_file",
         "fn wide_256_resume_under_concurrent_starts_is_sqlite_bound",
@@ -57,15 +57,39 @@ fn chaos_log_names_the_standing_pack() {
     ] {
         assert!(chaos.contains(name), "chaos.rs missing {name}");
     }
-    let inject = fs::read_to_string(
-        env!("CARGO_MANIFEST_DIR").to_string() + "/tests/crash_inject.rs",
-    )
-    .unwrap();
+    let inject =
+        fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/crash_inject.rs")
+            .unwrap();
     for name in [
         "fn randomized_crash_inject_sqlite",
         "fn clock_jump_backward_after_runnable_at_persist_does_not_fire",
         "fn non_terminal_ready_delay_persist_err_then_crash_skips_uncommitted_delay",
     ] {
         assert!(inject.contains(name), "crash_inject.rs missing {name}");
+    }
+}
+
+#[test]
+fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
+    let lib = fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/src/lib.rs").unwrap();
+    assert!(
+        !lib.contains("CREATE TABLE") || !lib.to_lowercase().contains("create table timers"),
+        "sqlite must not grow a timer table; T lives on the snapshot"
+    );
+    assert!(!lib.contains("CREATE TABLE IF NOT EXISTS timers"));
+    for table in ["executions", "nodes", "definitions", "events"] {
+        assert!(
+            lib.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")),
+            "expected table {table}"
+        );
+    }
+    let resume =
+        fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/resume.rs").unwrap();
+    for name in [
+        "fn crash_resume_full_file_keeps_deadline",
+        "fn sqlite_deadline_persist_does_not_drop_or_double_fire",
+        "fn crash_after_timeout_persisted_before_dispatch_does_not_double_run",
+    ] {
+        assert!(resume.contains(name), "resume.rs missing {name}");
     }
 }

@@ -26,7 +26,12 @@ Sqlite adapter lines are not kernel `src/`.
 |---|---|---|
 | Crash, 1 of N parallel nodes Running; resume; AND-join once | writer runs once; succeeded side skipped | `test: crash_diamond_join_runs_writer_once` `test: resume_diamond_join_waits_for_both_sides` |
 | Crash during Waiting | same `ResumeToken`; node does not re-run | `test: crash_while_waiting_keeps_the_same_token` `test: resume_keeps_waiting_token` |
-| Crash during retry delay | stays `Ready { runnable_at }`; FakeClock must advance | `test: crash_during_retry_delay_does_not_fire_early` `test: resume_retry_ready_does_not_fire_before_deadline` |
+| Crash during retry delay | stays `Ready { runnable_at }`; FakeClock must advance | `test: crash_during_retry_delay_does_not_fire_early` `test: resume_retry_ready_does_not_fire_before_deadline` `test: start_timeout_retry_crash_during_backoff_resume_advance_succeeds` `test: crash_resume_full_file_keeps_deadline` |
+| Crash after timeout persisted, before retry dispatch | T still on snapshot; resume does not double-run | `test: crash_after_timeout_persisted_before_dispatch_does_not_double_run` `test: crash_after_accept_timeout_persisted_resume_stays_timed_out` |
+| Backoff retry survives crash | same attempt policy; no extra attempts | `test: backoff_retry_survives_crash_same_attempt_policy` |
+| Cancel / Drop during parked deadline | Cancelled; FakeClock sleeper dropped | `test: cancel_during_parked_deadline_is_cancelled_sleeper_dropped` `test: drop_handle_during_parked_deadline_cancels_sleeper` `test: cancel_ready_with_future_deadline_does_not_start_later` |
+| Persist of deadline drop / double-fire | T round-trips; due-on-resume dispatches once | `test: sqlite_deadline_persist_does_not_drop_or_double_fire` `test: persisted_deadline_already_due_on_resume_runs_once_not_twice` |
+| Crash during timeout (Running + FakeClock Delay) | re-invoke; advance FakeClock → TimedOut | `test: start_arm_timeout_crash_before_fire_resume_advance_is_timed_out` |
 | Crash after terminal persist | terminal kept; succeeded/failed nodes do not re-run | `test: process_restart_is_new_runtime_same_file` `test: crash_after_fail_fast_stays_failed` |
 | `resume` while first resume still live, concurrent | one `Ok`, one `AlreadyActive` | `test: concurrent_resume_same_id_one_already_active` `test: concurrent_resume_same_runtime_one_already_active` `test: resume_of_live_start_is_already_active` `test: resume_twice_live_is_already_active` |
 | Two Runtimes, one sqlite file | **no process fence**; both may re-invoke. CAS: stale put loses | `test: two_runtimes_same_file_are_not_fenced` `test: stale_put_does_not_clobber` `test: stale_put_loses_on_memory_store` |
@@ -83,5 +88,6 @@ a stale `put`; the loser’s in-memory apply is not rolled back (persist fail
 skips emit). Callers that need a lease do it outside the kernel. ADR 0004.
 
 - Default join is `Join::AllSucceeded`. Default `OnFailure` is `FailExecution`.
-- Waiting is a node state. Retry delay is `Ready { runnable_at }`.
+- Waiting is a node state. Retry delay is `Ready { runnable_at }` (snapshot Instant T).
 - Persist succeeds, then the sink is told. No persist queue (ADR 0001).
+- Kernel has no cron, no wall timezone, no sqlite timer table. Park is `Clock::sleep`.

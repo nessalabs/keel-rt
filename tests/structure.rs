@@ -84,21 +84,15 @@ fn domain_imports_nothing_outward() {
             "{r} must not import tokio"
         );
         assert!(!s.contains("std::net"), "{r} must not import std::net");
-        assert!(
-            !s.contains("crate::runtime"),
-            "{r} must not import runtime"
-        );
-        assert!(
-            !s.contains("crate::testing"),
-            "{r} must not import testing"
-        );
+        assert!(!s.contains("crate::runtime"), "{r} must not import runtime");
+        assert!(!s.contains("crate::testing"), "{r} must not import testing");
     }
 }
 
 #[test]
 fn kernel_src_has_no_storage_engine() {
-    let cargo = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .unwrap();
+    let cargo =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
     let deps = cargo.split("[dev-dependencies]").next().unwrap_or(&cargo);
     for word in ["rusqlite", "postgres", "tokio_postgres", "sqlx"] {
         assert!(
@@ -222,7 +216,9 @@ fn pr_template_and_agents_require_architecture_and_behavior() {
     assert!(tmpl.contains("## Architecture (before)"));
     assert!(tmpl.contains("## Architecture (after)"));
     assert!(tmpl.contains("## User behavior (when X, used to Y, now Z)"));
-    for verb in ["start", "wait", "cancel", "resume", "fail", "retry", "inspect"] {
+    for verb in [
+        "start", "wait", "cancel", "resume", "fail", "retry", "inspect",
+    ] {
         assert!(tmpl.contains(verb), "template missing {verb}");
     }
 
@@ -293,6 +289,10 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "test job must run the events pack"
     );
     assert!(
+        ci.contains("--test timers"),
+        "test job must run the Phase 5 timers pack"
+    );
+    assert!(
         ci.contains("scripts/pr_body_gate.py"),
         "pr-body job must run the description gate"
     );
@@ -328,6 +328,9 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "equal_revision_persist_does_not_grow_event_rows",
         "checkpoint_busy_after_terminal_commit_does_not_duplicate_events",
         "randomized_crash_inject_sqlite",
+        "crash_resume_full_file_keeps_deadline",
+        "persisted_deadline_already_due_on_resume_runs_once_not_twice",
+        "cancel_during_parked_deadline_is_cancelled_sleeper_dropped",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
@@ -440,5 +443,43 @@ fn pr_body_gate_script_enforces_mermaid_behavior_and_main_base() {
     assert!(
         readme.contains("GitHub is not the kernel"),
         "README must say GitHub is not the kernel"
+    );
+}
+
+/// Phase 5: HITL resume is Complete/Reinvoke. RetryFailed is not a kernel command.
+#[test]
+fn resume_enum_has_no_retry_failed() {
+    let src = fs::read_to_string(src_root().join("domain/outcome.rs")).unwrap();
+    let start = src.find("pub enum Resume {").expect("Resume enum");
+    let rest = &src[start..];
+    let end = rest.find("\n}").expect("Resume enum close");
+    let body = &rest[..end];
+    assert!(body.contains("Complete"));
+    assert!(body.contains("Reinvoke"));
+    assert!(
+        !body.contains("RetryFailed"),
+        "Do not implement Recover::RetryFailed"
+    );
+}
+
+/// Park sleeps on Clock (FakeClock in tests), not wall tokio::time.
+#[test]
+fn park_deadline_uses_clock_sleep_not_wall_time() {
+    let src = fs::read_to_string(src_root().join("runtime/park.rs")).unwrap();
+    assert!(src.contains("self.clock.sleep(wait)"));
+    assert!(
+        !src.contains("tokio::time::sleep"),
+        "park must not wall-sleep; FakeClock drives T"
+    );
+}
+
+#[test]
+fn coverage_script_runs_timers_pack() {
+    let sh =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/coverage.sh"))
+            .unwrap();
+    assert!(
+        sh.contains("--test timers"),
+        "coverage.sh must instrument timers.rs"
     );
 }

@@ -28,7 +28,7 @@ jobs:
         run: |
           cargo test -p keel-rt --lib \
             --test adversarial --test catalog --test consumer --test events \
-            --test graph --test resilience --test resume \
+            --test graph --test resilience --test resume --test timers \
             --test scenarios --test stress --test stress_uneven --test structure \
             --test workloads \
             -- --test-threads=1
