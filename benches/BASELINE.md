@@ -4,6 +4,21 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Phase 5 snapshot deadlines (2026-09-01)
+
+T is `Ready { runnable_at: Some(T) }` on the snapshot. FakeClock park; no
+sqlite timer table. MemoryStore hot path **without timers** (this pack does
+not change persist). Gate: no median >10% vs the persist-err hunt column.
+
+| bench | previous this run | this run | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 (debug median n=7) | 4.328 ms | 4.360 ms | +0.7% |
+| deep_chain_128 (debug median n=7) | 1.941 ms | 1.931 ms | −0.5% |
+| diamond_10k (debug median n=7) | 154.715 ms | 154.976 ms | +0.2% |
+| apply_only (debug median n=7) | 14.815 ms | 14.831 ms | +0.1% |
+
+All four inside the 10% band. **No revert.**
+
 ## Phase 3 events re-measure (2026-08-31)
 
 `Event` + `EventSink` (no EventLog). persist_then_emit is store Ok then sink.

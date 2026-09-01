@@ -10,7 +10,7 @@
 use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionState, FnSink,
+    AcceptPolicy, ApplyCmd, Clock, Event, Execution, ExecutionContext, ExecutionState, FnSink,
     MemoryStore, NodeId, NodeOutcome, NodeState, RetryPolicy, Runtime, StateStore, Timestamp,
     WorkflowDefinition,
 };
@@ -65,15 +65,15 @@ async fn persist_backoff(
         now,
     )
     .unwrap();
-    let t = match ex.node(&NodeId::new("a")).unwrap().state {
+    let t = match &ex.snapshot().node(&NodeId::new("a")).unwrap().state {
         NodeState::Ready {
             runnable_at: Some(at),
-        } => at,
+        } => *at,
         other => panic!("timeout/retry must park Ready {{ T }}, got {other:?}"),
     };
     assert!(
         !matches!(
-            ex.node(&NodeId::new("a")).unwrap().state,
+            ex.snapshot().node(&NodeId::new("a")).unwrap().state,
             NodeState::Waiting { .. }
         ),
         "Waiting is HITL; timers must not reuse it"
@@ -104,7 +104,7 @@ async fn start_arm_timeout_crash_before_fire_resume_advance_is_timed_out() {
     )
     .unwrap();
     assert!(matches!(
-        ex.node(&NodeId::new("a")).unwrap().state,
+        ex.snapshot().node(&NodeId::new("a")).unwrap().state,
         NodeState::Running { .. }
     ));
     store.persist(&ex).await.unwrap();
@@ -318,19 +318,15 @@ async fn drop_handle_during_parked_deadline_cancels_sleeper() {
     let id = handle.execution_id().clone();
     within(async {
         loop {
-            if matches!(
-                store
-                    .get(&id)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .node(&NodeId::new("a"))
-                    .map(|n| &n.state),
-                Some(NodeState::Ready {
-                    runnable_at: Some(_)
-                })
-            ) {
-                return;
+            if let Some(snap) = store.get(&id).await.unwrap() {
+                if matches!(
+                    snap.node(&NodeId::new("a")).map(|n| &n.state),
+                    Some(NodeState::Ready {
+                        runnable_at: Some(_)
+                    })
+                ) {
+                    return;
+                }
             }
             tokio::task::yield_now().await;
         }
@@ -339,10 +335,10 @@ async fn drop_handle_during_parked_deadline_cancels_sleeper() {
     drop(handle);
     within(async {
         loop {
-            if store.get(&id).await.unwrap().unwrap().state == ExecutionState::Cancelled
-                && clock.live_sleeps() == 0
-            {
-                return;
+            if let Some(snap) = store.get(&id).await.unwrap() {
+                if snap.state == ExecutionState::Cancelled && clock.live_sleeps() == 0 {
+                    return;
+                }
             }
             tokio::task::yield_now().await;
         }
@@ -420,7 +416,7 @@ async fn crash_after_accept_timeout_persisted_resume_stays_timed_out() {
     )
     .unwrap();
     assert_eq!(
-        ex.node(&NodeId::new("a")).unwrap().state,
+        ex.snapshot().node(&NodeId::new("a")).unwrap().state,
         NodeState::TimedOut
     );
     store.persist(&ex).await.unwrap();

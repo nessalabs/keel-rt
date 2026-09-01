@@ -15,7 +15,7 @@ pub enum NodeState {
     Pending,
     /// Dispatchable now (`runnable_at: None`) or parked until Instant **T**
     /// (`Some(T)`). T is the snapshot deadline for retry backoff (and any
-    /// other "not runnable until T" policy). Waiting is HITL, not a timer.
+    /// other "not runnable until T" policy). Waiting is an executor yield, not a timer.
     Ready {
         runnable_at: Option<Timestamp>,
     },

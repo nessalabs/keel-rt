@@ -1768,10 +1768,10 @@ fn crash_resume_full_file_keeps_deadline() {
                 .unwrap()
                 .node(&NodeId::new("a"))
             {
-                Some(n) => match n.state {
+                Some(n) => match &n.state {
                     NodeState::Ready {
                         runnable_at: Some(at),
-                    } => at,
+                    } => *at,
                     other => panic!("{other:?}"),
                 },
                 None => panic!("missing node"),
@@ -1854,7 +1854,7 @@ fn sqlite_deadline_persist_does_not_drop_or_double_fire() {
                 now,
             )
             .unwrap();
-            let t = match &ex.node(&NodeId::new("a")).unwrap().state {
+            let t = match &ex.snapshot().node(&NodeId::new("a")).unwrap().state {
                 NodeState::Ready {
                     runnable_at: Some(at),
                 } => *at,
