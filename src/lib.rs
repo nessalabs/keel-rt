@@ -15,6 +15,7 @@
 //! Consumer path: [`WorkflowDefinition::builder`] →
 //! [`RuntimeBuilder::register_fn`] → [`Runtime::run`] / [`Runtime::start`].
 //! After process death, [`Runtime::resume`] loads the snapshot (at-least-once).
+//! Announce via [`Event`] + [`EventSink`] (no EventLog). Persist then emit.
 //! Use [`ExecutionState::is_successful_finish`] (not `== Succeeded`) so
 //! FailSubtree [`Completed`](ExecutionState::Completed) counts as ok.
 //!
@@ -28,7 +29,7 @@ pub(crate) mod runtime;
 pub mod testing;
 
 pub use domain::definition::{DefinitionError, Join, OnFailure, WorkflowDefinition};
-pub use domain::events::DomainEvent;
+pub use domain::events::Event;
 pub use domain::ids::{
     DefinitionHash, ExecutionId, ExecutorId, InvalidId, NodeId, ResumeToken, WorkflowId,
 };
@@ -41,7 +42,7 @@ pub use domain::state::{
 pub use domain::time::Timestamp;
 pub use runtime::executor::{ExecutionContext, Executor, FunctionExecutor};
 pub use runtime::handle::ExecutionHandle;
-pub use runtime::sink::{EventSink, FnSink};
+pub use runtime::sink::{EventSink, FnSink, SinkError};
 pub use runtime::runtime::{
     ResumeError, Runtime, RuntimeBuilder, StartError, UnregisteredExecutors,
     DEFAULT_CANCEL_BOUND,

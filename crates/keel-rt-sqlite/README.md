@@ -30,8 +30,9 @@ let fast = SqliteStore::open_fast("/tmp/keel-fast.db")?; // NORMAL
 - One `BEGIN IMMEDIATE` … `COMMIT` per `persist`/`put` call.
 - First persist writes every node row. Later persists upsert dirty slots
   only; unchanged Pending rows are not deleted.
-- `wal_checkpoint(TRUNCATE)` runs after COMMIT of a **terminal** snapshot,
-  never inside the transaction.
+- `wal_checkpoint(TRUNCATE)` is best-effort after COMMIT of a **terminal**
+  snapshot, never inside the transaction. Checkpoint `Err` does not fail
+  persist. Equal-revision persist does not insert event rows.
 
 Standing load / messy-user attacks (not coverage):
 `cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture`

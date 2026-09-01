@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use keel_rt::testing::{NetFault, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, ApplyError, DomainEvent, EventSink, Execution, ExecutionContext,
+    AcceptPolicy, ApplyCmd, ApplyError, Event, EventSink, Execution, ExecutionContext,
     ExecutionState, FunctionExecutor, Join, MemoryStore, NodeId, NodeOutcome, NodeState,
     OnFailure, Policy, PolicyDecision, Resume, ResumeToken, RetryPolicy, Runtime, StateStore,
     StoreError, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND, SCHEMA_VERSION,
@@ -771,8 +771,8 @@ async fn persist_succeeds_before_execution_succeeded_is_emitted() {
         persisted_success: persisted_success.clone(),
     };
     let inner = store.inner.clone();
-    let sink = keel_rt::FnSink(move |e: &DomainEvent| {
-        if matches!(e, DomainEvent::ExecutionSucceeded { .. })
+    let sink = keel_rt::FnSink(move |e: &Event| {
+        if matches!(e, Event::ExecutionSucceeded { .. })
             && !flag.load(Ordering::SeqCst)
         {
             announced.store(true, Ordering::SeqCst);
@@ -832,8 +832,8 @@ async fn persist_panic_after_write_keeps_terminal_and_does_not_emit() {
     let inner = MemoryStore::new();
     let seen_success = Arc::new(AtomicBool::new(false));
     let flag = seen_success.clone();
-    let sink = keel_rt::FnSink(move |e: &DomainEvent| {
-        if matches!(e, DomainEvent::ExecutionSucceeded { .. }) {
+    let sink = keel_rt::FnSink(move |e: &Event| {
+        if matches!(e, Event::ExecutionSucceeded { .. }) {
             flag.store(true, Ordering::SeqCst);
         }
     });
@@ -1682,7 +1682,7 @@ async fn eventsink_blocking_does_not_deadlock_inspect() {
         pair: Arc<(Mutex<bool>, Condvar)>,
     }
     impl EventSink for BlockFirstEmit {
-        fn emit(&self, _event: &DomainEvent) {
+        fn try_emit(&self, _event: &Event) -> Result<(), keel_rt::SinkError> {
             if !self.entered.swap(true, Ordering::SeqCst) {
                 self.in_block.store(true, Ordering::SeqCst);
                 let (lock, cv) = &*self.pair;
@@ -1692,6 +1692,7 @@ async fn eventsink_blocking_does_not_deadlock_inspect() {
                 }
                 self.in_block.store(false, Ordering::SeqCst);
             }
+            Ok(())
         }
     }
     let entered = Arc::new(AtomicBool::new(false));

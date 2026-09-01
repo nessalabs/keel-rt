@@ -40,6 +40,20 @@ pub trait StateStore: Send + Sync {
         self.put(&exec.snapshot()).await
     }
 
+    /// Same as [`Self::persist`]. File adapters may write `events` in the
+    /// snapshot transaction. The kernel never resumes from those rows.
+    /// Adapters must override this to see `events`; the default drops them.
+    /// Do not insert the same slice again when the stored revision already
+    /// matches (`SqliteStore` skips equal-revision inserts).
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[crate::domain::events::Event],
+    ) -> Result<(), StoreError> {
+        let _ = events;
+        self.persist(exec).await
+    }
+
     /// Definition last persisted with this execution. Default: none.
     /// The store does not interpret DAG readiness; it returns the bytes' DAG.
     async fn workflow_definition(
@@ -133,6 +147,15 @@ impl StateStore for MemoryStore {
         Ok(())
     }
 
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[crate::domain::events::Event],
+    ) -> Result<(), StoreError> {
+        let _ = events;
+        self.persist(exec).await
+    }
+
     async fn workflow_definition(
         &self,
         id: &ExecutionId,
@@ -177,6 +200,14 @@ impl StateStore for Arc<dyn StateStore> {
         (**self).persist(exec).await
     }
 
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[crate::domain::events::Event],
+    ) -> Result<(), StoreError> {
+        (**self).persist_with_events(exec, events).await
+    }
+
     async fn workflow_definition(
         &self,
         id: &ExecutionId,
@@ -215,6 +246,17 @@ mod tests {
             .expect("poisoned MemoryStore must recover via into_inner");
         assert!(store.get(exec.id()).await.unwrap().is_some());
         store.put(&exec.snapshot()).await.unwrap();
+        assert!(store.get(exec.id()).await.unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persist_with_events_is_persist() {
+        let store = MemoryStore::new();
+        let exec = one_node();
+        store
+            .persist_with_events(&exec, &[])
+            .await
+            .expect("MemoryStore ignores the event slice");
         assert!(store.get(exec.id()).await.unwrap().is_some());
     }
 

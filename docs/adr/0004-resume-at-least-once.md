@@ -24,7 +24,7 @@ re-run. Waiting keeps the same `ResumeToken`. Execution-level terminals
 stay terminal.
 
 `Runtime::resume` loads snapshot + definition, rebuilds, and spawns. It
-does not replay `DomainEvent` history. Persist succeeds, then the sink is
+does not replay `Event` history. Persist succeeds, then the sink is
 told. No persist queue.
 
 `keel-rt-sqlite` implements `StateStore` in a sibling crate. Deleting it

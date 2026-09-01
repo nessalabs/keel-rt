@@ -2,7 +2,7 @@
 //! This module never awaits `execute()` and does not name resource types.
 
 use crate::domain::definition::WorkflowDefinition;
-use crate::domain::events::DomainEvent;
+use crate::domain::events::Event as KernelEvent;
 use crate::domain::ids::{NodeId, NodeSlot};
 use crate::domain::policy::Policy;
 use crate::domain::state::{ApplyCmd, Execution, ExecutionState};
@@ -41,7 +41,7 @@ pub(crate) struct Scheduler {
     bound_armed: bool,
     cancel_bound_task: Option<tokio::task::AbortHandle>,
     last_persisted: u64,
-    pending_events: Vec<DomainEvent>,
+    pending_events: Vec<KernelEvent>,
 }
 
 /// Extra persist attempts on `Event::Shutdown` after the command that produced
@@ -111,6 +111,7 @@ impl Scheduler {
         cancel_bound: Duration,
     ) -> Self {
         let n = exec.definition().len();
+        let last_persisted = exec.revision();
         let executors: Vec<Option<Arc<dyn Executor>>> = (0..n)
             .map(|i| registry.get(exec.definition().executor_at(NodeSlot(i))))
             .collect();
@@ -134,7 +135,9 @@ impl Scheduler {
             tx,
             bound_armed: false,
             cancel_bound_task: None,
-            last_persisted: 0,
+            // Snapshot on disk is already this revision. A no-op Waiting
+            // restore must not BEGIN IMMEDIATE just to write zero events.
+            last_persisted,
             pending_events: Vec::new(),
         }
     }
@@ -308,16 +311,20 @@ impl Scheduler {
     }
 
     async fn persist_then_emit_n(&mut self, attempts: u32) {
-        let events = std::mem::take(&mut self.pending_events);
         if self.store.is_noop() {
+            let events = std::mem::take(&mut self.pending_events);
             self.emit_events(&events);
             return;
         }
         for _ in 0..attempts {
             if self.persist_snapshot().await {
+                let events = std::mem::take(&mut self.pending_events);
                 self.emit_events(&events);
                 return;
             }
+            // Persist Err/panic: keep pending_events. Taking them on failure
+            // dropped ExecutionStarted after a later persist Ok of the same
+            // snapshot (and Shutdown retried with an empty slice).
         }
     }
 
@@ -325,7 +332,10 @@ impl Scheduler {
         if self.exec.revision() == self.last_persisted {
             return true;
         }
-        match CatchUnwind(AssertUnwindSafe(self.store.persist(&self.exec))).await {
+        match CatchUnwind(AssertUnwindSafe(
+            self.store.persist_with_events(&self.exec, &self.pending_events),
+        ))
+        .await {
             Ok(Ok(())) => {
                 self.exec.clear_dirty();
                 self.last_persisted = self.exec.revision();
@@ -345,10 +355,12 @@ impl Scheduler {
         }
     }
 
-    fn emit_events(&self, events: &[DomainEvent]) {
+    fn emit_events(&self, events: &[KernelEvent]) {
         for ev in events {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.sink.emit(ev);
+                if let Err(e) = self.sink.try_emit(ev) {
+                    debug!(error = %e, "EventSink::try_emit failed; persist already Ok");
+                }
             }))
             .is_err()
             {

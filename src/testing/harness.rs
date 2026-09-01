@@ -1,5 +1,5 @@
 use crate::domain::definition::{Join, OnFailure, WorkflowDefinition};
-use crate::domain::events::DomainEvent;
+use crate::domain::events::Event;
 use crate::domain::ids::{ExecutionId, NodeId, ResumeToken};
 use crate::domain::outcome::Resume;
 use crate::domain::policy::Policy;
@@ -36,7 +36,7 @@ pub struct WorkflowTest {
     clock: Arc<FakeClock>,
     cancel_bound: Duration,
     /// When false, the runtime uses [`NoopSink`] so 100k-node runs do not
-    /// clone every DomainEvent into a recording buffer.
+    /// clone every Event into a recording buffer.
     record_events: bool,
 }
 
@@ -287,7 +287,7 @@ impl TestRun {
         self.snapshot().await.state
     }
 
-    pub fn events(&self) -> Vec<DomainEvent> {
+    pub fn events(&self) -> Vec<Event> {
         self.sink.events()
     }
 

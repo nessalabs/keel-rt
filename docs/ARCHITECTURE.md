@@ -14,7 +14,7 @@ src/domain/          rules. No tokio, no runtime, no std::net.
   snapshot.rs        persistable ExecutionSnapshot (HashMap + definition order)
   state.rs           Execution aggregate + NodeState / ExecutionState
   apply.rs           apply / join / fail-fast / FailSubtree (impl Execution)
-  events.rs          DomainEvent as data
+  events.rs          Event as data (no EventLog, no NodeReady)
   time.rs            Timestamp value object
 
 src/runtime/         bundle. May import domain. Never imported by domain.
@@ -49,7 +49,7 @@ or types.
 ```mermaid
 flowchart TB
   subgraph crate["keel-rt  lib.rs re-exports"]
-    ROOT["pub use: WorkflowDefinition Runtime RuntimeBuilder<br/>ExecutionHandle Execution Executor Policy<br/>StateStore EventSink Clock NodeOutcome ExecutionState<br/>ResumeError"]
+    ROOT["pub use: WorkflowDefinition Runtime RuntimeBuilder<br/>ExecutionHandle Execution Executor Policy<br/>StateStore EventSink Event Clock NodeOutcome ExecutionState<br/>ResumeError"]
   end
 
   subgraph testing["src/testing/  feature test-util"]
@@ -150,16 +150,25 @@ classDiagram
     +put(ExecutionSnapshot)
     +get(ExecutionId)
     +persist(Execution)
+    +persist_with_events(Execution, Event[])
     +workflow_definition(ExecutionId)
   }
   class EventSink {
     <<trait>>
-    +emit(DomainEvent)
+    +emit(Event)
+    +try_emit(Event) Result~SinkError~
   }
   class Clock {
     <<trait>>
     +now() Timestamp
     +sleep(Duration)
+  }
+  class Event {
+    <<enum>>
+    ExecutionStarted Succeeded Failed Completed Cancelled
+    NodeStarted Succeeded Failed TimedOut Cancelled Waiting
+    +node_id() Option~NodeId~
+    +attempt() Option~u32~
   }
   class NodeOutcome {
     <<enum>>
@@ -190,6 +199,7 @@ classDiagram
   Runtime --> Policy
   Runtime --> StateStore
   Runtime --> EventSink
+  EventSink ..> Event : emit
   Runtime --> Clock
   ExecutionHandle --> ExecutionState : wait
   ExecutionHandle --> Execution : apply loop

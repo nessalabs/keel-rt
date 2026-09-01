@@ -2,6 +2,7 @@
 
 **Keel** is a small DAG workflow execution kernel. The crate is `keel-rt`
 (Tokio-style `-rt` = the runtime). In Rust: `use keel_rt::...`.
+Kernel lives on Origin: `nessalabs/keel-rt`. GitHub is not the kernel.
 
 Phase 2: at-least-once **snapshot resume**. If the process dies, call
 `Runtime::resume` with the `ExecutionId`. A node
@@ -12,6 +13,12 @@ Waiting keeps the same token. File persistence is a sibling crate
 `synchronous=FULL` (process kill and power loss of the last txn).
 `SqliteStore::open_fast` is `NORMAL` (process kill only; power loss may
 lose the last WAL frames). Details: [`crates/keel-rt-sqlite/README.md`](crates/keel-rt-sqlite/README.md).
+
+Phase 3: public surface is [`Event`] + [`EventSink`] (no `EventLog`).
+Persist then emit. A sink `Err` does not un-persist or fail the run.
+Resume is still the snapshot; sqlite may write event rows in that txn
+and never uses them to resume. At-least-once re-invoke may emit the
+same node event twice.
 
 The runtime is a **bundle** (scheduler + optional store/sink + handle). The
 scheduler does not know resource types. Drivers only wake. This is a
@@ -26,7 +33,7 @@ not belong in the kernel.
 
 ```rust
 use bytes::Bytes;
-use keel_rt::{DomainEvent, ExecutionContext, FnSink, NodeOutcome, Runtime, WorkflowDefinition};
+use keel_rt::{Event, ExecutionContext, FnSink, NodeOutcome, Runtime, WorkflowDefinition};
 
 let def = WorkflowDefinition::builder(format!("job-{}", 1))
     .node("fetch", "fetch")
@@ -36,7 +43,7 @@ let def = WorkflowDefinition::builder(format!("job-{}", 1))
 
 let rt = Runtime::builder()
     .concurrency(4)
-    .sink(FnSink(|e: &DomainEvent| println!("{e}")))
+    .sink(FnSink(|e: &Event| println!("{e}")))
     .register_fn("fetch", |ctx: ExecutionContext| async move {
         ctx.sleep(std::time::Duration::ZERO).await; // execution clock
         NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
@@ -69,7 +76,7 @@ recommend it** for production binaries from those numbers. Details:
 ## Build and test
 
 Module map and absences: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-PR rules (mermaid + behavior diffs): [`AGENTS.md`](AGENTS.md).
+The tests define the absences. PR body gate: [`scripts/pr_body_gate.py`](scripts/pr_body_gate.py).
 Accepted leftovers: [`docs/adr/`](docs/adr/).
 Phase 1 failure catalog (every interrupt / retry / race / empty / drop):
 [`docs/FAILURE_CATALOG.md`](docs/FAILURE_CATALOG.md).

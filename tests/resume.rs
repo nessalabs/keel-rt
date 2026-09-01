@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, DomainEvent, Execution, ExecutionContext, ExecutionId, ExecutionState,
+    AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionId, ExecutionState,
     FnSink, Join, MemoryStore, NodeId, NodeOutcome, OnFailure, Resume, ResumeError, RetryPolicy,
     Runtime, SCHEMA_VERSION, SnapshotError, StateStore, StoreError, Timestamp, WorkflowDefinition,
 };
@@ -597,8 +597,8 @@ async fn persist_then_emit_still_holds_after_resume_terminal() {
     let store = MemoryStore::new();
     let seen = Arc::new(AtomicBool::new(false));
     let flag = seen.clone();
-    let sink = FnSink(move |e: &DomainEvent| {
-        if matches!(e, DomainEvent::ExecutionSucceeded { .. }) {
+    let sink = FnSink(move |e: &Event| {
+        if matches!(e, Event::ExecutionSucceeded { .. }) {
             flag.store(true, Ordering::SeqCst);
         }
     });

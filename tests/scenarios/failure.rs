@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
-use keel_rt::{DomainEvent, ExecutionState, NodeState};
+use keel_rt::{Event, ExecutionState, NodeState};
 
 #[tokio::test(flavor = "current_thread")]
 async fn b_fails_d_depends_on_b_cancelled_never_started() {
@@ -24,7 +24,7 @@ async fn b_fails_d_depends_on_b_cancelled_never_started() {
     let failed_events = run
         .events()
         .iter()
-        .filter(|e| matches!(e, DomainEvent::ExecutionFailed { .. }))
+        .filter(|e| matches!(e, Event::ExecutionFailed { .. }))
         .count();
     assert_eq!(
         failed_events, 1,

@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 use keel_rt::testing::ScriptedExecutor;
-use keel_rt::{DomainEvent, ExecutionSnapshot, NodeState};
+use keel_rt::{Event, ExecutionSnapshot, NodeState};
 use std::future::Future;
 use std::time::Duration;
 
@@ -26,10 +26,10 @@ pub fn ok(id: &str) -> ScriptedExecutor {
     ScriptedExecutor::new(id).succeed(Bytes::from(format!("{id}-out")))
 }
 
-pub fn count_failed(events: &[DomainEvent]) -> usize {
+pub fn count_failed(events: &[Event]) -> usize {
     events
         .iter()
-        .filter(|e| matches!(e, DomainEvent::ExecutionFailed { .. }))
+        .filter(|e| matches!(e, Event::ExecutionFailed { .. }))
         .count()
 }
 

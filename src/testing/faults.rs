@@ -4,7 +4,7 @@
 //! [`NetFault`] composes onto [`ScriptedExecutor`]. `Delay` sleeps on the
 //! execution clock and is aborted if [`CancellationToken`] fires first.
 
-use crate::domain::events::DomainEvent;
+use crate::domain::events::Event;
 use crate::runtime::sink::EventSink;
 use crate::testing::scripted::{ScriptedAction, ScriptedExecutor};
 use bytes::Bytes;
@@ -96,13 +96,12 @@ impl ScriptedExecutor {
     }
 }
 
-/// [`EventSink`] that panics on the Nth `emit` (1-based). `emit` has no
-/// `Result`; the scheduler already `catch_unwind`s. Use [`FailingStore`] for
-/// store errors.
+/// [`EventSink`] that panics on the Nth `try_emit` (1-based). The scheduler
+/// already `catch_unwind`s. Use [`FailingStore`] for store errors.
 ///
 /// [`FailingStore`]: crate::testing::FailingStore
 pub struct FaultySink {
-    events: Arc<Mutex<Vec<DomainEvent>>>,
+    events: Arc<Mutex<Vec<Event>>>,
     panic_on_nth: Option<usize>,
     panic_all: bool,
     hits: AtomicUsize,
@@ -131,17 +130,18 @@ impl FaultySink {
         self.hits.load(Ordering::SeqCst)
     }
 
-    pub fn events(&self) -> Vec<DomainEvent> {
+    pub fn events(&self) -> Vec<Event> {
         self.events.lock().expect("faulty sink").clone()
     }
 }
 
 impl EventSink for FaultySink {
-    fn emit(&self, event: &DomainEvent) {
+    fn try_emit(&self, event: &Event) -> Result<(), crate::runtime::sink::SinkError> {
         let n = self.hits.fetch_add(1, Ordering::SeqCst) + 1;
         if self.panic_all || self.panic_on_nth == Some(n) {
             panic!("FaultySink emit #{n}");
         }
         self.events.lock().expect("faulty sink").push(event.clone());
+        Ok(())
     }
 }

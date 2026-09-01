@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use keel_rt::{
-    DomainEvent, ExecutionContext, ExecutionState, FnSink, FunctionExecutor, NodeId, NodeOutcome,
+    Event, ExecutionContext, ExecutionState, FnSink, FunctionExecutor, NodeId, NodeOutcome,
     NodeState, Runtime, WorkflowDefinition,
 };
 use std::process::ExitCode;
@@ -52,7 +52,7 @@ async fn main() -> ExitCode {
         .build()
         .expect("definition");
 
-    let sink = FnSink(|event: &DomainEvent| println!("event    {event}"));
+    let sink = FnSink(|event: &Event| println!("event    {event}"));
 
     let runtime = Runtime::builder()
         .concurrency(2)

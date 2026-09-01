@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::definition::{Join, OnFailure};
-use crate::domain::events::DomainEvent;
+use crate::domain::events::{Event, ExecKind, NodeKind};
 use crate::domain::policy::{Policy, PolicyDecision};
 
 impl Execution {
@@ -18,9 +18,7 @@ impl Execution {
                     return Err(ApplyError::Illegal("start only from Created".into()));
                 }
                 self.state = ExecutionState::Running;
-                effect.events.push(crate::domain::events::DomainEvent::ExecutionStarted {
-                    execution_id: self.id.clone(),
-                });
+                self.emit_exec(&mut effect, now, ExecKind::Started);
                 let nsrc = self.definition.source_slots().len();
                 for i in 0..nsrc {
                     let src = self.definition.source_slots()[i];
@@ -29,7 +27,7 @@ impl Execution {
                 effect.changed = true;
             }
             ApplyCmd::StartNode { node_id } => {
-                self.dispatch_node(&node_id, &mut effect)?;
+                self.dispatch_node(&node_id, now, &mut effect)?;
                 effect.changed = true;
             }
             ApplyCmd::FinishNode {
@@ -48,7 +46,7 @@ impl Execution {
                 if self.state.is_terminal() {
                     return Ok(effect);
                 }
-                self.cancel_graph(&mut effect);
+                self.cancel_graph(now, &mut effect);
                 effect.changed = true;
             }
             ApplyCmd::RetryDue { node_id } => {
@@ -76,32 +74,58 @@ impl Execution {
                 if !self.nodes.iter().any(|n| matches!(n.state, NodeState::Running { .. })) {
                     return Ok(effect);
                 }
-                self.force_cancel_running(&mut effect);
+                self.force_cancel_running(now, &mut effect);
                 effect.changed = true;
             }
         }
         if !effect.changed {
             return Ok(effect);
         }
-        self.recompute_execution_state(prev_state, &mut effect);
+        self.recompute_execution_state(prev_state, &mut effect, now);
         self.revision += 1;
         Ok(effect)
     }
 
+    fn emit_exec(&self, effect: &mut ApplyEffect, now: Timestamp, kind: ExecKind) {
+        effect.events.push(Event::exec(
+            kind,
+            self.id.clone(),
+            self.workflow_id.clone(),
+            now,
+        ));
+    }
+
+    fn emit_node(
+        &self,
+        effect: &mut ApplyEffect,
+        now: Timestamp,
+        node_id: NodeId,
+        attempt: u32,
+        kind: NodeKind,
+    ) {
+        effect.events.push(Event::node(
+            kind,
+            self.id.clone(),
+            self.workflow_id.clone(),
+            node_id,
+            attempt,
+            now,
+        ));
+    }
+
     fn mark_ready(&mut self, slot: NodeSlot, effect: &mut ApplyEffect) {
-        use crate::domain::events::DomainEvent;
         // Callers only pass Pending (Start sources; AllDone remain==0).
+        // Ready is not a public Event (no NodeReady).
         self.set_state(slot, NodeState::Ready { runnable_at: None });
-        let id = self.definition.id_at(slot).clone();
-        effect.events.push(DomainEvent::NodeReady {
-            node_id: id,
-            runnable_at: None,
-        });
         effect.newly_runnable.push(slot);
     }
 
-    fn dispatch_node(&mut self, id: &NodeId, effect: &mut ApplyEffect) -> Result<(), ApplyError> {
-        use crate::domain::events::DomainEvent;
+    fn dispatch_node(
+        &mut self,
+        id: &NodeId,
+        now: Timestamp,
+        effect: &mut ApplyEffect,
+    ) -> Result<(), ApplyError> {
         let slot = self
             .definition
             .slot(id)
@@ -126,10 +150,7 @@ impl Execution {
             attempt
         };
         self.set_state(slot, NodeState::Running { attempt });
-        effect.events.push(DomainEvent::NodeStarted {
-            node_id: id.clone(),
-            attempt,
-        });
+        self.emit_node(effect, now, id.clone(), attempt, NodeKind::Started);
         Ok(())
     }
 
@@ -174,7 +195,6 @@ impl Execution {
         now: Timestamp,
         effect: &mut ApplyEffect,
     ) -> Result<(), ApplyError> {
-        use crate::domain::events::DomainEvent;
         let attempt = self.nodes[slot.0].attempt;
 
         let decision = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -183,8 +203,8 @@ impl Execution {
             Ok(d) => d,
             Err(_) => {
                 tracing::error!(node = %id, "Policy::decide panicked");
-                self.fail_node(slot, id, NodeError::new("policy panicked"), effect);
-                self.fail_fast(effect);
+                self.fail_node(slot, id, NodeError::new("policy panicked"), now, effect);
+                self.fail_fast(now, effect);
                 return Ok(());
             }
         };
@@ -194,8 +214,8 @@ impl Execution {
                 NodeOutcome::Succeeded(_) | NodeOutcome::Waiting { .. }
             )
         {
-            self.fail_node(slot, id, NodeError::new("illegal policy Retry after Succeeded/Waiting"), effect);
-            self.fail_fast(effect);
+            self.fail_node(slot, id, NodeError::new("illegal policy Retry after Succeeded/Waiting"), now, effect);
+            self.fail_fast(now, effect);
             return Ok(());
         }
 
@@ -215,10 +235,6 @@ impl Execution {
                     n.last_outcome = Some(outcome);
                 }
                 self.set_state(slot, NodeState::Ready { runnable_at: at });
-                effect.events.push(DomainEvent::NodeReady {
-                    node_id: id.clone(),
-                    runnable_at: at,
-                });
                 if let Some(at) = at {
                     self.note_deadline(slot, at);
                 } else {
@@ -231,9 +247,10 @@ impl Execution {
                     slot,
                     id,
                     NodeError::new("policy rejected outcome"),
+                    now,
                     effect,
                 );
-                self.apply_on_failure(slot, effect);
+                self.apply_on_failure(slot, now, effect);
                 return Ok(());
             }
             PolicyDecision::Accept => {}
@@ -248,9 +265,7 @@ impl Execution {
                     n.last_error = None;
                 }
                 self.set_state(slot, NodeState::Succeeded);
-                effect.events.push(DomainEvent::NodeSucceeded {
-                    node_id: id.clone(),
-                });
+                self.emit_node(effect, now, id.clone(), attempt, NodeKind::Succeeded);
                 self.ready_successors(slot, effect);
             }
             NodeOutcome::Waiting { token } => {
@@ -270,14 +285,17 @@ impl Execution {
                         attempt,
                     },
                 );
-                effect.events.push(DomainEvent::NodeWaiting {
-                    node_id: id.clone(),
-                    token,
-                });
+                self.emit_node(
+                    effect,
+                    now,
+                    id.clone(),
+                    attempt,
+                    NodeKind::Waiting(token),
+                );
             }
             NodeOutcome::Failed(err) => {
-                self.fail_node(slot, id, err.clone(), effect);
-                self.apply_on_failure(slot, effect);
+                self.fail_node(slot, id, err.clone(), now, effect);
+                self.apply_on_failure(slot, now, effect);
             }
             NodeOutcome::TimedOut => {
                 {
@@ -286,17 +304,22 @@ impl Execution {
                     n.last_outcome = Some(NodeOutcome::TimedOut);
                 }
                 self.set_state(slot, NodeState::TimedOut);
-                effect.events.push(DomainEvent::NodeTimedOut {
-                    node_id: id.clone(),
-                });
-                self.apply_on_failure(slot, effect);
+                self.emit_node(effect, now, id.clone(), attempt, NodeKind::TimedOut);
+                self.apply_on_failure(slot, now, effect);
             }
         }
         Ok(())
     }
 
-    fn fail_node(&mut self, slot: NodeSlot, id: &NodeId, err: NodeError, effect: &mut ApplyEffect) {
-        use crate::domain::events::DomainEvent;
+    fn fail_node(
+        &mut self,
+        slot: NodeSlot,
+        id: &NodeId,
+        err: NodeError,
+        now: Timestamp,
+        effect: &mut ApplyEffect,
+    ) {
+        let attempt = self.nodes[slot.0].attempt;
         {
             let n = &mut self.nodes[slot.0];
             n.last_error = Some(err.clone());
@@ -304,48 +327,46 @@ impl Execution {
         }
         self.set_state(slot, NodeState::Failed);
         self.clear_deadline_if(slot);
-        effect.events.push(DomainEvent::NodeFailed {
-            node_id: id.clone(),
-            error: err,
-        });
+        self.emit_node(effect, now, id.clone(), attempt, NodeKind::Failed(err));
     }
 
-    fn apply_on_failure(&mut self, slot: NodeSlot, effect: &mut ApplyEffect) {
+    fn apply_on_failure(&mut self, slot: NodeSlot, now: Timestamp, effect: &mut ApplyEffect) {
         match self.definition.on_failure() {
-            OnFailure::FailExecution => self.fail_fast(effect),
-            OnFailure::FailSubtree => self.fail_subtree(slot, effect),
+            OnFailure::FailExecution => self.fail_fast(now, effect),
+            OnFailure::FailSubtree => self.fail_subtree(slot, now, effect),
         }
     }
 
     /// After policy Accepts Failed/TimedOut (or Rejects): non-terminal nodes
     /// Cancelled, execution Failed. Sets the same abort flag as [`Self::cancel_graph`].
-    fn cancel_non_terminals(&mut self, effect: &mut ApplyEffect) {
+    fn cancel_non_terminals(&mut self, now: Timestamp, effect: &mut ApplyEffect) {
         for i in 0..self.nodes.len() {
             if self.nodes[i].state.is_terminal() {
                 continue;
             }
             let running = matches!(self.nodes[i].state, NodeState::Running { .. });
+            let attempt = self.nodes[i].attempt;
             self.set_state(NodeSlot(i), NodeState::Cancelled);
             let id = self.definition.id_at(NodeSlot(i)).clone();
             if running {
                 effect.to_abort.push(NodeSlot(i));
             }
-            effect.events.push(DomainEvent::NodeCancelled { node_id: id });
+            self.emit_node(effect, now, id, attempt, NodeKind::Cancelled);
         }
         self.next_deadline = None;
     }
 
-    fn fail_fast(&mut self, effect: &mut ApplyEffect) {
+    fn fail_fast(&mut self, now: Timestamp, effect: &mut ApplyEffect) {
         self.cancelled = true;
         self.fail_execution = true;
-        self.cancel_non_terminals(effect);
+        self.cancel_non_terminals(now, effect);
         self.state = ExecutionState::Failed;
     }
 
     /// Cancel AllSucceeded descendants of `origin` (already Failed/TimedOut).
     /// AllDone dependents stay Pending until every predecessor is terminal.
     /// Iterative — deep DAGs must not blow the stack.
-    fn fail_subtree(&mut self, origin: NodeSlot, effect: &mut ApplyEffect) {
+    fn fail_subtree(&mut self, origin: NodeSlot, now: Timestamp, effect: &mut ApplyEffect) {
         let mut stack: Vec<NodeSlot> = self.definition.succ_slots(origin).to_vec();
         while let Some(succ) = stack.pop() {
             if self.nodes[succ.0].state.is_terminal() {
@@ -353,7 +374,7 @@ impl Execution {
             }
             match self.definition.join_at(succ) {
                 Join::AllSucceeded => {
-                    self.cancel_node(succ, effect);
+                    self.cancel_node(succ, now, effect);
                     stack.extend_from_slice(self.definition.succ_slots(succ));
                 }
                 Join::AllDone => {
@@ -370,14 +391,14 @@ impl Execution {
         }
     }
 
-    fn cancel_node(&mut self, slot: NodeSlot, effect: &mut ApplyEffect) {
-        use crate::domain::events::DomainEvent;
+    fn cancel_node(&mut self, slot: NodeSlot, now: Timestamp, effect: &mut ApplyEffect) {
         // FailSubtree already skips terminals. AllSucceeded descendants cannot
         // be Running (they stay Pending until every predecessor succeeds).
+        let attempt = self.nodes[slot.0].attempt;
         self.set_state(slot, NodeState::Cancelled);
         self.clear_deadline_if(slot);
         let id = self.definition.id_at(slot).clone();
-        effect.events.push(DomainEvent::NodeCancelled { node_id: id });
+        self.emit_node(effect, now, id, attempt, NodeKind::Cancelled);
     }
 
     fn ready_successors(&mut self, succeeded: NodeSlot, effect: &mut ApplyEffect) {
@@ -474,20 +495,20 @@ impl Execution {
         Ok(())
     }
 
-    fn cancel_graph(&mut self, effect: &mut ApplyEffect) {
+    fn cancel_graph(&mut self, now: Timestamp, effect: &mut ApplyEffect) {
         self.cancelled = true;
-        self.cancel_non_terminals(effect);
+        self.cancel_non_terminals(now, effect);
         self.state = ExecutionState::Cancelled;
     }
 
-    fn force_cancel_running(&mut self, effect: &mut ApplyEffect) {
-        use crate::domain::events::DomainEvent;
+    fn force_cancel_running(&mut self, now: Timestamp, effect: &mut ApplyEffect) {
         for i in 0..self.nodes.len() {
             if matches!(self.nodes[i].state, NodeState::Running { .. }) {
+                let attempt = self.nodes[i].attempt;
                 self.set_state(NodeSlot(i), NodeState::Cancelled);
                 let id = self.definition.id_at(NodeSlot(i)).clone();
                 effect.to_abort.push(NodeSlot(i));
-                effect.events.push(DomainEvent::NodeCancelled { node_id: id });
+                self.emit_node(effect, now, id, attempt, NodeKind::Cancelled);
             }
         }
         if !self.state.is_terminal() {
@@ -551,37 +572,20 @@ impl Execution {
         }
     }
 
-    fn recompute_execution_state(&mut self, prev: ExecutionState, effect: &mut ApplyEffect) {
-        use crate::domain::events::DomainEvent;
+    fn recompute_execution_state(
+        &mut self,
+        prev: ExecutionState,
+        effect: &mut ApplyEffect,
+        now: Timestamp,
+    ) {
         let next = self.derive_state();
         if next != prev {
             match next {
-                ExecutionState::Failed => {
-                    effect.events.push(DomainEvent::ExecutionFailed {
-                        execution_id: self.id.clone(),
-                    });
-                }
-                ExecutionState::Cancelled => {
-                    effect.events.push(DomainEvent::ExecutionCancelled {
-                        execution_id: self.id.clone(),
-                    });
-                }
-                ExecutionState::Succeeded => {
-                    effect.events.push(DomainEvent::ExecutionSucceeded {
-                        execution_id: self.id.clone(),
-                    });
-                }
-                ExecutionState::Waiting => {
-                    effect.events.push(DomainEvent::ExecutionWaiting {
-                        execution_id: self.id.clone(),
-                    });
-                }
-                ExecutionState::Completed => {
-                    effect.events.push(DomainEvent::ExecutionCompleted {
-                        execution_id: self.id.clone(),
-                    });
-                }
-                ExecutionState::Running | ExecutionState::Created => {}
+                ExecutionState::Failed => self.emit_exec(effect, now, ExecKind::Failed),
+                ExecutionState::Cancelled => self.emit_exec(effect, now, ExecKind::Cancelled),
+                ExecutionState::Succeeded => self.emit_exec(effect, now, ExecKind::Succeeded),
+                ExecutionState::Completed => self.emit_exec(effect, now, ExecKind::Completed),
+                ExecutionState::Waiting | ExecutionState::Running | ExecutionState::Created => {}
             }
         }
         self.state = next;

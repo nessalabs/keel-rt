@@ -63,6 +63,14 @@ impl StateStore for FailingStore {
     }
 
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.persist_with_events(exec, &[]).await
+    }
+
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[crate::domain::events::Event],
+    ) -> Result<(), StoreError> {
         if failpoint::take("store.put") {
             return Err(StoreError::Message("failpoint store.put".into()));
         }
@@ -70,7 +78,7 @@ impl StateStore for FailingStore {
         if self.fail_all || n == self.fail_on_nth_put {
             return Err(StoreError::Message(format!("failing store: put #{n}")));
         }
-        self.inner.persist(exec).await
+        self.inner.persist_with_events(exec, events).await
     }
 
     async fn workflow_definition(
@@ -110,11 +118,19 @@ impl StateStore for SequenceStore {
     }
 
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.persist_with_events(exec, &[]).await
+    }
+
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        _events: &[crate::domain::events::Event],
+    ) -> Result<(), StoreError> {
         self.puts
             .lock()
             .expect("sequence store")
             .push(exec.snapshot());
-        self.inner.persist(exec).await
+        self.inner.persist_with_events(exec, _events).await
     }
 
     async fn workflow_definition(

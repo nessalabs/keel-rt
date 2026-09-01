@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use keel_rt::testing::{NetFault, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, DomainEvent, ExecutionState, FunctionExecutor, Join, MemoryStore, NodeId,
+    AcceptPolicy, Event, ExecutionState, FunctionExecutor, Join, MemoryStore, NodeId,
     NodeOutcome, NodeState, OnFailure, RetryPolicy, Runtime, StateStore, WorkflowDefinition,
 };
 use std::time::Duration;
@@ -58,15 +58,15 @@ async fn diamond_fail_subtree_all_succeeded_completes() {
     let evs = run.events();
     let n_failed = evs
         .iter()
-        .filter(|e| matches!(e, DomainEvent::NodeFailed { .. }))
+        .filter(|e| matches!(e, Event::NodeFailed { .. }))
         .count();
     assert_eq!(n_failed, 1);
     assert!(!evs
         .iter()
-        .any(|e| matches!(e, DomainEvent::ExecutionFailed { .. })));
+        .any(|e| matches!(e, Event::ExecutionFailed { .. })));
     assert!(evs
         .iter()
-        .any(|e| matches!(e, DomainEvent::ExecutionCompleted { .. })));
+        .any(|e| matches!(e, Event::ExecutionCompleted { .. })));
 }
 
 /// 2. Same diamond, default FailExecution — lock the old contract.
@@ -101,7 +101,7 @@ async fn diamond_fail_execution_still_fail_fasts() {
     assert_eq!(
         run.events()
             .iter()
-            .filter(|e| matches!(e, DomainEvent::ExecutionFailed { .. }))
+            .filter(|e| matches!(e, Event::ExecutionFailed { .. }))
             .count(),
         1
     );
@@ -227,7 +227,7 @@ async fn timeout_fail_subtree_siblings_live() {
     assert!(!run
         .events()
         .iter()
-        .any(|e| matches!(e, DomainEvent::ExecutionFailed { .. })));
+        .any(|e| matches!(e, Event::ExecutionFailed { .. })));
 }
 
 /// 7. Retry then FailSubtree: after max, subtree — not FailExecution.
@@ -274,7 +274,7 @@ async fn retry_then_fail_subtree() {
     assert!(!run
         .events()
         .iter()
-        .any(|e| matches!(e, DomainEvent::ExecutionFailed { .. })));
+        .any(|e| matches!(e, Event::ExecutionFailed { .. })));
 }
 
 /// 8. User cancel still cancels the whole graph under FailSubtree.

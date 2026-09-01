@@ -19,17 +19,25 @@
 //! already persists once per event (Start+dispatch is one event, not a sqlite
 //! merge of two turns). After the first write, only [`Execution::dirty_nodes`]
 //! rows are upserted — unchanged Pending rows are not deleted (ADR 0002).
-//! `wal_checkpoint(TRUNCATE)` runs **after** a successful COMMIT of a terminal
-//! snapshot, never inside the transaction.
+//! `wal_checkpoint(TRUNCATE)` is **best-effort after COMMIT** of a terminal
+//! snapshot, never inside the transaction. Checkpoint `Err` (SQLITE_BUSY)
+//! does not fail persist: the snapshot is already durable. Equal-revision
+//! persist does not insert event rows.
 
 use async_trait::async_trait;
 use keel_rt::{
-    Execution, ExecutionId, ExecutionSnapshot, StateStore, StoreError, WorkflowDefinition,
+    Event, Execution, ExecutionId, ExecutionSnapshot, StateStore, StoreError,
+    WorkflowDefinition,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Test-only: next N `wal_checkpoint(TRUNCATE)` calls return SQLITE_BUSY.
+/// Production persist must still treat COMMIT as Ok (checkpoint is best-effort).
+static FAIL_NEXT_CHECKPOINTS: AtomicU32 = AtomicU32::new(0);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS executions (
@@ -50,6 +58,12 @@ CREATE TABLE IF NOT EXISTS nodes (
 CREATE TABLE IF NOT EXISTS definitions (
   hash TEXT PRIMARY KEY,
   body BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+  execution_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (execution_id, seq)
 );
 ";
 
@@ -145,6 +159,43 @@ impl SqliteStore {
         &self.path
     }
 
+    /// Adapter inspect. Resume never calls this.
+    pub fn event_count(&self, id: &ExecutionId) -> Result<u64, StoreError> {
+        let conn = self.lock()?;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE execution_id = ?1",
+                params![id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(store_err)?;
+        Ok(n as u64)
+    }
+
+    /// Adapter inspect. Resume never calls this.
+    pub fn event_bodies(&self, id: &ExecutionId) -> Result<Vec<String>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT body FROM events WHERE execution_id = ?1 ORDER BY seq",
+            )
+            .map_err(store_err)?;
+        let rows = stmt
+            .query_map(params![id.as_str()], |row| row.get(0))
+            .map_err(store_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(store_err)?);
+        }
+        Ok(out)
+    }
+
+    /// Next `n` terminal WAL checkpoints return SQLITE_BUSY. Hidden for tests.
+    #[doc(hidden)]
+    pub fn fail_next_wal_checkpoints(n: u32) {
+        FAIL_NEXT_CHECKPOINTS.store(n, Ordering::SeqCst);
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
         Ok(self.conn.lock().unwrap_or_else(|p| p.into_inner()))
     }
@@ -163,6 +214,14 @@ impl SqliteStore {
     }
 
     fn persist_exec(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
+        Self::persist_exec_with_events(conn, exec, &[])
+    }
+
+    fn persist_exec_with_events(
+        conn: &Connection,
+        exec: &Execution,
+        events: &[Event],
+    ) -> Result<(), StoreError> {
         conn.execute("BEGIN IMMEDIATE", []).map_err(store_err)?;
         let r = (|| {
             insert_definition(conn, Some(exec.definition()))?;
@@ -179,21 +238,35 @@ impl SqliteStore {
                     found: found as u64,
                     attempted: exec.revision(),
                 }),
-                Some(found) if found as u64 == exec.revision() => Ok(()),
+                Some(found) if found as u64 == exec.revision() => {
+                    // Snapshot already on disk. Do not append events (MAX(seq)+1
+                    // has no identity key). Shutdown retry / a second Runtime
+                    // would otherwise duplicate ExecutionSucceeded.
+                    let _ = events;
+                    Ok(())
+                }
                 Some(_) => {
                     upsert_execution_meta(conn, exec)?;
                     upsert_dirty_nodes(conn, exec)?;
+                    insert_events(conn, exec.id(), events)?;
                     Ok(())
                 }
-                None => insert_new_snapshot(conn, &exec.snapshot()),
+                None => {
+                    insert_new_snapshot(conn, &exec.snapshot())?;
+                    insert_events(conn, exec.id(), events)?;
+                    Ok(())
+                }
             }
         })();
         let committed = finish_tx(conn, r)?;
         // TRUNCATE only after COMMIT. Never checkpoint an open transaction
         // (that would be a durability bug, not a speedup).
+        // Checkpoint is best-effort: COMMIT already made the snapshot durable.
+        // SQLITE_BUSY here must not look like "this snapshot is not on disk"
+        // (scheduler would keep pending_events and retry, duplicating rows).
         if committed && exec.state().is_terminal() {
             debug_assert!(conn.is_autocommit());
-            checkpoint_wal(conn)?;
+            let _ = checkpoint_wal(conn);
         }
         Ok(())
     }
@@ -221,8 +294,39 @@ fn finish_tx(conn: &Connection, r: Result<(), StoreError>) -> Result<bool, Store
 }
 
 fn checkpoint_wal(conn: &Connection) -> Result<(), StoreError> {
+    let remaining = FAIL_NEXT_CHECKPOINTS.load(Ordering::SeqCst);
+    if remaining > 0 {
+        FAIL_NEXT_CHECKPOINTS.store(remaining.saturating_sub(1), Ordering::SeqCst);
+        return Err(StoreError::Message("SQLITE_BUSY checkpoint".into()));
+    }
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
         .map_err(store_err)
+}
+
+fn insert_events(
+    conn: &Connection,
+    execution_id: &ExecutionId,
+    events: &[Event],
+) -> Result<(), StoreError> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let next: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE execution_id = ?1",
+            params![execution_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(store_err)?;
+    let mut stmt = conn
+        .prepare("INSERT INTO events (execution_id, seq, body) VALUES (?1, ?2, ?3)")
+        .map_err(store_err)?;
+    for (i, ev) in events.iter().enumerate() {
+        let body = serde_json::to_string(ev).map_err(json_err)?;
+        stmt.execute(params![execution_id.as_str(), next + i as i64, body])
+            .map_err(store_err)?;
+    }
+    Ok(())
 }
 
 fn insert_definition(
@@ -432,6 +536,16 @@ impl StateStore for SqliteStore {
         let _ = exec.definition().content_hash();
         let conn = self.lock()?;
         Self::persist_exec(&conn, exec)
+    }
+
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[Event],
+    ) -> Result<(), StoreError> {
+        let _ = exec.definition().content_hash();
+        let conn = self.lock()?;
+        Self::persist_exec_with_events(&conn, exec, events)
     }
 
     async fn workflow_definition(
@@ -953,6 +1067,37 @@ mod tests {
         assert_eq!(
             store.get(exec.id()).await.unwrap().unwrap().revision,
             keep
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn equal_revision_persist_with_events_does_not_duplicate_rows() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut exec = one_node();
+        let ev = Event::ExecutionStarted {
+            execution_id: exec.id().clone(),
+            workflow_id: exec.definition().id().clone(),
+            at: Timestamp(0),
+            schema_version: keel_rt::SCHEMA_VERSION,
+        };
+        store.persist_with_events(&exec, std::slice::from_ref(&ev)).await.unwrap();
+        exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        store
+            .persist_with_events(&exec, std::slice::from_ref(&ev))
+            .await
+            .unwrap();
+        let n = store.event_count(exec.id()).unwrap();
+        store
+            .persist_with_events(&exec, std::slice::from_ref(&ev))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.event_count(exec.id()).unwrap(),
+            n,
+            "equal-revision persist_with_events must not append event rows"
         );
         let _ = std::fs::remove_file(&path);
     }

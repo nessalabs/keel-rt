@@ -142,8 +142,8 @@ Dropping the handle is pinned by `dropping_execution_handle_cancels_graph_not_de
 | Policy panic | node Failed, execution **Failed** (fail-fast even under FailSubtree), scheduler alive | `policy_decide_panic_does_not_kill_scheduler`; **gap-closed-by:** `policy_panic_fail_fasts_even_under_fail_subtree` | catch_unwind then fail-fast |
 | Sink panic | execution Succeeded, later emits continue | `event_sink_panic_kernel_survives_and_progresses` | catch_unwind |
 | Sink blocking | `emit` is sync on apply; stalls inspect until emit returns; inbox send does not deadlock | **gap-closed-by:** `eventsink_blocking_does_not_deadlock_inspect` | stall / backpressure |
-| Store persist panic | in-memory Succeeded; no DomainEvent | `persist_panic_does_not_kill_execution` / `persist_panic_after_write_keeps_terminal_and_does_not_emit` | catch_unwind; no emit |
-| Store persist `Err` (mid-apply) | in-memory Succeeded; no DomainEvent | `failing_store_put_does_not_roll_back_in_memory` / `failing_store_every_put_diamond_still_succeeds` | log + skip emit |
+| Store persist panic | in-memory Succeeded; no Event | `persist_panic_does_not_kill_execution` / `persist_panic_after_write_keeps_terminal_and_does_not_emit` | catch_unwind; no emit |
+| Store persist `Err` (mid-apply) | in-memory Succeeded; no Event | `failing_store_put_does_not_roll_back_in_memory` / `failing_store_every_put_diamond_still_succeeds` | log + skip emit |
 | Store persist `Err` on **terminal** write | in-memory Succeeded; terminal persist attempted; no emit | **gap-closed-by:** `store_error_on_terminal_write_keeps_in_memory_succeeded` | skip emit; no rollback |
 | Transient persist `Err` of terminal / cancel, then clean Shutdown | store matches `wait` / Drop (Succeeded / Cancelled); resume does not re-invoke | **gap-closed-by:** `transient_terminal_persist_err_shutdown_flushes_succeeded` `transient_cancel_persist_err_shutdown_flushes_cancelled` `transient_terminal_persist_err_twice_shutdown_retries_until_ok` | do not advance `last_persisted` on Err; Shutdown `persist_then_emit_n(8)` |
 | MemoryStore mutex poison | next persist recovers | `poisoned_mutex_recovers_on_next_persist` | `into_inner` |
@@ -245,7 +245,7 @@ exactly-once must make the executor idempotent.
 | Snapshot iter order | definition order | `snapshot_iter_nodes_matches_definition_order` | `iter_nodes` |
 | `SCHEMA_VERSION` on live snapshot | `1` | `live_snapshot_carries_schema_version_1` | constant |
 | MemoryStore after Failed / Cancelled / Completed | stored snapshot matches terminal | **gap-closed-by:** `memory_store_persists_failed_cancelled_completed_terminals` | persist |
-| Display every `DomainEvent` | each variant names itself | `domain_event_display_covers_every_variant` | Display |
+| Display every `Event` | each variant names itself | `event_display_covers_every_variant` | Display |
 | Display every `NodeState` / `ExecutionState` | each variant names itself | `node_state_and_execution_state_display_covers_every_variant` / `snapshot_display_names_every_execution_and_node_state` | Display |
 
 ## ADR 0001 / persist backpressure

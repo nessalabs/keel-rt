@@ -12,7 +12,7 @@
 use bytes::Bytes;
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, DomainEvent, ExecutionContext, ExecutionState, Executor, FunctionExecutor,
+    AcceptPolicy, Event, ExecutionContext, ExecutionState, Executor, FunctionExecutor,
     MemoryStore, NodeId, NodeOutcome, NodeState, Resume, RetryPolicy, Runtime, StateStore,
     WorkflowDefinition,
 };
@@ -118,7 +118,7 @@ async fn fail_fast_is_execution_wide() {
     let n_failed = run
         .events()
         .iter()
-        .filter(|e| matches!(e, DomainEvent::ExecutionFailed { .. }))
+        .filter(|e| matches!(e, Event::ExecutionFailed { .. }))
         .count();
     assert_eq!(n_failed, 1);
     eprintln!(

@@ -3,7 +3,7 @@
 use super::common::within;
 use bytes::Bytes;
 use keel_rt::{
-    DomainEvent, ExecutionContext, ExecutionState, FnSink, FunctionExecutor, NodeOutcome, Runtime,
+    Event, ExecutionContext, ExecutionState, FnSink, FunctionExecutor, NodeOutcome, Runtime,
     WorkflowDefinition,
 };
 use std::sync::Arc;
@@ -13,7 +13,7 @@ async fn research_diamond_50_times_event_order() {
     for i in 0..50 {
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let ev = events.clone();
-        let sink = FnSink(move |e: &DomainEvent| ev.lock().unwrap().push(e.clone()));
+        let sink = FnSink(move |e: &Event| ev.lock().unwrap().push(e.clone()));
         let def = WorkflowDefinition::builder("research")
             .node("research", "research")
             .node("summarizer", "summarizer")
@@ -46,13 +46,13 @@ async fn research_diamond_50_times_event_order() {
         assert_eq!(state, ExecutionState::Succeeded, "iter {i}");
         let evs = events.lock().unwrap().clone();
         let writer_start = evs.iter().position(|e| {
-            matches!(e, DomainEvent::NodeStarted { node_id, .. } if node_id.as_str() == "writer")
+            matches!(e, Event::NodeStarted { node_id, .. } if node_id.as_str() == "writer")
         });
         let sum_ok = evs.iter().position(|e| {
-            matches!(e, DomainEvent::NodeSucceeded { node_id } if node_id.as_str() == "summarizer")
+            matches!(e, Event::NodeSucceeded { node_id, .. } if node_id.as_str() == "summarizer")
         });
         let crit_ok = evs.iter().position(|e| {
-            matches!(e, DomainEvent::NodeSucceeded { node_id } if node_id.as_str() == "critic")
+            matches!(e, Event::NodeSucceeded { node_id, .. } if node_id.as_str() == "critic")
         });
         let ws = writer_start.expect("writer started");
         assert!(sum_ok.unwrap() < ws, "writer started before summarizer succeeded");

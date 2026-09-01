@@ -209,8 +209,14 @@ fn lib_does_not_export_module_trees() {
 fn pr_template_and_agents_require_architecture_and_behavior() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
-    assert!(agents.contains("When a caller runs X, it used to Y. Now it Z."));
-    assert!(agents.contains("RuntimeBuilder"));
+    assert!(
+        agents.contains("The tests define the absences."),
+        "AGENTS must point at tests, not repeat the PR checklist"
+    );
+    assert!(
+        !agents.contains("When a caller runs X, it used to Y. Now it Z."),
+        "PR behavior sentence lives in pr_body_gate.py, not AGENTS prose"
+    );
 
     let tmpl = fs::read_to_string(root.join(".github/pull_request_template.md")).unwrap();
     assert!(tmpl.contains("## Architecture (before)"));
@@ -235,6 +241,7 @@ fn pr_template_and_agents_require_architecture_and_behavior() {
         "Policy",
         "StateStore",
         "EventSink",
+        "Event",
         "NodeOutcome",
         "ExecutionState",
     ] {
@@ -254,6 +261,7 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "test:",
         "adversarial:",
         "coverage:",
+        "pr-body:",
         "stress-resume:",
         "stress-100k:",
         "chaos-sqlite:",
@@ -280,13 +288,19 @@ fn ci_and_agents_name_phase2_review_jobs() {
         ci.contains("--test adversarial"),
         "adversarial job must run the kernel pack"
     );
+    assert!(
+        ci.contains("--test events"),
+        "test job must run the events pack"
+    );
+    assert!(
+        ci.contains("scripts/pr_body_gate.py"),
+        "pr-body job must run the description gate"
+    );
 
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
-    assert!(agents.contains("Phase 2+ review gate"));
+    assert!(agents.contains("The tests define the absences."));
     assert!(agents.contains("stress-resume"));
     assert!(agents.contains("chaos-sqlite"));
-    assert!(agents.contains("docs/RESUME_CATALOG.md"));
-    assert!(agents.contains("docs/CHAOS_LOG.md"));
 
     let tmpl = fs::read_to_string(root.join(".github/pull_request_template.md")).unwrap();
     assert!(tmpl.contains("## Phase 2+ review gate"));
@@ -294,9 +308,8 @@ fn ci_and_agents_name_phase2_review_jobs() {
     assert!(tmpl.contains("chaos-sqlite"));
 
     let rule = fs::read_to_string(root.join(".cursor/rules/pr-architecture.mdc")).unwrap();
-    assert!(rule.contains("Phase 2+ review gate"));
-    assert!(rule.contains("stress-resume"));
-    assert!(rule.contains("chaos-sqlite"));
+    assert!(rule.contains("pr_body_gate.py"));
+    assert!(rule.contains("The tests define the absences."));
 
     let catalog = fs::read_to_string(root.join("docs/RESUME_CATALOG.md")).unwrap();
     assert!(catalog.contains("Zero MISSING"));
@@ -311,6 +324,9 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "resume_256_wide_snapshot_within_bound",
         "transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded",
         "transient_terminal_persist_err_twice_shutdown_retries_until_ok",
+        "persist_err_then_ok_emits_events_for_the_durable_snapshot",
+        "equal_revision_persist_does_not_grow_event_rows",
+        "checkpoint_busy_after_terminal_commit_does_not_duplicate_events",
         "randomized_crash_inject_sqlite",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
@@ -320,4 +336,109 @@ fn ci_and_agents_name_phase2_review_jobs() {
     assert!(chaos.contains("two_thousand_short_jobs_one_file"));
     assert!(chaos.contains("wide_256_resume_under_concurrent_starts_is_sqlite_bound"));
     assert!(chaos.contains("wide_2k_and_join_crash_resume_of_ready"));
+}
+
+/// Phase 3 architect: kernel public surface is Event + EventSink. No EventLog type.
+#[test]
+fn kernel_src_has_no_public_event_log() {
+    for p in rust_files(&src_root()) {
+        let s = fs::read_to_string(&p).unwrap();
+        for raw in s.lines() {
+            let t = raw.trim();
+            if t.starts_with("//") || t.starts_with("///") || t.starts_with("//!") {
+                continue;
+            }
+            let pub_item = t.starts_with("pub ")
+                && (t.contains("trait EventLog")
+                    || t.contains("enum EventLog")
+                    || t.contains("struct EventLog")
+                    || t.contains("type EventLog")
+                    || (t.starts_with("pub use") && contains_word(t, "EventLog")));
+            assert!(
+                !pub_item,
+                "{} declares public EventLog (Phase 3: Event + EventSink only)",
+                rel(&p)
+            );
+        }
+    }
+}
+
+const PUBLIC_EVENT_VARIANTS: &[&str] = &[
+    "ExecutionStarted",
+    "ExecutionSucceeded",
+    "ExecutionFailed",
+    "ExecutionCompleted",
+    "ExecutionCancelled",
+    "NodeStarted",
+    "NodeSucceeded",
+    "NodeFailed",
+    "NodeTimedOut",
+    "NodeCancelled",
+    "NodeWaiting",
+];
+
+fn event_enum_variants(src: &str) -> Vec<String> {
+    let start = src
+        .find("pub enum Event {")
+        .expect("src/domain/events.rs must declare pub enum Event");
+    let rest = &src[start..];
+    let end = rest.find("\n}").expect("Event enum must close");
+    let mut names = Vec::new();
+    for line in rest[..end].lines() {
+        let t = line.trim();
+        if t.starts_with("pub ") || t.starts_with("//") || t.is_empty() {
+            continue;
+        }
+        let name: String = t
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Adding NodeReady (or any unlisted variant) fails CI.
+#[test]
+fn public_event_variants_are_frozen_without_node_ready() {
+    let src = fs::read_to_string(src_root().join("domain/events.rs")).unwrap();
+    let names = event_enum_variants(&src);
+    assert_eq!(
+        names, PUBLIC_EVENT_VARIANTS,
+        "Event variants must stay this exact set (no NodeReady, no EventLog fold)"
+    );
+    assert!(
+        !names.iter().any(|n| n == "NodeReady"),
+        "NodeReady is not a public Event"
+    );
+}
+
+#[test]
+fn pr_body_gate_script_enforces_mermaid_behavior_and_main_base() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("scripts/pr_body_gate.py");
+    assert!(script.is_file(), "scripts/pr_body_gate.py must exist");
+    let src = fs::read_to_string(&script).unwrap();
+    assert!(
+        src.contains("chaos pack missed main because #3 targeted a feature branch"),
+        "script must encode the #3-missed-main failure mode"
+    );
+    let st = std::process::Command::new("python3")
+        .arg(&script)
+        .arg("--self-test")
+        .status()
+        .expect("python3 pr_body_gate.py --self-test");
+    assert!(st.success(), "pr_body_gate.py --self-test failed");
+
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    assert!(
+        readme.contains("nessalabs/keel-rt"),
+        "README must name Origin nessalabs/keel-rt"
+    );
+    assert!(
+        readme.contains("GitHub is not the kernel"),
+        "README must say GitHub is not the kernel"
+    );
 }

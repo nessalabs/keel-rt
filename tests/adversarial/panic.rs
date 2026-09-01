@@ -5,7 +5,7 @@ use bytes::Bytes;
 use keel_rt::Policy;
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    DomainEvent, ExecutionState, FnSink, FunctionExecutor, NodeOutcome, NodeState, Runtime,
+    Event, ExecutionState, FnSink, FunctionExecutor, NodeOutcome, NodeState, Runtime,
     WorkflowDefinition,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,7 +41,7 @@ async fn event_sink_panic_kernel_survives_and_progresses() {
         .unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
     let h = hits.clone();
-    let sink = FnSink(move |_e: &DomainEvent| {
+    let sink = FnSink(move |_e: &Event| {
         let n = h.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
             panic!("sink exploded");

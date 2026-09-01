@@ -10,6 +10,10 @@ clippy:
 coverage:
     ./scripts/coverage.sh
 
+# PR description: mermaid + When a caller + base main (unless [stack]).
+pr-body:
+    python3 scripts/pr_body_gate.py --self-test
+
 # Sqlite resume stress (256-wide, sequential crash loop). Not coverage.
 stress-resume:
     cargo test -p keel-rt-sqlite --test resume_stress -- --test-threads=1 --nocapture

@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use keel_rt::{
-    DomainEvent, ExecutionContext, FnSink, NodeId, NodeOutcome, Runtime, WorkflowDefinition,
+    Event, ExecutionContext, FnSink, NodeId, NodeOutcome, Runtime, WorkflowDefinition,
 };
 use std::process::ExitCode;
 
@@ -38,7 +38,7 @@ async fn main() -> ExitCode {
         .build()
         .expect("diamond definition");
 
-    let sink = FnSink(|event: &DomainEvent| {
+    let sink = FnSink(|event: &Event| {
         println!("event    {event}");
     });
 

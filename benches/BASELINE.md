@@ -4,6 +4,36 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Phase 3 events re-measure (2026-08-31)
+
+`Event` + `EventSink` (no EventLog). persist_then_emit is store Ok then sink.
+MemoryStore still ignores the event slice (`persist_with_events` default →
+`persist`). Gate: no MemoryStore median >10% vs the Phase 2 resume column.
+
+| bench | previous this run | this run | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 (debug median n=7) | 4.367 ms | 4.383 ms | +0.4% |
+| deep_chain_128 (debug median n=7) | 2.033 ms | 1.932 ms | −5.0% |
+| diamond_10k (debug median n=7) | 162.417 ms | 154.809 ms | −4.7% |
+| apply_only (debug median n=7) | 14.534 ms | 14.898 ms | +2.5% |
+
+All four inside the 10% band. **No revert.** Sqlite event rows are adapter-only
+and are not this gate.
+
+## Persist-err event hunt (2026-09-01)
+
+Keep `pending_events` until persist `Ok`. Success persist path unchanged.
+Gate: no MemoryStore median >10% vs the Phase 3 events column.
+
+| bench | previous this run | this run | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 (debug median n=7) | 4.383 ms | 4.328 ms | −1.3% |
+| deep_chain_128 (debug median n=7) | 1.932 ms | 1.941 ms | +0.5% |
+| diamond_10k (debug median n=7) | 154.809 ms | 154.715 ms | −0.1% |
+| apply_only (debug median n=7) | 14.898 ms | 14.815 ms | −0.6% |
+
+All four inside the 10% band. **No revert.**
+
 Allocator experiment (not this debug gate): [`JEMALLOC.md`](JEMALLOC.md).
 This crate does not pick an allocator and has no `jemalloc` feature.
 current_thread sys vs jemalloc was noise — not recommended.

@@ -6,9 +6,9 @@
 use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
-    Execution, ExecutionContext, ExecutionId, ExecutionSnapshot, ExecutionState, Join, NodeId,
-    NodeOutcome, NodeState, OnFailure, Resume, ResumeError, RetryPolicy, Runtime, StateStore,
-    StoreError, WorkflowDefinition,
+    AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionId, ExecutionSnapshot,
+    ExecutionState, Join, NodeId, NodeOutcome, NodeState, OnFailure, Resume, ResumeError,
+    RetryPolicy, Runtime, SCHEMA_VERSION, StateStore, StoreError, Timestamp, WorkflowDefinition,
 };
 use keel_rt_sqlite::SqliteStore;
 use std::path::PathBuf;
@@ -1107,13 +1107,20 @@ impl StateStore for FailFirstTerminal {
         self.inner.get(id).await
     }
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.persist_with_events(exec, &[]).await
+    }
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[Event],
+    ) -> Result<(), StoreError> {
         if exec.state().is_terminal() {
             let k = self.n.fetch_add(1, Ordering::SeqCst) + 1;
             if k == 1 {
                 return Err(StoreError::Message("busy terminal".into()));
             }
         }
-        self.inner.persist(exec).await
+        self.inner.persist_with_events(exec, events).await
     }
     async fn workflow_definition(
         &self,
@@ -1180,6 +1187,10 @@ fn transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded() {
         } else {
             SqliteStore::open(&path).unwrap()
         };
+        assert!(
+            store.event_count(&id).unwrap() >= 3,
+            "shutdown persist Ok must write event rows for the durable snapshot"
+        );
         let rt = current_rt();
         rt.block_on(async {
             assert_eq!(
@@ -1187,7 +1198,7 @@ fn transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded() {
                 ExecutionState::Succeeded
             );
             let runtime = Runtime::builder()
-                .store(store)
+                .store(store.clone())
                 .register_fn("a", |_c: ExecutionContext| async {
                     panic!("succeeded must not re-run after shutdown flush")
                 })
@@ -1216,13 +1227,20 @@ impl StateStore for FailFirstCancel {
         self.inner.get(id).await
     }
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.persist_with_events(exec, &[]).await
+    }
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[Event],
+    ) -> Result<(), StoreError> {
         if exec.state() == ExecutionState::Cancelled {
             let k = self.n.fetch_add(1, Ordering::SeqCst) + 1;
             if k == 1 {
                 return Err(StoreError::Message("busy cancel".into()));
             }
         }
-        self.inner.persist(exec).await
+        self.inner.persist_with_events(exec, events).await
     }
     async fn workflow_definition(
         &self,
@@ -1309,13 +1327,20 @@ impl StateStore for FailFirstTwoTerminal {
         self.inner.get(id).await
     }
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.persist_with_events(exec, &[]).await
+    }
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[Event],
+    ) -> Result<(), StoreError> {
         if exec.state().is_terminal() {
             let k = self.n.fetch_add(1, Ordering::SeqCst) + 1;
             if k <= 2 {
                 return Err(StoreError::Message("SQLITE_BUSY terminal twice".into()));
             }
         }
-        self.inner.persist(exec).await
+        self.inner.persist_with_events(exec, events).await
     }
     async fn workflow_definition(
         &self,
@@ -1383,6 +1408,275 @@ fn transient_terminal_persist_err_twice_shutdown_retries_sqlite() {
             .store(store)
             .register_fn("a", |_c: ExecutionContext| async {
                 panic!("succeeded must not re-run after double persist Err + Shutdown")
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn waiting_resume_does_not_append_event_rows() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    let id = rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .register_fn("a", |ctx: ExecutionContext| async move {
+                NodeOutcome::Waiting {
+                    token: ctx.resume_token,
+                }
+            })
+            .build();
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "a")
+            .build()
+            .unwrap();
+        let handle = runtime.start(def).unwrap();
+        let id = handle.execution_id().clone();
+        handle.wait_stable().await;
+        id
+    });
+    drop(rt);
+    let n = store.event_count(&id).unwrap();
+    assert!(n >= 2, "start + NodeWaiting, got {n}");
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .register_fn("a", |_c: ExecutionContext| async {
+                panic!("Waiting must not re-run")
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        handle.wait_stable().await;
+        assert_eq!(
+            store.event_count(&id).unwrap(),
+            n,
+            "no-op Waiting resume must not persist a new event batch"
+        );
+        std::mem::forget(handle);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn event_rows_in_snapshot_txn_are_not_used_for_resume() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    let id = rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .register_fn("a", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "a")
+            .build()
+            .unwrap();
+        let handle = runtime.start(def).unwrap();
+        let id = handle.execution_id().clone();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        id
+    });
+    drop(rt);
+    let n = store.event_count(&id).unwrap();
+    assert!(n >= 3, "started + node events + succeeded, got {n}");
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().state,
+            ExecutionState::Succeeded
+        );
+        let runtime = Runtime::builder()
+            .store(store)
+            .register_fn("a", |_c: ExecutionContext| async {
+                panic!("resume is snapshot, not event replay")
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+fn exec_succeeded_event(exec: &Execution) -> Event {
+    Event::ExecutionSucceeded {
+        execution_id: exec.id().clone(),
+        workflow_id: exec.definition().id().clone(),
+        at: Timestamp(0),
+        schema_version: SCHEMA_VERSION,
+    }
+}
+
+fn succeeded_copies(store: &SqliteStore, id: &ExecutionId) -> usize {
+    store
+        .event_bodies(id)
+        .unwrap()
+        .iter()
+        .filter(|b| b.contains("ExecutionSucceeded"))
+        .count()
+}
+
+/// Equal-revision persist used to INSERT events (MAX(seq)+1). Two Runtimes or
+/// Shutdown retry after a committed terminal then appended copies.
+#[test]
+fn equal_revision_persist_does_not_grow_event_rows() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let mut exec = Execution::new(def);
+        exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        let ev = exec_succeeded_event(&exec);
+        store
+            .persist_with_events(&exec, std::slice::from_ref(&ev))
+            .await
+            .unwrap();
+        let n = store.event_count(exec.id()).unwrap();
+        assert_eq!(n, 1);
+        store
+            .persist_with_events(&exec, std::slice::from_ref(&ev))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.event_count(exec.id()).unwrap(),
+            n,
+            "equal-revision must not append event rows"
+        );
+        store
+            .persist_with_events(&exec, std::slice::from_ref(&ev))
+            .await
+            .unwrap();
+        assert_eq!(store.event_count(exec.id()).unwrap(), n);
+    });
+    drop(rt);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Checkpoint SQLITE_BUSY after COMMIT used to fail persist. Shutdown retried
+/// up to 8×, each hit equal-revision and appended ExecutionSucceeded.
+#[test]
+fn checkpoint_busy_after_terminal_commit_does_not_duplicate_events() {
+    let path = tmp();
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SqliteStore::fail_next_wal_checkpoints(0);
+        }
+    }
+    let _reset = Reset;
+    SqliteStore::fail_next_wal_checkpoints(16);
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    let id = rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .register_fn("a", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let handle = runtime
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("a", "a")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        drop(runtime);
+        tokio::task::yield_now().await;
+        id
+    });
+    drop(rt);
+    SqliteStore::fail_next_wal_checkpoints(0);
+    let n = store.event_count(&id).unwrap();
+    let succeeded = succeeded_copies(&store, &id);
+    assert_eq!(
+        succeeded, 1,
+        "ExecutionSucceeded copies must be one batch, not Shutdown retries; event_count={n} bodies={:?}",
+        store.event_bodies(&id).unwrap()
+    );
+    assert!(n >= 3 && n <= 5, "one persist batch, got event_count={n}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// COMMIT already wrote Succeeded. Checkpoint Err must not look like a missing
+/// snapshot: persist returns Ok and resume sees Succeeded.
+#[test]
+fn checkpoint_busy_after_commit_is_persist_ok_and_resume_sees_succeeded() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    let id = rt.block_on(async {
+        let mut exec = Execution::new(
+            WorkflowDefinition::builder("wf")
+                .node("a", "e")
+                .build()
+                .unwrap(),
+        );
+        exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        exec.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &AcceptPolicy,
+            Timestamp(0),
+        )
+        .unwrap();
+        exec.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+            },
+            &AcceptPolicy,
+            Timestamp(0),
+        )
+        .unwrap();
+        assert_eq!(exec.state(), ExecutionState::Succeeded);
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SqliteStore::fail_next_wal_checkpoints(0);
+            }
+        }
+        let _reset = Reset;
+        SqliteStore::fail_next_wal_checkpoints(1);
+        store
+            .persist_with_events(&exec, &[exec_succeeded_event(&exec)])
+            .await
+            .expect("COMMIT succeeded; checkpoint BUSY must not fail persist");
+        SqliteStore::fail_next_wal_checkpoints(0);
+        exec.id().clone()
+    });
+    drop(rt);
+    drop(store);
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().state,
+            ExecutionState::Succeeded
+        );
+        let runtime = Runtime::builder()
+            .store(store)
+            .register_fn("e", |_c: ExecutionContext| async {
+                panic!("terminal resume must not re-run")
             })
             .build();
         let handle = runtime.resume(&id).await.unwrap();

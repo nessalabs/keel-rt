@@ -1,5 +1,26 @@
 # Changelog
 
+## Phase 3 events (`phase-3/events`)
+
+Public surface is [`Event`] + [`EventSink`] only (no `EventLog`). Variants:
+ExecutionStarted/Succeeded/Failed/Completed/Cancelled and
+NodeStarted/Succeeded/Failed/TimedOut/Cancelled/Waiting. No `NodeReady`.
+Each event carries execution id, workflow id, node id when it is a node
+event, attempt, Clock time, and `schema_version`. persist_then_emit is
+store Ok then sink; sink `Err` / panic does not un-persist or fail the
+run. Resume is still the StateStore snapshot. sqlite may write event rows
+in the same persist txn; those rows are never used to resume. At-least-once
+re-invoke may emit the same node event twice. Absences are tests: no public
+`EventLog`, frozen Event variants (no `NodeReady`), persist-before-announce,
+`scripts/pr_body_gate.py` (mermaid + `When a caller` + base `main` unless
+`[stack]`). persist `Err` no longer drops pending events: a later persist
+`Ok` (including Shutdown retry) announces the transitions that became durable.
+sqlite: COMMIT is persist Ok; equal-revision does not insert event rows;
+checkpoint `Err` after COMMIT does not fail persist. `EventSink::try_emit` is
+the required method; `emit` swallows `Err`. `Event::node_id` / `attempt` are
+accessors. Resume seeds `last_persisted` from the snapshot so a no-op Waiting
+restore does not open a new sqlite txn.
+
 ## Shutdown retries persist until the store recovers (`chaos/load-p2`)
 
 A single extra persist on Shutdown left sqlite **Running** when the terminal

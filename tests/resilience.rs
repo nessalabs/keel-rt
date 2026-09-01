@@ -16,7 +16,7 @@ use keel_rt::testing::{
     FailingStore, FaultySink, FlakyThen, NetFault, ScriptedExecutor, WorkflowTest,
 };
 use keel_rt::{
-    AcceptPolicy, DomainEvent, ExecutionState, FunctionExecutor, MemoryStore, NodeId, NodeOutcome,
+    AcceptPolicy, Event, ExecutionState, FunctionExecutor, MemoryStore, NodeId, NodeOutcome,
     NodeState, RetryPolicy, Runtime, StateStore, WorkflowDefinition,
 };
 use std::time::{Duration, Instant};
@@ -496,7 +496,7 @@ async fn timeout_after_clock_while_running() {
     let evs = run.events();
     assert!(evs
         .iter()
-        .any(|e| matches!(e, DomainEvent::NodeTimedOut { node_id } if node_id.as_str() == "t")));
+        .any(|e| matches!(e, Event::NodeTimedOut { node_id, .. } if node_id.as_str() == "t")));
     eprintln!(
         "resilience timeout_after_clock_while_running node=TimedOut exec=Failed elapsed={} profile={}",
         format_ms(started.elapsed()),

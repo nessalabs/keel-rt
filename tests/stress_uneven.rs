@@ -8,7 +8,7 @@
 use bytes::Bytes;
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    DomainEvent, ExecutionContext, ExecutionState, FunctionExecutor, NodeId, NodeOutcome,
+    Event, ExecutionContext, ExecutionState, FunctionExecutor, NodeId, NodeOutcome,
     NodeState, RetryPolicy, DEFAULT_CANCEL_BOUND,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -81,7 +81,7 @@ async fn straggler_join() {
     let evs = run.events();
     assert!(
         !evs.iter().any(|e| {
-            matches!(e, DomainEvent::NodeStarted { node_id, .. } if node_id.as_str() == "join")
+            matches!(e, Event::NodeStarted { node_id, .. } if node_id.as_str() == "join")
         }),
         "join must not have started before the straggler"
     );
@@ -100,10 +100,10 @@ async fn straggler_join() {
     );
     let evs = run.events();
     let slow_ok = evs.iter().position(|e| {
-        matches!(e, DomainEvent::NodeSucceeded { node_id } if node_id.as_str() == "slow")
+        matches!(e, Event::NodeSucceeded { node_id, .. } if node_id.as_str() == "slow")
     });
     let join_start = evs.iter().position(|e| {
-        matches!(e, DomainEvent::NodeStarted { node_id, .. } if node_id.as_str() == "join")
+        matches!(e, Event::NodeStarted { node_id, .. } if node_id.as_str() == "join")
     });
     assert!(
         slow_ok.unwrap() < join_start.unwrap(),

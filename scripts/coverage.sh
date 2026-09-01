@@ -30,6 +30,7 @@ TESTS=(
   --test adversarial
   --test catalog
   --test consumer
+  --test events
   --test graph
   --test resilience
   --test resume

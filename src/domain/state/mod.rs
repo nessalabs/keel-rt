@@ -191,7 +191,7 @@ pub enum ApplyCmd {
 /// map them with [`Self::newly_runnable_ids`]. Slots are never public.
 #[derive(Clone, Debug, Default)]
 pub struct ApplyEffect {
-    pub events: Vec<crate::domain::events::DomainEvent>,
+    pub events: Vec<crate::domain::events::Event>,
     pub(crate) newly_runnable: Vec<NodeSlot>,
     pub(crate) to_abort: Vec<NodeSlot>,
     pub changed: bool,
@@ -469,7 +469,7 @@ fn count_kind(s: &NodeState) -> u8 {
 mod tests {
     use super::*;
     use crate::domain::definition::{Join, OnFailure};
-    use crate::domain::events::DomainEvent;
+    use crate::domain::events::Event;
     use crate::domain::policy::{AcceptPolicy, Policy, PolicyDecision};
     use bytes::Bytes;
 
@@ -487,7 +487,7 @@ mod tests {
         effect
             .events
             .iter()
-            .filter(|e| matches!(e, DomainEvent::ExecutionFailed { .. }))
+            .filter(|e| matches!(e, Event::ExecutionFailed { .. }))
             .count()
     }
 

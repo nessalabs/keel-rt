@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, ApplyError, Clock, DomainEvent, Execution, ExecutionContext,
+    AcceptPolicy, ApplyCmd, ApplyError, Clock, Event, Execution, ExecutionContext,
     ExecutionState, FnSink, Join, MemoryStore, NeverWaitPolicy, NodeId, NodeOutcome, NodeState,
     NoopStore, OnFailure, Policy, PolicyDecision, ResumeToken, Runtime, StartError, StateStore,
     Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
@@ -275,7 +275,7 @@ async fn fn_sink_display_names_start_and_success() {
         .build()
         .unwrap();
     let rt = Runtime::builder()
-        .sink(FnSink(move |e: &DomainEvent| {
+        .sink(FnSink(move |e: &Event| {
             log.lock().unwrap().push(e.to_string());
         }))
         .register_fn("a", |_ctx: ExecutionContext| async {
@@ -322,98 +322,124 @@ fn apply_start_twice_is_illegal_unknown_retry_is_noop() {
 }
 
 #[test]
-fn domain_event_display_covers_every_variant() {
+fn event_display_covers_every_variant() {
     let execution_id = keel_rt::ExecutionId::new();
+    let workflow_id = keel_rt::WorkflowId::new("wf");
     let node_id = NodeId::new("n");
     let token = ResumeToken::issue(execution_id.clone(), node_id.clone(), 2);
     let at = Timestamp::from_millis(9);
+    let sv = keel_rt::SCHEMA_VERSION;
     let cases = [
         (
-            DomainEvent::ExecutionStarted {
+            Event::ExecutionStarted {
                 execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
+                at,
+                schema_version: sv,
             },
             "execution started",
         ),
         (
-            DomainEvent::ExecutionSucceeded {
+            Event::ExecutionSucceeded {
                 execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
+                at,
+                schema_version: sv,
             },
             "execution succeeded",
         ),
         (
-            DomainEvent::ExecutionFailed {
+            Event::ExecutionFailed {
                 execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
+                at,
+                schema_version: sv,
             },
             "execution failed",
         ),
         (
-            DomainEvent::ExecutionCancelled {
+            Event::ExecutionCancelled {
                 execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
+                at,
+                schema_version: sv,
             },
             "execution cancelled",
         ),
         (
-            DomainEvent::ExecutionWaiting {
+            Event::ExecutionCompleted {
                 execution_id: execution_id.clone(),
-            },
-            "execution waiting",
-        ),
-        (
-            DomainEvent::ExecutionCompleted {
-                execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
+                at,
+                schema_version: sv,
             },
             "execution completed",
         ),
         (
-            DomainEvent::NodeReady {
-                node_id: node_id.clone(),
-                runnable_at: None,
-            },
-            "node n ready",
-        ),
-        (
-            DomainEvent::NodeReady {
-                node_id: node_id.clone(),
-                runnable_at: Some(at),
-            },
-            "node n ready at",
-        ),
-        (
-            DomainEvent::NodeStarted {
+            Event::NodeStarted {
+                execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
                 node_id: node_id.clone(),
                 attempt: 3,
+                at,
+                schema_version: sv,
             },
             "started attempt=3",
         ),
         (
-            DomainEvent::NodeSucceeded {
+            Event::NodeSucceeded {
+                execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
                 node_id: node_id.clone(),
+                attempt: 1,
+                at,
+                schema_version: sv,
             },
             "node n succeeded",
         ),
         (
-            DomainEvent::NodeFailed {
+            Event::NodeFailed {
+                execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
                 node_id: node_id.clone(),
+                attempt: 1,
+                at,
+                schema_version: sv,
                 error: keel_rt::NodeError::new("boom"),
             },
             "failed: boom",
         ),
         (
-            DomainEvent::NodeCancelled {
+            Event::NodeCancelled {
+                execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
                 node_id: node_id.clone(),
+                attempt: 1,
+                at,
+                schema_version: sv,
             },
             "node n cancelled",
         ),
         (
-            DomainEvent::NodeWaiting {
+            Event::NodeWaiting {
+                execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
                 node_id: node_id.clone(),
+                attempt: 2,
+                at,
+                schema_version: sv,
                 token: token.clone(),
             },
             "node n waiting",
         ),
         (
-            DomainEvent::NodeTimedOut {
+            Event::NodeTimedOut {
+                execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
                 node_id: node_id.clone(),
+                attempt: 1,
+                at,
+                schema_version: sv,
             },
             "node n timed out",
         ),
@@ -421,6 +447,10 @@ fn domain_event_display_covers_every_variant() {
     for (ev, needle) in cases {
         let s = ev.to_string();
         assert!(s.contains(needle), "{s} should contain {needle}");
+        assert_eq!(ev.execution_id(), &execution_id);
+        assert_eq!(ev.workflow_id(), &workflow_id);
+        assert_eq!(ev.at(), at);
+        assert_eq!(ev.schema_version(), sv);
     }
 }
 
@@ -484,7 +514,7 @@ async fn policy_store_sink_arc_and_box_adapters_run() {
     store.put(&exec.snapshot()).await.unwrap();
     let seen = Arc::new(std::sync::Mutex::new(0u32));
     let c = seen.clone();
-    let sink: Arc<dyn keel_rt::EventSink> = Arc::new(FnSink(move |_e: &DomainEvent| {
+    let sink: Arc<dyn keel_rt::EventSink> = Arc::new(FnSink(move |_e: &Event| {
         *c.lock().unwrap() += 1;
     }));
     let rt = Runtime::builder()
