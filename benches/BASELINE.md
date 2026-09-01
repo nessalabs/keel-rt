@@ -8,34 +8,34 @@ Median of 7 iterations unless noted.
 
 T is `Ready { runnable_at: Some(T) }` on the snapshot. FakeClock park; no
 sqlite timer table. Same machine, debug, `current_thread`, n=7 unless noted.
+Re-measured this session against `/tmp/keel-main` at `da1e6fa` (paired run).
 
 ### MemoryStore hot path (no timers) vs `main` `da1e6fa`
 
 | bench | main `da1e6fa` | phase-5/timers | change |
 |---|---:|---:|---:|
-| wide_fan_out_256 | 4.396 ms | 4.348 ms | **−1.1%** |
-| deep_chain_128 | 1.945 ms | 1.926 ms | **−1.0%** |
-| diamond_10k | 157.270 ms | 163.450 ms | +3.9% |
-| apply_only | 14.857 ms | 14.730 ms | **−0.9%** |
+| wide_fan_out_256 | 4.560 ms | 4.527 ms | **−0.7%** |
+| deep_chain_128 | 2.065 ms | 2.081 ms | +0.8% |
+| diamond_10k | 164.347 ms | 164.096 ms | **−0.2%** |
+| apply_only | 14.967 ms | 14.935 ms | **−0.2%** |
 
-All four inside the 10% band. **No revert.** Diamond variance is the usual
-10k-node noise (a second `main` sample was 166.433 ms).
+All four inside the 10% band. **No revert.**
 
 ### With timers (this branch only; `main` has no this pack)
 
 | bench | median | notes |
 |---|---:|---|
-| 256-wide all parked 1ms then fire | 3.269 ms | resume + `FakeClock::advance` + wait |
-| 256-wide mixed immediate + parked | 1.815 ms | half Succeeded, half Ready { T } |
-| park/unpark one node | 0.042 ms | resume parked + advance |
-| no-T start/wait (1 node) | 0.051 ms | Phase 3-shaped hot path |
-| sqlite persist 256 Ready { T } | 4.600 ms | FULL, n=5 |
-| sqlite persist 256 Ready now | 3.572 ms | Start only, n=5 |
-| sqlite 256 parked crash-resume + advance | 390 ms | test wall (apply+persist+reopen+fire) |
+| 256-wide all parked 1ms then fire | 3.323 ms | resume + `FakeClock::advance` + wait |
+| 256-wide mixed immediate + parked | 1.878 ms | half Succeeded, half Ready { T } |
+| park/unpark one node | 0.044 ms | resume parked + advance |
+| no-T start/wait (1 node) | 0.053 ms | Phase 3-shaped hot path |
+| sqlite persist 256 Ready { T } | 4.091 ms | FULL, n=5 |
+| sqlite persist 256 Ready now | 3.314 ms | Start only, n=5 |
+| sqlite 256 parked crash-resume + advance | 370 ms | `crash_resume_256_parked_advance_once_each_once` |
 
 Park/unpark is in the noise vs no-T start/wait (both ~50 µs). sqlite persist
 of `runnable_at: Some` is a fatter node body than Start-only Ready now
-(+29% this sample), not a MemoryStore regression.
+(+23% this sample), not a MemoryStore regression.
 
 ## Phase 3 events re-measure (2026-08-31)
 
