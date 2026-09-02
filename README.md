@@ -5,7 +5,9 @@
 Kernel lives on Origin: `nessalabs/keel-rt`. GitHub is not the kernel.
 
 Phase 2: at-least-once **snapshot resume**. If the process dies, call
-`Runtime::resume` with the `ExecutionId`. A node
+`Runtime::resume` with the `ExecutionId` (Failed stay Failed).
+`Runtime::resume_with(id, Recover::RetryFailed)` re-invokes Failed /
+TimedOut nodes. A node
 that was Running is re-invoked (side effects may run twice — make the
 executor idempotent if you need exactly-once). Succeeded nodes never re-run.
 Waiting keeps the same token. File persistence is a sibling crate

@@ -1,5 +1,27 @@
 # Changelog
 
+## Phase 4 RetryFailed (`phase-4/retry-failed`)
+
+[`Runtime::resume`] is still Continue: Failed stay Failed. [`Runtime::resume_with`]
+`Recover::RetryFailed` turns Failed/TimedOut/Cancelled into Pending through
+`set_state` (attempt 0, drop token/output; keep `last_error`), rebuilds
+remain, then Ready-now only when `remain == 0` (dispatch is attempt 1, a
+fresh [`RetryPolicy`] budget). A Succeeded AllDone join whose fan-in
+includes a retried pred goes Pending (output cleared) and re-runs after
+the pred Succeeded. An AllDone join that itself Failed waits
+(`remain > 0`) then re-runs. Leaves whose preds are still Succeeded
+become Ready. Non-consumer Succeeded nodes keep Bytes. Waiting tokens
+stay. Execution must be Failed or Completed-with-failures; Succeeded /
+Waiting / Cancelled → [`ResumeError::NotFailed`] (`ApplyError::Illegal`
+only). Persist the recovered snapshot before dispatch (Ready-now on the
+store in that gap; `inspect` after resume_with is post-Restore). CAS
+still applies. New attempts use the definition `OnFailure` (fail-fast
+default unchanged). Token resume is still [`ExecutionHandle::resume`]
+(`Resume::Complete` / `Reinvoke`). No cron, no per-node freshness, no
+EventLog, no NodeReady. Wait is still the Runtime drive
+(`next_drive_event`: inbox vs `Clock::wait_until`). Due T is `RetryDue`
+then dispatch — not TimedOut.
+
 ## Phase 5 snapshot deadlines (`phase-5/timers`)
 
 A node is not runnable until **T**. T is a [`Timestamp`] (u64 millis) on
@@ -9,7 +31,7 @@ keeps the node Running (executor Delay) and is not snapshot T. Waiting stays
 HITL. Kernel has no cron, no wall timezone, no sqlite timer table.
 `Event::NodeTimedOut` already exists; do not emit `NodeReady`. Drop handle
 still cancels the Runtime drive waiter (RAII). Fail-fast / AND-join defaults
-unchanged. `Recover::RetryFailed` is not a kernel command. Domain and runtime
+unchanged. Domain and runtime
 name [`Clock`] only; `FakeClock` lives in `src/testing` and `tests/`. sqlite
 persists whatever the snapshot already has (`synchronous=FULL` default).
 Waiting for T is the Runtime drive (`next_drive_event`: inbox vs

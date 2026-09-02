@@ -101,7 +101,7 @@ impl Execution {
     }
 }
 
-fn remain_for(def: &WorkflowDefinition, nodes: &[NodeRuntime], slot: NodeSlot) -> u32 {
+pub(crate) fn remain_for(def: &WorkflowDefinition, nodes: &[NodeRuntime], slot: NodeSlot) -> u32 {
     let preds = def.pred_slots(slot);
     match def.join_at(slot) {
         Join::AllSucceeded => preds

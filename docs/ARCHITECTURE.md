@@ -9,7 +9,7 @@ No work-stealing, no product resource types, no YAML/HTTP/CLI.
 src/domain/          rules. No tokio, no runtime, no std::net.
   definition.rs      validated DAG; OnFailure + Join live here only
   ids.rs             NodeId / WorkflowId / ExecutionId / ExecutorId / ResumeToken
-  outcome.rs         NodeOutcome, Resume, NodeError
+  outcome.rs         NodeOutcome, Resume, Recover, NodeError
   policy.rs          Policy port + Accept / Retry / NeverWait
   snapshot.rs        persistable ExecutionSnapshot (HashMap + definition order)
   state.rs           Execution aggregate + NodeState / ExecutionState
@@ -240,6 +240,7 @@ edit `scheduler.rs`.
 | Persist / dirty slots                        | `StateStore` / `MemoryStore`               | scheduler policy          |
 | File-backed store                            | `crates/keel-rt-sqlite`                    | `scheduler.rs` / kernel `Cargo.toml` |
 | Snapshot resume / CAS                        | `restore.rs` + `Runtime::resume`           | event replay              |
+| RetryFailed recover                          | `apply` + `Runtime::resume_with`           | `handle.resume` (HITL)    |
 | Cancel, wait, token-resume, inspect          | `handle` + `inject::Event`                 | domain types              |
 | Ready-queue / permits / spawn                | `scheduler` + `spawn`                      | `Policy`                  |
 | Test graph construction                      | `WorkflowTest`                             | private scheduler fields  |

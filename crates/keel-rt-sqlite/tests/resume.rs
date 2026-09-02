@@ -7,7 +7,7 @@ use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
     AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionId, ExecutionSnapshot,
-    ExecutionState, Join, NodeId, NodeOutcome, NodeState, OnFailure, Resume, ResumeError,
+    ExecutionState, Join, NodeId, NodeOutcome, NodeState, OnFailure, Recover, Resume, ResumeError,
     RetryPolicy, Runtime, StateStore, StoreError, Timestamp, WorkflowDefinition, SCHEMA_VERSION,
 };
 use keel_rt_sqlite::SqliteStore;
@@ -112,6 +112,143 @@ fn crash_during_b_running_reinvokes_b_not_a() {
         assert_eq!(b_runs.load(Ordering::SeqCst), 1);
     });
     let _ = std::fs::remove_file(&path);
+}
+
+/// Recover persist must land Ready-now before StartNode. Stall returning
+/// from that persist so drive cannot dispatch; drop Runtime; Continue
+/// re-invokes. Without recover persist, get() stays Failed and Continue
+/// does not re-run — this test must fail.
+#[test]
+fn retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes() {
+    let path = tmp();
+    let recovered = Arc::new(tokio::sync::Notify::new());
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let id = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let id = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .register_fn("a", |_ctx: ExecutionContext| async {
+                    NodeOutcome::failed("boom")
+                })
+                .build();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("a", "a")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            let id = handle.execution_id().clone();
+            assert_eq!(handle.wait().await, ExecutionState::Failed);
+            id
+        });
+        drop(rt);
+        let stall = StallAfterFirstPersist {
+            inner: store.clone(),
+            recovered: recovered.clone(),
+            hold: hold.clone(),
+            first: AtomicU32::new(0),
+        };
+        let rt = current_rt();
+        rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(stall)
+                .register_fn("a", |_ctx: ExecutionContext| async {
+                    panic!("StartNode must not run; recover persist is stalled")
+                })
+                .build();
+            let resume_id = id.clone();
+            let task =
+                tokio::spawn(
+                    async move { runtime.resume_with(&resume_id, Recover::RetryFailed).await },
+                );
+            tokio::time::timeout(BOUND, recovered.notified())
+                .await
+                .expect("recover persist must commit");
+            let snap = store.get(&id).await.unwrap().unwrap();
+            let node = snap.node(&NodeId::new("a")).unwrap();
+            assert!(
+                matches!(node.state, NodeState::Ready { runnable_at: None }),
+                "get() after recover persist must be Ready-now, got {:?}",
+                node.state
+            );
+            assert_ne!(snap.state, ExecutionState::Failed);
+            assert!(node.resume_token.is_none());
+            assert!(node.last_error.is_some());
+            task.abort();
+        });
+        drop(rt);
+        drop(store);
+        id
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = current_rt();
+    rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store)
+            .register_fn("a", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "Continue from Ready-never-Running must re-invoke"
+        );
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Writes the first persist (recover snapshot), then never returns so
+/// Restore / StartNode cannot run.
+struct StallAfterFirstPersist {
+    inner: SqliteStore,
+    recovered: Arc<tokio::sync::Notify>,
+    hold: Arc<tokio::sync::Notify>,
+    first: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl StateStore for StallAfterFirstPersist {
+    async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+        self.inner.put(snapshot).await
+    }
+
+    async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
+        self.inner.get(id).await
+    }
+
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.persist_with_events(exec, &[]).await
+    }
+
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[Event],
+    ) -> Result<(), StoreError> {
+        self.inner.persist_with_events(exec, events).await?;
+        if self.first.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.recovered.notify_waiters();
+            self.hold.notified().await;
+        }
+        Ok(())
+    }
+
+    async fn workflow_definition(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<WorkflowDefinition>, StoreError> {
+        self.inner.workflow_definition(id).await
+    }
 }
 
 #[test]

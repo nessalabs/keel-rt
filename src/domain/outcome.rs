@@ -59,6 +59,17 @@ pub enum Resume {
     Reinvoke,
 }
 
+/// How [`crate::Runtime::resume_with`] continues a stored execution.
+///
+/// [`Self::Continue`] is Phase 2 default (`Runtime::resume`): Failed stay
+/// Failed. [`Self::RetryFailed`] re-invokes Failed/TimedOut nodes.
+/// [`Resume`] on the handle is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recover {
+    Continue,
+    RetryFailed,
+}
+
 impl fmt::Display for NodeOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

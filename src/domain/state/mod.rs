@@ -214,6 +214,12 @@ pub enum ApplyCmd {
         node_id: NodeId,
     },
     ForceCancelRunning,
+    /// Failed/TimedOut → Pending (attempt reset like Cancelled; keep
+    /// `last_error`). Remain recounted; `remain == 0` → Ready-now
+    /// (dispatch is attempt 1). A Succeeded AllDone consumer of a retried
+    /// pred goes Pending (output cleared). Waiting stays. Only from
+    /// [`ExecutionState::Failed`] or [`ExecutionState::Completed`].
+    RetryFailed,
 }
 
 /// Result of one [`Execution::apply`].
@@ -384,15 +390,16 @@ impl Execution {
     }
 
     fn dec_count(&mut self, s: &NodeState) {
-        // Terminal states are never left; n_succeeded/failed/cancelled only increase.
-        if matches!(s, NodeState::Pending) {
-            self.n_pending -= 1;
-        } else if matches!(s, NodeState::Ready { .. }) {
-            self.n_ready -= 1;
-        } else if matches!(s, NodeState::Running { .. }) {
-            self.n_running -= 1;
-        } else if matches!(s, NodeState::Waiting { .. }) {
-            self.n_waiting -= 1;
+        // RetryFailed leaves Failed/TimedOut/Cancelled (and may leave
+        // a Succeeded AllDone consumer). Counts must follow set_state.
+        match s {
+            NodeState::Pending => self.n_pending -= 1,
+            NodeState::Ready { .. } => self.n_ready -= 1,
+            NodeState::Running { .. } => self.n_running -= 1,
+            NodeState::Waiting { .. } => self.n_waiting -= 1,
+            NodeState::Succeeded => self.n_succeeded -= 1,
+            NodeState::Failed | NodeState::TimedOut => self.n_failed -= 1,
+            NodeState::Cancelled => self.n_cancelled -= 1,
         }
     }
 
@@ -462,16 +469,10 @@ impl Execution {
             .nodes
             .iter()
             .enumerate()
-            .map(|(i, n)| {
+            .map(|(i, _n)| {
                 (
                     self.definition.id_at(NodeSlot(i)).clone(),
-                    NodeSnapshot {
-                        state: n.state.clone(),
-                        output: n.output.clone(),
-                        attempt: n.attempt,
-                        resume_token: n.resume_token.clone(),
-                        last_error: n.last_error.clone(),
-                    },
+                    self.node_snapshot_at(NodeSlot(i)),
                 )
             })
             .collect();
@@ -1828,5 +1829,463 @@ mod tests {
         .is_ready_now(Timestamp(5)));
         assert!(!NodeState::Pending.is_ready_now(Timestamp(0)));
         assert!(!NodeState::Succeeded.is_ready_now(Timestamp(0)));
+    }
+
+    fn fail_fast_diamond() -> Execution {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .node("b", "e")
+            .node("c", "e")
+            .node("d", "e")
+            .edge("a", "b")
+            .edge("a", "c")
+            .edge("b", "d")
+            .edge("c", "d")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"A"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "c".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "b".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("boom")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex
+    }
+
+    #[test]
+    fn retry_failed_diamond_reruns_b_uncancels_c_d_keeps_a() {
+        let mut ex = fail_fast_diamond();
+        assert_eq!(ex.state, ExecutionState::Failed);
+        assert!(matches!(
+            ex.node(&NodeId::new("b")).unwrap().state,
+            NodeState::Failed
+        ));
+        assert!(matches!(
+            ex.node(&NodeId::new("c")).unwrap().state,
+            NodeState::Cancelled
+        ));
+        assert!(matches!(
+            ex.node(&NodeId::new("d")).unwrap().state,
+            NodeState::Cancelled
+        ));
+        ex.apply(ApplyCmd::RetryFailed, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Succeeded
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().output,
+            Some(Bytes::from_static(b"A"))
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("b")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("c")).unwrap().state,
+            NodeState::Ready { runnable_at: None },
+            "A already Succeeded so Cancelled C becomes Ready"
+        );
+        assert!(
+            matches!(
+                ex.node(&NodeId::new("d")).unwrap().state,
+                NodeState::Pending
+            ),
+            "D waits for B and C"
+        );
+        assert_eq!(ex.state, ExecutionState::Running);
+        assert!(!ex.cancelled);
+        assert!(!ex.fail_execution);
+    }
+
+    #[test]
+    fn retry_failed_from_created_is_illegal() {
+        let mut ex = Execution::new(
+            WorkflowDefinition::builder("wf")
+                .node("a", "e")
+                .build()
+                .unwrap(),
+        );
+        assert!(matches!(
+            ex.apply(ApplyCmd::RetryFailed, &AcceptPolicy, Timestamp(0)),
+            Err(ApplyError::Illegal(_))
+        ));
+    }
+
+    #[test]
+    fn retry_failed_on_succeeded_is_illegal() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Succeeded);
+        assert!(matches!(
+            ex.apply(ApplyCmd::RetryFailed, &p, now),
+            Err(ApplyError::Illegal(_))
+        ));
+    }
+
+    #[test]
+    fn retry_failed_timed_out_leaf_becomes_ready() {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Completed);
+        ex.apply(ApplyCmd::RetryFailed, &p, now).unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        );
+        assert_eq!(ex.state, ExecutionState::Running);
+    }
+
+    fn fail_subtree_all_done_join_failed() -> Execution {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("p1", "e")
+            .node("p2", "e")
+            .node("join", "j")
+            .edge("p1", "join")
+            .edge("p2", "join")
+            .join("join", Join::AllDone)
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "p1".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "p2".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "p1".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("page")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "p2".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"p2"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "join".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "join".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("join")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Completed);
+        ex
+    }
+
+    #[test]
+    fn retry_failed_all_done_failed_join_remain_waits_for_retried_pred() {
+        let mut ex = fail_subtree_all_done_join_failed();
+        assert_eq!(ex.attempt(&NodeId::new("p1")), Some(1));
+        assert_eq!(ex.attempt(&NodeId::new("join")), Some(1));
+        let effect = ex
+            .apply(ApplyCmd::RetryFailed, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("p1")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("p2")).unwrap().state,
+            NodeState::Succeeded
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("join")).unwrap().state,
+            NodeState::Pending,
+            "failed AllDone join must wait; p1 is no longer terminal"
+        );
+        let join = ex.definition.slot(&NodeId::new("join")).unwrap();
+        assert_eq!(
+            ex.remain[join.0], 1,
+            "join remain after RetryFailed before p1 succeeds"
+        );
+        assert_eq!(ex.attempt(&NodeId::new("p1")), Some(0), "reset attempt");
+        assert_eq!(ex.attempt(&NodeId::new("join")), Some(0), "reset attempt");
+        let ready: Vec<_> = effect.newly_runnable_ids(&ex).collect();
+        assert_eq!(ready, vec![NodeId::new("p1")]);
+        assert_eq!(ex.state, ExecutionState::Running);
+    }
+
+    #[test]
+    fn set_state_failed_to_pending_does_not_leave_stale_n_failed() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("boom")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.n_failed, 1);
+        assert_eq!(ex.state, ExecutionState::Failed);
+        ex.fail_execution = false;
+        ex.cancelled = false;
+        let slot = ex.definition.slot(&NodeId::new("a")).unwrap();
+        ex.set_state(slot, NodeState::Pending);
+        assert_eq!(
+            ex.n_failed, 0,
+            "leaving Failed via set_state must dec n_failed"
+        );
+        assert_eq!(ex.n_pending, 1);
+        ex.set_state(slot, NodeState::Succeeded);
+        assert_eq!(
+            ex.derive_state(),
+            ExecutionState::Succeeded,
+            "stale n_failed must not yield Completed"
+        );
+    }
+
+    #[test]
+    fn retry_failed_pending_clears_token_keeps_last_error() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(ex.node(&NodeId::new("a")).unwrap().resume_token.is_some());
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("boom")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(ApplyCmd::RetryFailed, &p, now).unwrap();
+        let n = ex.node(&NodeId::new("a")).unwrap();
+        assert!(n.resume_token.is_none());
+        assert!(n.last_outcome.is_none());
+        assert!(!n.reinvoke);
+        assert!(n.output.is_none());
+        assert!(n.last_error.is_some(), "inspect keeps last_error");
+        assert_eq!(n.attempt, 0);
+        let snap = ex.snapshot();
+        let file = ex.node_snapshot_at(ex.definition.slot(&NodeId::new("a")).unwrap());
+        let from_snap = snap.node(&NodeId::new("a")).unwrap();
+        assert_eq!(from_snap.resume_token, file.resume_token);
+        assert!(from_snap.resume_token.is_none());
+        assert_eq!(from_snap.last_error, file.last_error);
+        assert!(from_snap.last_error.is_some());
+    }
+
+    #[test]
+    fn retry_failed_counts_match_nodes_and_finish_is_succeeded() {
+        let mut ex = fail_fast_diamond();
+        ex.apply(ApplyCmd::RetryFailed, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        let mut walk_failed = 0u32;
+        let mut walk_cancelled = 0u32;
+        for n in &ex.nodes {
+            match n.state {
+                NodeState::Failed | NodeState::TimedOut => walk_failed += 1,
+                NodeState::Cancelled => walk_cancelled += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(ex.n_failed, walk_failed);
+        assert_eq!(ex.n_cancelled, walk_cancelled);
+        assert_eq!(ex.n_failed, 0);
+        assert_eq!(ex.n_cancelled, 0);
+        assert_eq!(ex.derive_state(), ExecutionState::Running);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        for id in ["b", "c"] {
+            ex.apply(ApplyCmd::StartNode { node_id: id.into() }, &p, now)
+                .unwrap();
+            let attempt = ex.attempt(&NodeId::new(id)).unwrap();
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: id.into(),
+                    attempt,
+                    outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+        }
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "d".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let attempt = ex.attempt(&NodeId::new("d")).unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "d".into(),
+                attempt,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"D"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            ex.state,
+            ExecutionState::Succeeded,
+            "stale n_failed/n_cancelled must not yield Completed"
+        );
     }
 }
