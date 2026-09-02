@@ -173,8 +173,9 @@ MemoryStore hot path after this durability pass (n=7) vs RAII 4.237 / 1.940 /
 Crash pack still green: uncommitted mid-`put` rolls back (no invented
 terminal), torn WAL does not invent a terminal, `SQLITE_BUSY` returns a
 typed `StoreError` in <500 ms with a 50 ms busy timeout, two Runtimes on
-one file stay unfenced, incremental persist keeps Pending nodes (including
-256-wide one-Succeeded / 256-Pending kill-resume).
+one file are fenced by store lease + epoch (second resume/complete is
+`ClaimedElsewhere` while the lease is live), incremental persist keeps
+Pending nodes (including 256-wide one-Succeeded / 256-Pending kill-resume).
 
 When a caller resumes a 256-wide sqlite snapshot with the default FULL
 store, it used to take **1.008 s** debug median; now **421 ms**. `open_fast`
