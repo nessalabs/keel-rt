@@ -335,6 +335,11 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "timestamp_max_deadline_cancel_returns_without_thread_sleep",
         "cancel_while_drive_waits_on_future_t_drops_waiter",
         "due_t_hung_wait_until_inbox_cancel_does_not_dispatch",
+        "dirty_persist_ready_t_to_t_prime_updates_only_runnable_at",
+        "fail_subtree_parked_sibling_keeps_deadline",
+        "fail_subtree_parked_sibling_not_in_subtree_stays_parked",
+        "start_node_on_due_t_is_illegal_without_retry_due",
+        "parked_ready_t_uses_column_omits_nested_json_keeps_last_error",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }

@@ -103,4 +103,12 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
     ] {
         assert!(resume.contains(name), "resume.rs missing {name}");
     }
+    assert!(
+        lib.contains("fn dirty_persist_ready_t_to_t_prime_updates_only_runnable_at"),
+        "lib.rs must prove persist() dirty T→T' updates only the column"
+    );
+    assert!(
+        lib.contains("fn parked_ready_t_uses_column_omits_nested_json_keeps_last_error"),
+        "lib.rs must lock last_error round-trip on sqlite park get"
+    );
 }
