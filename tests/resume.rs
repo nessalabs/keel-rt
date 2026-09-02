@@ -94,7 +94,8 @@ async fn shared_memory_store_second_runtime_resume_is_claimed_elsewhere() {
         .build();
     match rt_b.resume(&id).await {
         Err(ResumeError::ClaimedElsewhere) => {}
-        other => panic!("shared MemoryStore must fence the second Runtime, got {other:?}"),
+        Ok(_) => panic!("shared MemoryStore must fence the second Runtime"),
+        Err(e) => panic!("expected ClaimedElsewhere, got {e}"),
     }
     handle.cancel().await;
     within(handle.wait()).await;

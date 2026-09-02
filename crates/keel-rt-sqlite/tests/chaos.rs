@@ -41,7 +41,9 @@ fn wal_path(db: &std::path::Path) -> PathBuf {
 }
 
 fn wal_len(db: &std::path::Path) -> u64 {
-    std::fs::metadata(wal_path(db)).map(|m| m.len()).unwrap_or(0)
+    std::fs::metadata(wal_path(db))
+        .map(|m| m.len())
+        .unwrap_or(0)
 }
 
 fn rm_db(p: &std::path::Path) {
@@ -112,9 +114,17 @@ fn diamond() -> WorkflowDefinition {
 fn assert_no_silent_wrong_terminal(snap: &ExecutionSnapshot, def: &WorkflowDefinition) {
     if snap.state == ExecutionState::Succeeded {
         for n in def.nodes() {
-            let body = snap.node(&n.id).unwrap_or_else(|| panic!("missing {}", n.id.as_str()));
+            let body = snap
+                .node(&n.id)
+                .unwrap_or_else(|| panic!("missing {}", n.id.as_str()));
             assert!(
-                !matches!(body.state, NodeState::Pending | NodeState::Ready { .. } | NodeState::Running { .. } | NodeState::Waiting { .. }),
+                !matches!(
+                    body.state,
+                    NodeState::Pending
+                        | NodeState::Ready { .. }
+                        | NodeState::Running { .. }
+                        | NodeState::Waiting { .. }
+                ),
                 "Succeeded execution has live node {}",
                 n.id.as_str()
             );
@@ -296,7 +306,10 @@ fn wide_256_and_join_crash_resume() {
             }
             let handle = runtime.start(b.build().unwrap()).unwrap();
             let id = handle.execution_id().clone();
-            wait_node(&store, &id, "hang", |s| matches!(s, NodeState::Running { .. })).await;
+            wait_node(&store, &id, "hang", |s| {
+                matches!(s, NodeState::Running { .. })
+            })
+            .await;
             std::mem::forget(handle);
             drop(runtime);
             id
@@ -597,7 +610,12 @@ fn diamond_farm_retry_hitl_shuffled_resume() {
                 let handle = runtime.start(def).unwrap();
                 let id = handle.execution_id().clone();
                 wait_node(&store, &id, "crit", |s| {
-                    matches!(s, NodeState::Ready { runnable_at: Some(_) } | NodeState::Waiting { .. })
+                    matches!(
+                        s,
+                        NodeState::Ready {
+                            runnable_at: Some(_)
+                        } | NodeState::Waiting { .. }
+                    )
                 })
                 .await;
                 std::mem::forget(handle);
@@ -708,7 +726,10 @@ fn burst_idle_burst_crash_resume_sqlite() {
                 .build();
             let handle = runtime.start(b.build().unwrap()).unwrap();
             let id = handle.execution_id().clone();
-            wait_node(&store, &id, "gate", |s| matches!(s, NodeState::Waiting { .. })).await;
+            wait_node(&store, &id, "gate", |s| {
+                matches!(s, NodeState::Waiting { .. })
+            })
+            .await;
             let token = store
                 .get(&id)
                 .await
@@ -802,7 +823,10 @@ fn mixed_fat_and_tiny_payloads_crash_resume() {
                 .unwrap();
             let handle = runtime.start(def).unwrap();
             let id = handle.execution_id().clone();
-            wait_node(&store, &id, "hang", |s| matches!(s, NodeState::Running { .. })).await;
+            wait_node(&store, &id, "hang", |s| {
+                matches!(s, NodeState::Running { .. })
+            })
+            .await;
             std::mem::forget(handle);
             drop(runtime);
             id
@@ -833,11 +857,21 @@ fn mixed_fat_and_tiny_payloads_crash_resume() {
         assert_eq!(handle.wait().await, ExecutionState::Succeeded);
         let snap = store.get(&id).await.unwrap().unwrap();
         assert_eq!(
-            snap.node(&NodeId::new("fat")).unwrap().output.as_ref().unwrap().as_ref(),
+            snap.node(&NodeId::new("fat"))
+                .unwrap()
+                .output
+                .as_ref()
+                .unwrap()
+                .as_ref(),
             fat.as_ref()
         );
         assert_eq!(
-            snap.node(&NodeId::new("tiny")).unwrap().output.as_ref().unwrap().as_ref(),
+            snap.node(&NodeId::new("tiny"))
+                .unwrap()
+                .output
+                .as_ref()
+                .unwrap()
+                .as_ref(),
             tiny.as_ref()
         );
     });
@@ -878,14 +912,14 @@ fn start_crash_resume_storm_one_file() {
                         NodeOutcome::Succeeded(Bytes::from_static(b"u"))
                     })
                     .register(ScriptedExecutor::new("crit").hang(false))
-                    .register_fn("writer", |_c: ExecutionContext| async {
-                        panic!("writer")
-                    })
+                    .register_fn("writer", |_c: ExecutionContext| async { panic!("writer") })
                     .build();
                 let handle = runtime.start(diamond()).unwrap();
                 let id = handle.execution_id().clone();
-                wait_node(&store, &id, "crit", |s| matches!(s, NodeState::Running { .. }))
-                    .await;
+                wait_node(&store, &id, "crit", |s| {
+                    matches!(s, NodeState::Running { .. })
+                })
+                .await;
                 std::mem::forget(handle);
                 drop(runtime);
                 id
@@ -901,12 +935,8 @@ fn start_crash_resume_storm_one_file() {
                 .register_fn("a", |_c: ExecutionContext| async {
                     NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
                 })
-                .register_fn("src", |_c: ExecutionContext| async {
-                    panic!("src")
-                })
-                .register_fn("sum", |_c: ExecutionContext| async {
-                    panic!("sum")
-                })
+                .register_fn("src", |_c: ExecutionContext| async { panic!("src") })
+                .register_fn("sum", |_c: ExecutionContext| async { panic!("sum") })
                 .register_fn("crit", |_c: ExecutionContext| async {
                     NodeOutcome::Succeeded(Bytes::from_static(b"c"))
                 })
@@ -952,10 +982,10 @@ fn and_join_1pm_waiting_4pm_delay_crash_resume() {
                         token: ctx.resume_token,
                     }
                 })
-                .register(ScriptedExecutor::new("late").delay_succeed(
-                    four_pm - one_pm,
-                    Bytes::from_static(b"4pm"),
-                ))
+                .register(
+                    ScriptedExecutor::new("late")
+                        .delay_succeed(four_pm - one_pm, Bytes::from_static(b"4pm")),
+                )
                 .register_fn("writer", |_c: ExecutionContext| async {
                     panic!("writer AND-joins")
                 })
@@ -970,8 +1000,14 @@ fn and_join_1pm_waiting_4pm_delay_crash_resume() {
                 .unwrap();
             let handle = runtime.start(def).unwrap();
             let id = handle.execution_id().clone();
-            wait_node(&store, &id, "hitl", |s| matches!(s, NodeState::Waiting { .. })).await;
-            wait_node(&store, &id, "late", |s| matches!(s, NodeState::Running { .. })).await;
+            wait_node(&store, &id, "hitl", |s| {
+                matches!(s, NodeState::Waiting { .. })
+            })
+            .await;
+            wait_node(&store, &id, "late", |s| {
+                matches!(s, NodeState::Running { .. })
+            })
+            .await;
             let token = store
                 .get(&id)
                 .await
@@ -1002,10 +1038,10 @@ fn and_join_1pm_waiting_4pm_delay_crash_resume() {
             .register_fn("hitl", |_c: ExecutionContext| async {
                 panic!("hitl keeps token")
             })
-            .register(ScriptedExecutor::new("late").delay_succeed(
-                four_pm - one_pm,
-                Bytes::from_static(b"4pm"),
-            ))
+            .register(
+                ScriptedExecutor::new("late")
+                    .delay_succeed(four_pm - one_pm, Bytes::from_static(b"4pm")),
+            )
             .register_fn("writer", move |_c: ExecutionContext| {
                 w.fetch_add(1, Ordering::SeqCst);
                 async { NodeOutcome::Succeeded(Bytes::from_static(b"w")) }
@@ -1256,8 +1292,14 @@ fn two_runtimes_diamond_no_silent_wrong_terminal() {
     let p = AcceptPolicy;
     let now = Timestamp(0);
     ex.apply(ApplyCmd::Start, &p, now).unwrap();
-    ex.apply(ApplyCmd::StartNode { node_id: "src".into() }, &p, now)
-        .unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "src".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
     current_rt().block_on(async {
         store_a.persist(&ex).await.unwrap();
         let runtime_a = Runtime::builder()
@@ -1293,15 +1335,12 @@ fn two_runtimes_diamond_no_silent_wrong_terminal() {
         let ha = runtime_a.resume(ex.id()).await.unwrap();
         match runtime_b.resume(ex.id()).await {
             Err(ResumeError::ClaimedElsewhere) => {}
-            other => panic!("live lease must fence B, got {other:?}"),
+            Ok(_) => panic!("live lease must fence B"),
+            Err(e) => panic!("expected ClaimedElsewhere, got {e}"),
         }
         let _ = ha.wait().await;
         let snap = store_a.get(ex.id()).await.unwrap().unwrap();
-        let def = store_a
-            .workflow_definition(ex.id())
-            .await
-            .unwrap()
-            .unwrap();
+        let def = store_a.workflow_definition(ex.id()).await.unwrap().unwrap();
         Execution::from_snapshot(def.clone(), snap.clone()).unwrap();
         assert_no_silent_wrong_terminal(&snap, &def);
         assert!(snap.state.is_terminal());

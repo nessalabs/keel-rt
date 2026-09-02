@@ -1523,10 +1523,11 @@ async fn two_runtimes_parked_deadline_are_not_fenced() {
         .build();
     let ha = within(a.resume(&id)).await.unwrap();
     let hb = within(b.resume(&id)).await;
-    assert!(
-        matches!(hb, Err(keel_rt::ResumeError::ClaimedElsewhere)),
-        "shared MemoryStore fences the second Runtime, got {hb:?}"
-    );
+    match hb {
+        Err(keel_rt::ResumeError::ClaimedElsewhere) => {}
+        Ok(_) => panic!("shared MemoryStore must fence the second Runtime"),
+        Err(e) => panic!("expected ClaimedElsewhere, got {e}"),
+    }
     let _ = within(ha.wait()).await;
 }
 

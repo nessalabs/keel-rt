@@ -709,7 +709,8 @@ fn two_runtimes_same_file_both_may_complete() {
         let outcome = Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"g")));
         match rb.complete(token.clone(), outcome.clone()).await {
             Err(CompleteError::ClaimedElsewhere) => {}
-            other => panic!("live lease must fence B complete, got {other:?}"),
+            Ok(()) => panic!("live lease must fence B complete"),
+            Err(e) => panic!("expected ClaimedElsewhere, got {e}"),
         }
         std::mem::forget(handle);
         drop(ra);
@@ -1064,7 +1065,8 @@ fn two_runtimes_same_file_are_not_fenced() {
         let ha = runtime_a.resume(ex.id()).await.unwrap();
         match runtime_b.resume(ex.id()).await {
             Err(ResumeError::ClaimedElsewhere) => {}
-            other => panic!("live lease must fence B resume, got {other:?}"),
+            Ok(_) => panic!("live lease must fence B resume"),
+            Err(e) => panic!("expected ClaimedElsewhere, got {e}"),
         }
         let _ = ha.wait().await;
         assert_eq!(
@@ -1109,7 +1111,8 @@ fn two_runtimes_lease_ttl_then_second_claims() {
             .build();
         match rb.resume(ex.id()).await {
             Err(ResumeError::ClaimedElsewhere) => {}
-            other => panic!("before TTL B must fail, got {other:?}"),
+            Ok(_) => panic!("before TTL B must fail"),
+            Err(e) => panic!("expected ClaimedElsewhere, got {e}"),
         }
         clock.advance(DEFAULT_LEASE_TTL);
         rb.resume(ex.id())
