@@ -3,6 +3,10 @@
 test:
     cargo test --workspace -- --test-threads=1
 
+# HTTP adapter (POST /complete). Not kernel coverage.
+http:
+    cargo test -p keel-rt-http -- --test-threads=1
+
 clippy:
     cargo clippy --workspace --lib -- -D warnings
 

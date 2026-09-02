@@ -2,12 +2,16 @@ use crate::domain::ids::{ExecutionId, ResumeToken};
 use crate::domain::outcome::Resume;
 use crate::domain::snapshot::ExecutionSnapshot;
 use crate::domain::state::{ApplyError, ExecutionState};
-use crate::runtime::inject::{Event, EventTx};
-use std::collections::HashSet;
+use crate::runtime::inject::{self, Event, EventTx};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
+
+/// Live drives on one Runtime: id → inbox so [`crate::Runtime::complete`]
+/// can inject without a handle.
+pub(crate) type ActiveSet = HashMap<ExecutionId, EventTx>;
 
 /// Live handle to one execution.
 ///
@@ -35,11 +39,11 @@ pub struct ExecutionHandle {
 /// One live handle per execution id on a Runtime. Drop removes the id.
 pub(crate) struct ActiveGuard {
     id: ExecutionId,
-    active: Arc<Mutex<HashSet<ExecutionId>>>,
+    active: Arc<Mutex<ActiveSet>>,
 }
 
 impl ActiveGuard {
-    pub(crate) fn new(id: ExecutionId, active: Arc<Mutex<HashSet<ExecutionId>>>) -> Self {
+    pub(crate) fn new(id: ExecutionId, active: Arc<Mutex<ActiveSet>>) -> Self {
         Self { id, active }
     }
 }
@@ -62,16 +66,7 @@ impl ExecutionHandle {
     }
 
     pub async fn resume(&self, token: ResumeToken, resume: Resume) -> Result<(), ApplyError> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Event::Resume {
-                token,
-                resume,
-                reply,
-            })
-            .map_err(|_| ApplyError::Illegal("execution scheduler stopped".into()))?;
-        rx.await
-            .map_err(|_| ApplyError::Illegal("execution scheduler stopped".into()))?
+        inject::inject_resume(&self.tx, token, resume).await
     }
 
     pub async fn inspect(&self) -> ExecutionSnapshot {
@@ -172,7 +167,7 @@ mod tests {
             state: state_rx,
             dropped: Arc::new(AtomicBool::new(false)),
             consumed: true,
-            _active: ActiveGuard::new(id.clone(), Arc::new(Mutex::new(HashSet::new()))),
+            _active: ActiveGuard::new(id.clone(), Arc::new(Mutex::new(HashMap::new()))),
         };
         assert_eq!(handle.execution_id(), &id);
     }
@@ -180,7 +175,10 @@ mod tests {
     #[test]
     fn active_guard_recovers_from_poison_and_unregisters() {
         let id = ExecutionId::parse("exec-active").unwrap();
-        let set = Arc::new(Mutex::new(HashSet::from([id.clone()])));
+        let set = Arc::new(Mutex::new(HashMap::from([(
+            id.clone(),
+            crate::runtime::inject::channel().0,
+        )])));
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _g = set.lock().unwrap();
             panic!("poison active set");
@@ -190,7 +188,7 @@ mod tests {
             let guard = ActiveGuard::new(id.clone(), set.clone());
             drop(guard);
         }
-        assert!(!set.lock().unwrap_or_else(|p| p.into_inner()).contains(&id));
+        assert!(!set.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&id));
     }
 
     #[test]

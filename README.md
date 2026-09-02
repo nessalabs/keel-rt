@@ -26,7 +26,8 @@ Phase 5: a node is **not runnable until T**. T is a `Timestamp` (u64 millis)
 on `Ready { runnable_at: Some(T) }`. `RetryPolicy` delay parks as Ready{T}.
 `timeout_after` keeps the node **Running** (executor Delay); crash restores
 Running as Ready-now and re-invokes; the new invoke re-arms Delay. Kernel T
-is only the retry park. Waiting stays HITL. Domain/runtime name `Clock`
+is only the retry park. Waiting is a gate (`wait` / `Runtime::complete`).
+Domain/runtime name `Clock`
 only — `FakeClock` is a test type. Wait is Runtime `next_drive_event`
 (inbox vs `Clock::wait_until`). sqlite has no timer table
 (`nodes.runnable_at` INTEGER).
@@ -66,8 +67,14 @@ let state = rt.run(def).await?;           // start + wait; no handle to drop-can
 assert!(state.is_successful_finish());    // Succeeded *or* Completed (FailSubtree)
 ```
 
+A definition may `.node("hold", "wait")` without registering an executor.
+Another task or process calls `rt.complete(token, Resume::Complete(...))`.
+If that Runtime already owns the live drive, complete injects. If the engine
+is down, a new Runtime on the same store applies, persists, and drives.
+`keel-rt-http` exposes `POST /complete` for another binary. **Drop cancels.**
+
 `start` returns a handle when you need `wait_stable` + token `resume` or
-inspect. **Drop cancels.** `wait()` is terminal only; Waiting is not done.
+inspect. `wait()` is terminal only; Waiting is not done.
 Unknown executor ids fail at `start` (named in the error) — nothing runs.
 `start` always creates a **new** execution. After death, `rt.resume(&id)`
 loads the last durable snapshot (not event replay).

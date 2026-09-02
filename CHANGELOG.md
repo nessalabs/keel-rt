@@ -1,5 +1,22 @@
 # Changelog
 
+## Wait / gate (`sdk/wait-gate`)
+
+Builtin executor id `wait` ([`Wait`]) is auto-registered on
+[`Runtime::builder`]. `execute` returns `Waiting { token: ctx.resume_token }`.
+Override the id if a caller registers their own `"wait"`.
+
+[`Runtime::complete(token, Resume)`] is the in-process hook: if this Runtime
+already has the execution live, it injects Complete/Reinvoke (no second
+drive). If not, it loads the snapshot, applies, persists, then drives so a
+second process can complete after crash or engine-down. Drop handle still
+cancels; complete does not revive Cancelled. Unknown token is
+[`CompleteError::UnknownToken`]. Duplicate Complete remains a noop.
+Failed Complete uses definition `OnFailure` (fail-fast default).
+
+Cross-process HTTP is [`keel-rt-http`]: `POST /complete` with token + Resume.
+The kernel crate does not depend on it. No cron, no EventLog, no NodeReady.
+
 ## Phase 4 RetryFailed (`phase-4/retry-failed`)
 
 [`Runtime::resume`] is still Continue: Failed stay Failed. [`Runtime::resume_with`]

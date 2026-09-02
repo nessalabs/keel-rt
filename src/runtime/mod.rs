@@ -8,3 +8,4 @@ pub(crate) mod sink;
 pub(crate) mod spawn;
 pub(crate) mod store;
 pub(crate) mod time;
+pub(crate) mod wait;

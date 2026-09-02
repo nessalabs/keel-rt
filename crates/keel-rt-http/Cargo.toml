@@ -1,0 +1,20 @@
+[package]
+name = "keel-rt-http"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP adapter: POST token + Resume to Runtime::complete (not the kernel)"
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
+bytes = { version = "1.9", features = ["serde"] }
+keel-rt = { path = "../.." }
+serde = { version = "1.0.216", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.43", features = ["net", "rt", "macros"] }
+
+[dev-dependencies]
+keel-rt = { path = "../..", features = ["test-util"] }
+serde_json = "1.0"
+tokio = { version = "1.43", features = ["full", "test-util"] }

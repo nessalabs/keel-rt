@@ -580,6 +580,97 @@ fn crash_fail_subtree_pages_stay_failed() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Engine down: Waiting on disk, new Runtime, `complete` (no handle) drives
+/// the successor. Other-binary path without HTTP.
+#[test]
+fn complete_after_sqlite_kill_new_runtime_unblocks_wait() {
+    let path = tmp();
+    let token = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let token = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .register_fn("next", |_c: ExecutionContext| async {
+                    NodeOutcome::Succeeded(Bytes::from_static(b"next"))
+                })
+                .build();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("hold", "wait")
+                        .node("next", "next")
+                        .edge("hold", "next")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            let id = handle.execution_id().clone();
+            wait_node(&store, &id, "hold", |s| {
+                matches!(s, NodeState::Waiting { .. })
+            })
+            .await;
+            let token = store
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&NodeId::new("hold"))
+                .unwrap()
+                .resume_token
+                .clone()
+                .expect("token");
+            std::mem::forget(handle);
+            drop(runtime);
+            token
+        });
+        drop(rt);
+        drop(store);
+        token
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .register_fn("next", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"next"))
+            })
+            .build();
+        let id = token.execution_id().clone();
+        runtime
+            .complete(
+                token,
+                Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate"))),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(BOUND, async {
+            loop {
+                if let Some(snap) = store.get(&id).await.unwrap() {
+                    if snap.state == ExecutionState::Succeeded {
+                        assert_eq!(
+                            snap.node(&NodeId::new("next"))
+                                .and_then(|n| n.output.clone()),
+                            Some(Bytes::from_static(b"next"))
+                        );
+                        assert_eq!(
+                            snap.node(&NodeId::new("hold"))
+                                .and_then(|n| n.output.clone()),
+                            Some(Bytes::from_static(b"gate"))
+                        );
+                        return;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("complete must drive successor");
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn resume_twice_live_is_already_active() {
     let path = tmp();

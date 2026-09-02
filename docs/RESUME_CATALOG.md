@@ -62,6 +62,11 @@ Sqlite adapter lines are not kernel `src/`.
 | RetryFailed persist `Err` after apply | on-disk stays Failed; next `resume_with(RetryFailed)` works | `test: resume_with_retry_failed_persist_err_leaves_failed_then_retry_works` |
 | RetryFailed resets `RetryPolicy` budget | attempt 0; dispatch 1; max_attempts is a new budget | `test: resume_with_retry_failed_resets_retry_policy_budget` |
 | Adversarial RetryFailed | failed leaf re-run; persist-then-emit | `test: resume_with_retry_failed_reruns_failed_leaf_not_succeeded` |
+| Builtin `wait` + in-process `Runtime::complete` | parks without register; second task Complete Bytes; next node sees them | `test: complete_from_second_task_unblocks_wait_and_downstream_sees_bytes` `test: wait_is_registered_without_manual_executor` |
+| `complete` unknown token | `CompleteError::UnknownToken` | `test: complete_unknown_token_errors` `test: complete_unknown_token_is_unknown` |
+| `complete` after Drop/cancel | `CompleteError::Cancelled`; run stays Cancelled | `test: complete_after_drop_handle_does_not_revive` |
+| Engine-down complete (new Runtime, same store) | apply + persist + drive; successor runs | `test: complete_from_store_after_engine_down_unblocks_wait` `test: complete_after_sqlite_kill_new_runtime_unblocks_wait` |
+| HTTP adapter `POST /complete` | another process → `Runtime::complete` | `test: post_complete_unblocks_wait_node` (crate `keel-rt-http`) |
 | Crash after Running persist | file reopens (no leaked lock); Running re-invoked | `test: crash_after_running_persist_releases_lock_and_reinvokes` `test: crash_during_b_running_reinvokes_b_not_a` |
 | Drop handle after Running persist | **graph** cancel; resume stays Cancelled (not crash) | `test: drop_handle_after_running_persist_cancels_not_reinvoke` |
 | Fat `Bytes` snapshot | MemoryStore refcount; sqlite JSON copy preserves bytes | `test: fat_bytes_resume_join_is_refcount` `test: fat_bytes_sqlite_round_trip_preserves_bytes` `test: fat_payloads_64kib_times_eight_persist_resume` `test: fat_payloads_64kib_times_32_persist_resume_within_bound` `test: fat_bytes_join_input_is_refcount_not_copy` |

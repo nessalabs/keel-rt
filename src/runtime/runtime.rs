@@ -1,17 +1,18 @@
 use crate::domain::definition::WorkflowDefinition;
-use crate::domain::ids::{ExecutionId, ExecutorId, NodeId};
-use crate::domain::outcome::{NodeOutcome, Recover};
+use crate::domain::ids::{ExecutionId, ExecutorId, NodeId, ResumeToken};
+use crate::domain::outcome::{NodeOutcome, Recover, Resume};
 use crate::domain::policy::{AcceptPolicy, Policy};
 use crate::domain::snapshot::SnapshotError;
 use crate::domain::state::{ApplyCmd, ApplyError, Execution, ExecutionState};
 use crate::domain::time::Timestamp;
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
-use crate::runtime::handle::{ActiveGuard, ExecutionHandle};
+use crate::runtime::handle::{ActiveGuard, ActiveSet, ExecutionHandle};
 use crate::runtime::inject::{self, Event, EventRx, EventTx};
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::sink::{EventSink, NoopSink};
 use crate::runtime::store::{MemoryStore, StateStore, StoreError};
 use crate::runtime::time::{Clock, SystemClock};
+use crate::runtime::wait::Wait;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::AtomicBool;
@@ -47,6 +48,23 @@ pub enum ResumeError {
     /// [`Recover::RetryFailed`] requires Failed or Completed-with-failures.
     #[error("execution is not Failed or Completed-with-failures")]
     NotFailed,
+}
+
+/// [`Runtime::complete`] rejected the token or could not apply it.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CompleteError {
+    #[error("unknown resume token")]
+    UnknownToken,
+    #[error("execution is cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Apply(#[from] ApplyError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+    #[error("unregistered executor id(s): {0}")]
+    UnregisteredExecutors(UnregisteredExecutors),
 }
 
 /// Unknown [`ExecutorId`]s named by the definition. Display is a comma-separated list.
@@ -167,8 +185,11 @@ pub struct Runtime {
     clock: Arc<dyn Clock>,
     concurrency: usize,
     cancel_bound: Duration,
-    /// Live execution ids on this Runtime. Handle Drop unregisters.
-    active: Arc<Mutex<HashSet<ExecutionId>>>,
+    /// Live drives on this Runtime. Handle Drop unregisters.
+    active: Arc<Mutex<ActiveSet>>,
+    /// Drives started by [`Self::complete`] when the id was not already live.
+    /// Kept so Drop of those handles cannot cancel a parked successor.
+    owned: Arc<Mutex<Vec<ExecutionHandle>>>,
 }
 
 impl Runtime {
@@ -201,7 +222,7 @@ impl Runtime {
         // Documented invariant: `ExecutionId::new` is unique on this Runtime.
         // `start_two_executions_claim_distinct_ids` pins it.
         let active = self
-            .claim_active(&execution_id)
+            .claim_active(&execution_id, tx.clone())
             .expect("ExecutionId::new is unique on this Runtime");
         let _ = tx.send(Event::Start);
         tokio::spawn(drive(
@@ -245,10 +266,14 @@ impl Runtime {
         execution_id: &ExecutionId,
         recover: Recover,
     ) -> Result<ExecutionHandle, ResumeError> {
-        let Some(active) = self.claim_active(execution_id) else {
+        let (tx, rx) = inject::channel();
+        let Some(active) = self.claim_active(execution_id, tx.clone()) else {
             return Err(ResumeError::AlreadyActive);
         };
-        match self.spawn_resume(execution_id, active, recover).await {
+        match self
+            .spawn_resume(execution_id, active, recover, tx, rx)
+            .await
+        {
             Ok(handle) => Ok(handle),
             Err(e) => Err(e),
         }
@@ -259,6 +284,8 @@ impl Runtime {
         execution_id: &ExecutionId,
         active: ActiveGuard,
         recover: Recover,
+        tx: EventTx,
+        rx: EventRx,
     ) -> Result<ExecutionHandle, ResumeError> {
         let snap = self
             .store
@@ -287,7 +314,6 @@ impl Runtime {
             // Persist recovered snapshot before dispatch. CAS still applies.
             self.store.persist(&exec).await?;
         }
-        let (tx, rx) = inject::channel();
         let (state_tx, state_rx) = watch::channel(exec.state());
         let cancel = CancellationToken::new();
         let scheduler = Scheduler::from_execution(
@@ -321,12 +347,105 @@ impl Runtime {
         })
     }
 
-    fn claim_active(&self, id: &ExecutionId) -> Option<ActiveGuard> {
+    fn claim_active(&self, id: &ExecutionId, tx: EventTx) -> Option<ActiveGuard> {
         let mut g = self.active.lock().unwrap_or_else(|p| p.into_inner());
-        if !g.insert(id.clone()) {
+        if g.contains_key(id) {
             return None;
         }
+        g.insert(id.clone(), tx);
         Some(ActiveGuard::new(id.clone(), self.active.clone()))
+    }
+
+    fn live_tx(&self, id: &ExecutionId) -> Option<EventTx> {
+        self.active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    /// Complete or reinvoke a Waiting node. Live drive: inject (no second
+    /// scheduler). Otherwise load the snapshot, apply, persist, then drive.
+    /// Does not revive [`ExecutionState::Cancelled`].
+    pub async fn complete(&self, token: ResumeToken, resume: Resume) -> Result<(), CompleteError> {
+        if let Some(tx) = self.live_tx(token.execution_id()) {
+            return self.map_complete_apply(inject::inject_resume(&tx, token, resume).await);
+        }
+        self.complete_from_store(token, resume).await
+    }
+
+    fn map_complete_apply(&self, r: Result<(), ApplyError>) -> Result<(), CompleteError> {
+        match r {
+            Ok(()) => Ok(()),
+            Err(ApplyError::TokenMismatch) | Err(ApplyError::UnknownNode(_)) => {
+                Err(CompleteError::UnknownToken)
+            }
+            Err(ApplyError::ResumeAfterCancel) => Err(CompleteError::Cancelled),
+            Err(e) => Err(CompleteError::Apply(e)),
+        }
+    }
+
+    async fn complete_from_store(
+        &self,
+        token: ResumeToken,
+        resume: Resume,
+    ) -> Result<(), CompleteError> {
+        let id = token.execution_id().clone();
+        let snap = self
+            .store
+            .get(&id)
+            .await?
+            .ok_or(CompleteError::UnknownToken)?;
+        if snap.state == ExecutionState::Cancelled {
+            return Err(CompleteError::Cancelled);
+        }
+        let definition = self
+            .store
+            .workflow_definition(&id)
+            .await?
+            .ok_or(CompleteError::UnknownToken)?;
+        if let Some(missing) = self.missing_executors(&definition) {
+            return Err(CompleteError::UnregisteredExecutors(missing));
+        }
+        let mut exec = Execution::from_snapshot(definition, snap)?;
+        if exec.state() == ExecutionState::Cancelled {
+            return Err(CompleteError::Cancelled);
+        }
+        self.map_complete_apply(
+            exec.apply(
+                ApplyCmd::Resume {
+                    token: token.clone(),
+                    resume: resume.clone(),
+                },
+                self.policy.as_ref(),
+                self.clock.now(),
+            )
+            .map(|_| ()),
+        )?;
+        self.store.persist(&exec).await?;
+        if exec.state().is_terminal() {
+            return Ok(());
+        }
+        if let Some(tx) = self.live_tx(&id) {
+            return self.map_complete_apply(inject::inject_resume(&tx, token, resume).await);
+        }
+        let (tx, rx) = inject::channel();
+        if let Some(active) = self.claim_active(&id, tx.clone()) {
+            if let Ok(handle) = self
+                .spawn_resume(&id, active, Recover::Continue, tx, rx)
+                .await
+            {
+                self.owned
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(handle);
+            }
+            return Ok(());
+        }
+        if let Some(tx) = self.live_tx(&id) {
+            return self.map_complete_apply(inject::inject_resume(&tx, token, resume).await);
+        }
+        Ok(())
     }
 
     fn missing_executors(&self, definition: &WorkflowDefinition) -> Option<UnregisteredExecutors> {
@@ -361,11 +480,13 @@ pub struct RuntimeBuilder {
 
 impl Default for RuntimeBuilder {
     fn default() -> Self {
+        let mut registry = ExecutorRegistry::new();
+        registry.register(Arc::new(Wait));
         Self {
             store: None,
             policy: None,
             sink: None,
-            registry: ExecutorRegistry::new(),
+            registry,
             clock: None,
             concurrency: 8,
             cancel_bound: DEFAULT_CANCEL_BOUND,
@@ -447,7 +568,8 @@ impl RuntimeBuilder {
             clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
             concurrency: self.concurrency,
             cancel_bound: self.cancel_bound,
-            active: Arc::new(Mutex::new(HashSet::new())),
+            active: Arc::new(Mutex::new(ActiveSet::new())),
+            owned: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -455,6 +577,7 @@ impl RuntimeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ids::ResumeToken;
     use bytes::Bytes;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -568,5 +691,34 @@ mod tests {
             matches!(ev, Event::Cancel),
             "inbox must beat due Timer without wait_until, got {ev:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn complete_unknown_token_is_unknown() {
+        let rt = Runtime::builder().build();
+        let token = ResumeToken::issue(ExecutionId::new(), NodeId::new("hold"), 1);
+        match rt
+            .complete(
+                token,
+                Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
+            )
+            .await
+        {
+            Err(CompleteError::UnknownToken) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_is_registered_without_manual_executor() {
+        let rt = Runtime::builder().build();
+        let def = WorkflowDefinition::builder("wf")
+            .node("hold", "wait")
+            .build()
+            .unwrap();
+        let h = rt.start(def).unwrap();
+        assert_eq!(h.wait_stable().await, ExecutionState::Waiting);
+        h.cancel().await;
+        assert_eq!(h.wait().await, ExecutionState::Cancelled);
     }
 }
