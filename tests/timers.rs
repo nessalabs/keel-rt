@@ -3,8 +3,9 @@
 //! T is `NodeState::Ready { runnable_at: Some(Timestamp) }` (u64 millis).
 //! `RetryPolicy` delay parks as Ready{T}. `timeout_after` keeps the node
 //! Running (executor Delay); crash restores Running as Ready-now and
-//! re-invokes. Kernel T is only the retry park. Waiting stays HITL. No
-//! EventLog, no NodeReady, no `Recover::RetryFailed`.
+//! re-invokes. Kernel T is only the retry park. Waiting stays HITL
+//! (`handle.resume(token)`). `Recover::RetryFailed` is `resume_with`, not
+//! HITL `Resume`. No EventLog, no NodeReady.
 //!
 //! `cargo test --test timers -- --test-threads=1`
 

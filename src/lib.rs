@@ -15,6 +15,8 @@
 //! Consumer path: [`WorkflowDefinition::builder`] →
 //! [`RuntimeBuilder::register_fn`] → [`Runtime::run`] / [`Runtime::start`].
 //! After process death, [`Runtime::resume`] loads the snapshot (at-least-once).
+//! [`Runtime::resume_with`] + [`Recover::RetryFailed`] re-invokes Failed /
+//! TimedOut nodes; default [`Runtime::resume`] still leaves them Failed.
 //! Announce via [`Event`] + [`EventSink`] (no EventLog). Persist then emit.
 //! Snapshot deadline T is `Ready { runnable_at: Some(Timestamp) }`. The Runtime
 //! drive waits via [`Clock::wait_until`]; `FakeClock` is test harness only.
@@ -37,7 +39,7 @@ pub use domain::events::Event;
 pub use domain::ids::{
     DefinitionHash, ExecutionId, ExecutorId, InvalidId, NodeId, ResumeToken, WorkflowId,
 };
-pub use domain::outcome::{NodeError, NodeOutcome, Resume};
+pub use domain::outcome::{NodeError, NodeOutcome, Recover, Resume};
 pub use domain::policy::{AcceptPolicy, NeverWaitPolicy, Policy, PolicyDecision, RetryPolicy};
 pub use domain::snapshot::{ExecutionSnapshot, NodeSnapshot, SnapshotError, SCHEMA_VERSION};
 pub use domain::state::{ApplyCmd, ApplyEffect, ApplyError, Execution, ExecutionState, NodeState};

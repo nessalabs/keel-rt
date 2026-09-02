@@ -7,7 +7,7 @@ use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
     AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionId, ExecutionSnapshot,
-    ExecutionState, Join, NodeId, NodeOutcome, NodeState, OnFailure, Resume, ResumeError,
+    ExecutionState, Join, NodeId, NodeOutcome, NodeState, OnFailure, Recover, Resume, ResumeError,
     RetryPolicy, Runtime, StateStore, StoreError, Timestamp, WorkflowDefinition, SCHEMA_VERSION,
 };
 use keel_rt_sqlite::SqliteStore;
@@ -110,6 +110,74 @@ fn crash_during_b_running_reinvokes_b_not_a() {
         assert_eq!(handle.wait().await, ExecutionState::Succeeded);
         assert_eq!(a_runs.load(Ordering::SeqCst), 0);
         assert_eq!(b_runs.load(Ordering::SeqCst), 1);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// RetryFailed persist, then crash while the retried node is Running:
+/// Continue resume re-invokes that node (at-least-once).
+#[test]
+fn retry_failed_persist_crash_mid_retry_is_at_least_once() {
+    let path = tmp();
+    let id = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let id = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .register_fn("a", |_ctx: ExecutionContext| async {
+                    NodeOutcome::failed("boom")
+                })
+                .build();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("a", "a")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            let id = handle.execution_id().clone();
+            assert_eq!(handle.wait().await, ExecutionState::Failed);
+            id
+        });
+        drop(rt);
+        let rt = current_rt();
+        rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .register(ScriptedExecutor::new("a").hang(false))
+                .build();
+            let handle = runtime
+                .resume_with(&id, Recover::RetryFailed)
+                .await
+                .unwrap();
+            wait_node(&store, &id, "a", |s| matches!(s, NodeState::Running { .. })).await;
+            std::mem::forget(handle);
+            drop(runtime);
+        });
+        drop(rt);
+        drop(store);
+        id
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = current_rt();
+    rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store)
+            .register_fn("a", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build();
+        let handle = runtime.resume(&id).await.unwrap();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        assert!(
+            runs.load(Ordering::SeqCst) >= 1,
+            "crash mid-retry must re-invoke the retried node"
+        );
     });
     let _ = std::fs::remove_file(&path);
 }

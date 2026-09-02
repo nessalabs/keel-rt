@@ -100,6 +100,7 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "fn busy_on_park_persist_rolls_back_then_t_lands",
         "fn reader_lock_does_not_block_park_persist",
         "fn many_park_wakes_wal_stays_bounded",
+        "fn retry_failed_persist_crash_mid_retry_is_at_least_once",
     ] {
         assert!(resume.contains(name), "resume.rs missing {name}");
     }

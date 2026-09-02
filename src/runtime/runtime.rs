@@ -1,9 +1,9 @@
 use crate::domain::definition::WorkflowDefinition;
 use crate::domain::ids::{ExecutionId, ExecutorId, NodeId};
-use crate::domain::outcome::NodeOutcome;
+use crate::domain::outcome::{NodeOutcome, Recover};
 use crate::domain::policy::{AcceptPolicy, Policy};
 use crate::domain::snapshot::SnapshotError;
-use crate::domain::state::{Execution, ExecutionState};
+use crate::domain::state::{ApplyCmd, Execution, ExecutionState};
 use crate::domain::time::Timestamp;
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
 use crate::runtime::handle::{ActiveGuard, ExecutionHandle};
@@ -44,6 +44,9 @@ pub enum ResumeError {
     UnregisteredExecutors(UnregisteredExecutors),
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// [`Recover::RetryFailed`] requires Failed or Completed-with-failures.
+    #[error("execution is not Failed or Completed-with-failures")]
+    NotFailed,
 }
 
 /// Unknown [`ExecutorId`]s named by the definition. Display is a comma-separated list.
@@ -227,12 +230,25 @@ impl Runtime {
 
     /// Rebuild from the store snapshot. At-least-once: a node that was Running
     /// is restored Ready and re-invoked (attempt + 1 at dispatch). Succeeded
-    /// nodes never re-run. `start` still always creates a new execution.
+    /// nodes never re-run. Failed stay Failed. `start` still always creates
+    /// a new execution. Same as [`Self::resume_with`] `Recover::Continue`.
     pub async fn resume(&self, execution_id: &ExecutionId) -> Result<ExecutionHandle, ResumeError> {
+        self.resume_with(execution_id, Recover::Continue).await
+    }
+
+    /// Resume a stored execution. [`Recover::Continue`] is [`Self::resume`].
+    /// [`Recover::RetryFailed`] re-invokes Failed/TimedOut nodes after
+    /// persisting the recovered snapshot (CAS still applies).
+    /// [`ExecutionHandle::resume`] (token Complete / Reinvoke) is unchanged.
+    pub async fn resume_with(
+        &self,
+        execution_id: &ExecutionId,
+        recover: Recover,
+    ) -> Result<ExecutionHandle, ResumeError> {
         let Some(active) = self.claim_active(execution_id) else {
             return Err(ResumeError::AlreadyActive);
         };
-        match self.spawn_resume(execution_id, active).await {
+        match self.spawn_resume(execution_id, active, recover).await {
             Ok(handle) => Ok(handle),
             Err(e) => Err(e),
         }
@@ -242,6 +258,7 @@ impl Runtime {
         &self,
         execution_id: &ExecutionId,
         active: ActiveGuard,
+        recover: Recover,
     ) -> Result<ExecutionHandle, ResumeError> {
         let snap = self
             .store
@@ -253,9 +270,23 @@ impl Runtime {
             .workflow_definition(execution_id)
             .await?
             .ok_or(ResumeError::DefinitionMissing)?;
-        let exec = Execution::from_snapshot(definition, snap)?;
+        let mut exec = Execution::from_snapshot(definition, snap)?;
         if let Some(missing) = self.missing_executors(exec.definition()) {
             return Err(ResumeError::UnregisteredExecutors(missing));
+        }
+        if recover == Recover::RetryFailed {
+            if exec
+                .apply(
+                    ApplyCmd::RetryFailed,
+                    self.policy.as_ref(),
+                    self.clock.now(),
+                )
+                .is_err()
+            {
+                return Err(ResumeError::NotFailed);
+            }
+            // Persist recovered snapshot before dispatch. CAS still applies.
+            self.store.persist(&exec).await?;
         }
         let (tx, rx) = inject::channel();
         let (state_tx, state_rx) = watch::channel(exec.state());

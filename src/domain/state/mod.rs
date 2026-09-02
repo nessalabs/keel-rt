@@ -214,6 +214,11 @@ pub enum ApplyCmd {
         node_id: NodeId,
     },
     ForceCancelRunning,
+    /// Failed/TimedOut → Ready-now (next dispatch is attempt + 1).
+    /// Cancelled → Pending (Ready when preds Succeeded). Succeeded and
+    /// Waiting stay. Only from [`ExecutionState::Failed`] or
+    /// [`ExecutionState::Completed`].
+    RetryFailed,
 }
 
 /// Result of one [`Execution::apply`].
@@ -1828,5 +1833,202 @@ mod tests {
         .is_ready_now(Timestamp(5)));
         assert!(!NodeState::Pending.is_ready_now(Timestamp(0)));
         assert!(!NodeState::Succeeded.is_ready_now(Timestamp(0)));
+    }
+
+    fn fail_fast_diamond() -> Execution {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .node("b", "e")
+            .node("c", "e")
+            .node("d", "e")
+            .edge("a", "b")
+            .edge("a", "c")
+            .edge("b", "d")
+            .edge("c", "d")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"A"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "c".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "b".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("boom")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex
+    }
+
+    #[test]
+    fn retry_failed_diamond_reruns_b_uncancels_c_d_keeps_a() {
+        let mut ex = fail_fast_diamond();
+        assert_eq!(ex.state, ExecutionState::Failed);
+        assert!(matches!(
+            ex.node(&NodeId::new("b")).unwrap().state,
+            NodeState::Failed
+        ));
+        assert!(matches!(
+            ex.node(&NodeId::new("c")).unwrap().state,
+            NodeState::Cancelled
+        ));
+        assert!(matches!(
+            ex.node(&NodeId::new("d")).unwrap().state,
+            NodeState::Cancelled
+        ));
+        ex.apply(ApplyCmd::RetryFailed, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Succeeded
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().output,
+            Some(Bytes::from_static(b"A"))
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("b")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("c")).unwrap().state,
+            NodeState::Ready { runnable_at: None },
+            "A already Succeeded so Cancelled C becomes Ready"
+        );
+        assert!(
+            matches!(
+                ex.node(&NodeId::new("d")).unwrap().state,
+                NodeState::Pending
+            ),
+            "D waits for B and C"
+        );
+        assert_eq!(ex.state, ExecutionState::Running);
+        assert!(!ex.cancelled);
+        assert!(!ex.fail_execution);
+    }
+
+    #[test]
+    fn retry_failed_from_created_is_illegal() {
+        let mut ex = Execution::new(
+            WorkflowDefinition::builder("wf")
+                .node("a", "e")
+                .build()
+                .unwrap(),
+        );
+        assert!(matches!(
+            ex.apply(ApplyCmd::RetryFailed, &AcceptPolicy, Timestamp(0)),
+            Err(ApplyError::Illegal(_))
+        ));
+    }
+
+    #[test]
+    fn retry_failed_on_succeeded_is_illegal() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Succeeded);
+        assert!(matches!(
+            ex.apply(ApplyCmd::RetryFailed, &p, now),
+            Err(ApplyError::Illegal(_))
+        ));
+    }
+
+    #[test]
+    fn retry_failed_timed_out_leaf_becomes_ready() {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Completed);
+        ex.apply(ApplyCmd::RetryFailed, &p, now).unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        );
+        assert_eq!(ex.state, ExecutionState::Running);
     }
 }

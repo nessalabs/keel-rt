@@ -1,5 +1,20 @@
 # Changelog
 
+## Phase 4 RetryFailed (`phase-4/retry-failed`)
+
+[`Runtime::resume`] is still Continue: Failed stay Failed. [`Runtime::resume_with`]
+`Recover::RetryFailed` re-invokes Failed/TimedOut nodes (Ready-now; next
+dispatch is attempt + 1), turns fail-fast/subtree Cancelled into Pending
+(Ready when preds Succeeded), and leaves Succeeded Bytes and Waiting tokens
+alone. Execution must be Failed or Completed-with-failures; Succeeded /
+Waiting / Cancelled → [`ResumeError::NotFailed`]. Persist the recovered
+snapshot before dispatch; CAS still applies. New attempts use the
+definition `OnFailure` (fail-fast default unchanged). HITL is still
+[`ExecutionHandle::resume`] (`Resume::Complete` / `Reinvoke`). No cron, no
+per-node freshness, no EventLog, no NodeReady. Wait is still the Runtime
+drive (`next_drive_event`: inbox vs `Clock::wait_until`). Due T is
+`RetryDue` then dispatch — not TimedOut.
+
 ## Phase 5 snapshot deadlines (`phase-5/timers`)
 
 A node is not runnable until **T**. T is a [`Timestamp`] (u64 millis) on
@@ -9,7 +24,7 @@ keeps the node Running (executor Delay) and is not snapshot T. Waiting stays
 HITL. Kernel has no cron, no wall timezone, no sqlite timer table.
 `Event::NodeTimedOut` already exists; do not emit `NodeReady`. Drop handle
 still cancels the Runtime drive waiter (RAII). Fail-fast / AND-join defaults
-unchanged. `Recover::RetryFailed` is not a kernel command. Domain and runtime
+unchanged. Domain and runtime
 name [`Clock`] only; `FakeClock` lives in `src/testing` and `tests/`. sqlite
 persists whatever the snapshot already has (`synchronous=FULL` default).
 Waiting for T is the Runtime drive (`next_drive_event`: inbox vs

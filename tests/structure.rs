@@ -340,6 +340,9 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "fail_subtree_parked_sibling_not_in_subtree_stays_parked",
         "start_node_on_due_t_is_illegal_without_retry_due",
         "parked_ready_t_uses_column_omits_nested_json_keeps_last_error",
+        "resume_stays_failed_resume_with_retry_failed_reruns_b_only",
+        "resume_with_retry_failed_fail_subtree_all_done_retries_failed_page",
+        "retry_failed_persist_crash_mid_retry_is_at_least_once",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
@@ -455,7 +458,7 @@ fn pr_body_gate_script_enforces_mermaid_behavior_and_main_base() {
     );
 }
 
-/// Phase 5: HITL resume is Complete/Reinvoke. RetryFailed is not a kernel command.
+/// HITL resume is Complete/Reinvoke. Recover::RetryFailed is resume_with.
 #[test]
 fn resume_enum_has_no_retry_failed() {
     let src = fs::read_to_string(src_root().join("domain/outcome.rs")).unwrap();
@@ -467,8 +470,14 @@ fn resume_enum_has_no_retry_failed() {
     assert!(body.contains("Reinvoke"));
     assert!(
         !body.contains("RetryFailed"),
-        "Do not implement Recover::RetryFailed"
+        "HITL Resume must not grow RetryFailed; that is Recover"
     );
+    let rec = src.find("pub enum Recover {").expect("Recover enum");
+    let rest = &src[rec..];
+    let end = rest.find("\n}").expect("Recover enum close");
+    let body = &rest[..end];
+    assert!(body.contains("Continue"));
+    assert!(body.contains("RetryFailed"));
 }
 
 /// Apply is a tick: given `Clock::now()` (or `now: Timestamp`), a node

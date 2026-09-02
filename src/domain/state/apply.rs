@@ -81,6 +81,18 @@ impl Execution {
                 self.force_cancel_running(now, &mut effect);
                 effect.changed = true;
             }
+            ApplyCmd::RetryFailed => {
+                match self.state {
+                    ExecutionState::Failed | ExecutionState::Completed => {}
+                    other => {
+                        return Err(ApplyError::Illegal(format!(
+                            "RetryFailed only from Failed or Completed, got {other}"
+                        )));
+                    }
+                }
+                self.apply_retry_failed(&mut effect);
+                effect.changed = true;
+            }
         }
         if !effect.changed {
             return Ok(effect);
@@ -579,6 +591,58 @@ impl Execution {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// Failed/TimedOut become Ready-now (dispatch increments attempt).
+    /// Cancelled become Pending; Ready when every AllSucceeded pred
+    /// Succeeded (or AllDone preds are terminal). Succeeded keep Bytes.
+    /// Waiting stays Waiting.
+    fn apply_retry_failed(&mut self, effect: &mut ApplyEffect) {
+        let n = self.nodes.len();
+        for i in 0..n {
+            match self.nodes[i].state {
+                NodeState::Failed | NodeState::TimedOut => {
+                    self.nodes[i].state = NodeState::Ready { runnable_at: None };
+                    self.mark_dirty(NodeSlot(i));
+                    effect.newly_runnable.push(NodeSlot(i));
+                }
+                NodeState::Cancelled => {
+                    let n = &mut self.nodes[i];
+                    n.state = NodeState::Pending;
+                    n.attempt = 0;
+                    n.resume_token = None;
+                    n.output = None;
+                    n.reinvoke = false;
+                    self.mark_dirty(NodeSlot(i));
+                }
+                _ => {}
+            }
+        }
+        self.cancelled = false;
+        self.fail_execution = false;
+        self.recount_counts();
+        for i in 0..n {
+            self.remain[i] = super::restore::remain_for(&self.definition, &self.nodes, NodeSlot(i));
+        }
+        for i in 0..n {
+            if self.remain[i] == 0 && matches!(self.nodes[i].state, NodeState::Pending) {
+                self.mark_ready(NodeSlot(i), effect);
+            }
+        }
+        self.rebuild_deadline();
+    }
+
+    fn recount_counts(&mut self) {
+        self.n_pending = 0;
+        self.n_ready = 0;
+        self.n_running = 0;
+        self.n_waiting = 0;
+        self.n_succeeded = 0;
+        self.n_failed = 0;
+        self.n_cancelled = 0;
+        for i in 0..self.nodes.len() {
+            self.inc_kind(super::count_kind(&self.nodes[i].state));
         }
     }
 

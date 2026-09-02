@@ -51,6 +51,12 @@ Sqlite adapter lines are not kernel `src/`.
 | Schema / definition mismatch | fail-closed `Snapshot` / `DefinitionMissing` | `test: resume_schema_mismatch_is_snapshot_error` `test: schema_version_in_json_fail_closed` `test: resume_without_definition_is_definition_missing` |
 | FailSubtree + AllDone crash mid-fanout | failed pages stay failed; reducer AllDone once | `test: crash_fail_subtree_pages_stay_failed` `test: resume_fail_subtree_keeps_failed_pages_and_runs_reducer` `test: fail_subtree_all_done_resume_runs_reducer_once` |
 | Fail-fast crash after Failed persist | resume stays Failed; no resurrect | `test: crash_after_fail_fast_stays_failed` `test: resume_failed_execution_stays_failed` |
+| `resume_with(RetryFailed)` after fail-fast diamond | Failed node re-invoked; Succeeded not; Cancelled → Pending then Ready | `test: resume_stays_failed_resume_with_retry_failed_reruns_b_only` `test: retry_failed_diamond_reruns_b_uncancels_c_d_keeps_a` |
+| `resume_with(RetryFailed)` FailSubtree + AllDone | failed page retried; succeeded pages and reducer not re-run | `test: resume_with_retry_failed_fail_subtree_all_done_retries_failed_page` |
+| `resume_with(RetryFailed)` on Succeeded / Waiting | `ResumeError::NotFailed` | `test: resume_with_retry_failed_on_succeeded_is_not_failed` `test: resume_with_retry_failed_on_waiting_is_not_failed` |
+| `start` after Failed | new `ExecutionId`; all nodes run | `test: start_after_failed_is_new_id_and_reruns_all_nodes` |
+| HITL Waiting | `handle.resume(token)`, not `Recover::RetryFailed` | `test: hitl_waiting_is_handle_resume_not_recover_retry_failed` |
+| sqlite RetryFailed persist + crash mid-retry | at-least-once on that node | `test: retry_failed_persist_crash_mid_retry_is_at_least_once` |
 | Crash after Running persist | file reopens (no leaked lock); Running re-invoked | `test: crash_after_running_persist_releases_lock_and_reinvokes` `test: crash_during_b_running_reinvokes_b_not_a` |
 | Drop handle after Running persist | **graph** cancel; resume stays Cancelled (not crash) | `test: drop_handle_after_running_persist_cancels_not_reinvoke` |
 | Fat `Bytes` snapshot | MemoryStore refcount; sqlite JSON copy preserves bytes | `test: fat_bytes_resume_join_is_refcount` `test: fat_bytes_sqlite_round_trip_preserves_bytes` `test: fat_payloads_64kib_times_eight_persist_resume` `test: fat_payloads_64kib_times_32_persist_resume_within_bound` `test: fat_bytes_join_input_is_refcount_not_copy` |
