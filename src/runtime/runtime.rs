@@ -3,7 +3,7 @@ use crate::domain::ids::{ExecutionId, ExecutorId, NodeId};
 use crate::domain::outcome::{NodeOutcome, Recover};
 use crate::domain::policy::{AcceptPolicy, Policy};
 use crate::domain::snapshot::SnapshotError;
-use crate::domain::state::{ApplyCmd, Execution, ExecutionState};
+use crate::domain::state::{ApplyCmd, ApplyError, Execution, ExecutionState};
 use crate::domain::time::Timestamp;
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
 use crate::runtime::handle::{ActiveGuard, ExecutionHandle};
@@ -47,6 +47,10 @@ pub enum ResumeError {
     /// [`Recover::RetryFailed`] requires Failed or Completed-with-failures.
     #[error("execution is not Failed or Completed-with-failures")]
     NotFailed,
+    /// `ApplyCmd::RetryFailed` failed for a reason other than eligibility.
+    /// [`ApplyError::Illegal`] is [`Self::NotFailed`], not this variant.
+    #[error(transparent)]
+    Apply(ApplyError),
 }
 
 /// Unknown [`ExecutorId`]s named by the definition. Display is a comma-separated list.
@@ -275,15 +279,13 @@ impl Runtime {
             return Err(ResumeError::UnregisteredExecutors(missing));
         }
         if recover == Recover::RetryFailed {
-            if exec
-                .apply(
-                    ApplyCmd::RetryFailed,
-                    self.policy.as_ref(),
-                    self.clock.now(),
-                )
-                .is_err()
-            {
-                return Err(ResumeError::NotFailed);
+            match exec.apply(
+                ApplyCmd::RetryFailed,
+                self.policy.as_ref(),
+                self.clock.now(),
+            ) {
+                Ok(_) => {}
+                Err(e) => return Err(map_retry_failed_apply_err(e)),
             }
             // Persist recovered snapshot before dispatch. CAS still applies.
             self.store.persist(&exec).await?;
@@ -347,6 +349,16 @@ impl Runtime {
         } else {
             Some(UnregisteredExecutors(missing))
         }
+    }
+}
+
+/// Eligibility is `ApplyCmd::RetryFailed` (`Failed` | `Completed` only).
+/// The shell maps [`ApplyError::Illegal`] → [`ResumeError::NotFailed`].
+/// Other apply errors stay typed; they are not NotFailed and not Store.
+fn map_retry_failed_apply_err(err: ApplyError) -> ResumeError {
+    match err {
+        ApplyError::Illegal(_) => ResumeError::NotFailed,
+        other => ResumeError::Apply(other),
     }
 }
 
@@ -464,6 +476,32 @@ mod tests {
             .node("a", "a")
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn retry_failed_illegal_is_not_failed_other_apply_is_not() {
+        assert_eq!(
+            map_retry_failed_apply_err(ApplyError::Illegal("Cancelled".into())),
+            ResumeError::NotFailed
+        );
+        for err in [
+            ApplyError::UnknownNode(NodeId::new("ghost")),
+            ApplyError::ResumeAfterCancel,
+            ApplyError::ConflictingComplete,
+            ApplyError::TokenMismatch,
+            ApplyError::NotWaiting,
+        ] {
+            let mapped = map_retry_failed_apply_err(err.clone());
+            assert!(
+                !matches!(mapped, ResumeError::NotFailed),
+                "{err:?} must not become NotFailed"
+            );
+            assert!(
+                !matches!(mapped, ResumeError::Store(_)),
+                "{err:?} must not wrap as Store"
+            );
+            assert_eq!(mapped, ResumeError::Apply(err));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

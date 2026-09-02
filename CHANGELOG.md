@@ -10,7 +10,8 @@ Succeeded become Ready. An AllDone join that itself Failed waits until
 retried preds are terminal again. Fail-fast/subtree Cancelled become
 Pending (Ready when preds Succeeded). Succeeded Bytes and Waiting tokens
 stay. Execution must be Failed or Completed-with-failures; Succeeded /
-Waiting / Cancelled → [`ResumeError::NotFailed`]. Persist the recovered
+Waiting / Cancelled → [`ResumeError::NotFailed`] (`ApplyError::Illegal`
+only; other apply errors are [`ResumeError::Apply`], not Store). Persist the recovered
 snapshot before dispatch; CAS still applies. New attempts use the
 definition `OnFailure` (fail-fast default unchanged). HITL is still
 [`ExecutionHandle::resume`] (`Resume::Complete` / `Reinvoke`). No cron, no

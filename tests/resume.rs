@@ -6,9 +6,9 @@
 use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionId, ExecutionState,
-    FnSink, Join, MemoryStore, NodeId, NodeOutcome, NodeState, OnFailure, Recover, Resume,
-    ResumeError, RetryPolicy, Runtime, SnapshotError, StateStore, StoreError, Timestamp,
+    AcceptPolicy, ApplyCmd, ApplyError, Event, Execution, ExecutionContext, ExecutionId,
+    ExecutionState, FnSink, Join, MemoryStore, NodeId, NodeOutcome, NodeState, OnFailure, Recover,
+    Resume, ResumeError, RetryPolicy, Runtime, SnapshotError, StateStore, StoreError, Timestamp,
     WorkflowDefinition, SCHEMA_VERSION,
 };
 use std::future::Future;
@@ -642,6 +642,11 @@ async fn resume_error_display_names_the_case() {
         .to_string()
         .contains("definition"));
     assert!(ResumeError::NotFailed.to_string().contains("Failed"));
+    assert!(
+        ResumeError::Apply(ApplyError::UnknownNode(NodeId::new("ghost")))
+            .to_string()
+            .contains("ghost")
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

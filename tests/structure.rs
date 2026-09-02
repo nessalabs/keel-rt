@@ -344,6 +344,7 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "resume_with_retry_failed_fail_subtree_all_done_retries_failed_page",
         "resume_with_retry_failed_failed_all_done_join_waits_for_retried_pred",
         "resume_with_retry_failed_on_cancelled_is_not_failed",
+        "retry_failed_illegal_is_not_failed_other_apply_is_not",
         "retry_failed_persist_crash_mid_retry_is_at_least_once",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
@@ -480,6 +481,111 @@ fn resume_enum_has_no_retry_failed() {
     let body = &rest[..end];
     assert!(body.contains("Continue"));
     assert!(body.contains("RetryFailed"));
+}
+
+fn rust_fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
+    let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+    let rest = &src[start..];
+    let open = rest
+        .find('{')
+        .unwrap_or_else(|| panic!("{sig} has no body"));
+    let bytes = rest.as_bytes();
+    let mut depth = 0i32;
+    for (i, &c) in bytes[open..].iter().enumerate() {
+        match c {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open..=open + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("{sig} unclosed");
+}
+
+/// RetryFailed apply is pure. Persist / snapshot / sink stay in the Runtime shell.
+#[test]
+fn apply_retry_failed_is_pure_no_snapshot_store_or_sink() {
+    let apply = fs::read_to_string(src_root().join("domain/state/apply.rs")).unwrap();
+    for banned in [
+        "ExecutionSnapshot",
+        "SCHEMA_VERSION",
+        "rusqlite",
+        "EventSink",
+    ] {
+        assert!(
+            !contains_word(&apply, banned),
+            "apply.rs must not mention {banned}"
+        );
+    }
+    let body = rust_fn_body(&apply, "fn apply_retry_failed");
+    for banned in [
+        "ExecutionSnapshot",
+        "SCHEMA_VERSION",
+        "rusqlite",
+        "EventSink",
+        "Store",
+    ] {
+        assert!(
+            !contains_word(body, banned),
+            "apply_retry_failed must not mention {banned}"
+        );
+    }
+    assert!(
+        !contains_word(body, "persist"),
+        "persist stays in Runtime after Ok(apply)"
+    );
+}
+
+/// resume_with is ExecutionId + Recover. Snapshot load is the shell interior.
+#[test]
+fn resume_with_takes_execution_id_and_recover_not_snapshot() {
+    let src = fs::read_to_string(src_root().join("runtime/runtime.rs")).unwrap();
+    let sig = src.find("pub async fn resume_with").expect("resume_with");
+    let after = &src[sig..];
+    let end = after.find('{').expect("resume_with body");
+    let header = &after[..end];
+    assert!(header.contains("ExecutionId"));
+    assert!(header.contains("Recover"));
+    assert!(
+        !header.contains("ExecutionSnapshot"),
+        "resume_with must not take or return ExecutionSnapshot"
+    );
+    assert!(header.contains("ResumeError"));
+}
+
+/// Eligibility lives in apply. Runtime maps Illegal only — not apply().is_err().
+#[test]
+fn retry_failed_runtime_maps_illegal_not_any_apply_err() {
+    let src = fs::read_to_string(src_root().join("runtime/runtime.rs")).unwrap();
+    let mapper = rust_fn_body(&src, "fn map_retry_failed_apply_err");
+    assert!(mapper.contains("ApplyError::Illegal"));
+    assert!(mapper.contains("ResumeError::NotFailed"));
+    assert!(
+        !mapper.contains("StoreError"),
+        "do not wrap apply errors as StoreError::Message"
+    );
+    let spawn = rust_fn_body(&src, "async fn spawn_resume");
+    assert!(
+        !spawn.contains(".is_err()"),
+        "do not use apply().is_err() for NotFailed"
+    );
+    let retry = spawn
+        .split("Recover::RetryFailed")
+        .nth(1)
+        .expect("RetryFailed branch");
+    let branch = retry.split("let (tx, rx)").next().unwrap();
+    assert!(
+        !branch.contains("exec.state()"),
+        "do not re-check exec.state() in Runtime"
+    );
+    assert!(
+        branch.contains("persist"),
+        "persist stays in Runtime after Ok(apply)"
+    );
 }
 
 /// Apply is a tick: given `Clock::now()` (or `now: Timestamp`), a node
