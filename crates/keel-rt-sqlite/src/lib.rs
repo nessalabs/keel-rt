@@ -15,6 +15,10 @@
 //! need the extra speed. 256-wide resume under FULL still meets the ≥50%
 //! cut vs the pre-opt 1.008 s baseline (`benches/BASELINE.md`).
 //!
+//! Lease columns (`owner`, `epoch`, `lease_until`) live on `executions`.
+//! Existing files get `ALTER TABLE` on open — kernel `SCHEMA_VERSION` stays 1.
+//! `claim` uses `BEGIN IMMEDIATE` and never `INSERT OR REPLACE`.
+//!
 //! One `BEGIN IMMEDIATE` … `COMMIT` per `persist`/`put` call. The scheduler
 //! already persists once per event (Start+dispatch is one event, not a sqlite
 //! merge of two turns). After the first write, only [`Execution::dirty_nodes`]
@@ -26,8 +30,9 @@
 
 use async_trait::async_trait;
 use keel_rt::{
-    Event, Execution, ExecutionId, ExecutionSnapshot, NodeSnapshot, NodeState, StateStore,
-    StoreError, Timestamp, WorkflowDefinition,
+    ClaimError, Event, Execution, ExecutionId, ExecutionSnapshot, LeaseEpoch, NodeSnapshot,
+    NodeState, OwnerId, StateStore, StoreError, Timestamp, WorkflowDefinition, DEFAULT_LEASE_TTL,
+    SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -47,7 +52,10 @@ CREATE TABLE IF NOT EXISTS executions (
   definition_hash TEXT NOT NULL,
   workflow_id TEXT NOT NULL,
   state TEXT NOT NULL,
-  node_order TEXT NOT NULL
+  node_order TEXT NOT NULL,
+  owner TEXT,
+  epoch INTEGER,
+  lease_until INTEGER
 );
 CREATE TABLE IF NOT EXISTS nodes (
   execution_id TEXT NOT NULL,
@@ -151,6 +159,7 @@ impl SqliteStore {
             .map_err(store_err)?;
         conn.execute_batch(SCHEMA).map_err(store_err)?;
         ensure_runnable_at_column(&conn)?;
+        ensure_lease_columns(&conn)?;
         Ok(Self {
             path,
             conn: Arc::new(Mutex::new(conn)),
@@ -250,6 +259,7 @@ impl SqliteStore {
     ) -> Result<(), StoreError> {
         conn.execute("BEGIN IMMEDIATE", []).map_err(store_err)?;
         let r = (|| {
+            reject_fence(conn, exec)?;
             insert_definition(conn, Some(exec.definition()))?;
             let found: Option<i64> = conn
                 .query_row(
@@ -296,6 +306,190 @@ impl SqliteStore {
         }
         Ok(())
     }
+}
+
+fn ensure_lease_columns(conn: &Connection) -> Result<(), StoreError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(executions)")
+        .map_err(store_err)?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(store_err)?;
+    let mut have_owner = false;
+    let mut have_epoch = false;
+    let mut have_until = false;
+    for c in cols {
+        match c.map_err(store_err)?.as_str() {
+            "owner" => have_owner = true,
+            "epoch" => have_epoch = true,
+            "lease_until" => have_until = true,
+            _ => {}
+        }
+    }
+    if !have_owner {
+        conn.execute("ALTER TABLE executions ADD COLUMN owner TEXT", [])
+            .map_err(store_err)?;
+    }
+    if !have_epoch {
+        conn.execute("ALTER TABLE executions ADD COLUMN epoch INTEGER", [])
+            .map_err(store_err)?;
+    }
+    if !have_until {
+        conn.execute("ALTER TABLE executions ADD COLUMN lease_until INTEGER", [])
+            .map_err(store_err)?;
+    }
+    Ok(())
+}
+
+fn lease_until_ms(now: Timestamp) -> i64 {
+    i64::try_from(now.saturating_add(DEFAULT_LEASE_TTL).as_millis()).unwrap_or(i64::MAX)
+}
+
+fn lease_live_ms(until: Option<i64>, now: Timestamp) -> bool {
+    match until {
+        Some(u) => u > i64::try_from(now.as_millis()).unwrap_or(i64::MAX),
+        None => false,
+    }
+}
+
+fn reject_fence(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
+    let epoch: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT epoch FROM executions WHERE id = ?1",
+            params![exec.id().as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(store_err)?;
+    let Some(Some(found)) = epoch else {
+        return Ok(());
+    };
+    if found <= 0 {
+        return Ok(());
+    }
+    let found = found as u64;
+    let attempted = exec.fence_epoch().unwrap_or(0);
+    if attempted != found {
+        return Err(StoreError::StaleEpoch { found, attempted });
+    }
+    Ok(())
+}
+
+fn claim_conn(
+    conn: &Connection,
+    id: &ExecutionId,
+    owner: &OwnerId,
+    now: Timestamp,
+) -> Result<LeaseEpoch, ClaimError> {
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| ClaimError::Store(store_err(e)))?;
+    let r = (|| {
+        let row: Option<(Option<String>, Option<i64>, Option<i64>)> = conn
+            .query_row(
+                "SELECT owner, epoch, lease_until FROM executions WHERE id = ?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(store_err)?;
+        let until = lease_until_ms(now);
+        match row {
+            None => {
+                conn.execute(
+                    "INSERT INTO executions
+                       (id, revision, schema_version, definition_hash, workflow_id, state, node_order, owner, epoch, lease_until)
+                     VALUES (?1, 0, ?2, '', '', '\"Created\"', '[]', ?3, 1, ?4)",
+                    params![id.as_str(), SCHEMA_VERSION as i64, owner.as_str(), until],
+                )
+                .map_err(store_err)?;
+                Ok(LeaseEpoch(1))
+            }
+            Some((cur_owner, cur_epoch, cur_until)) => {
+                let epoch = cur_epoch.unwrap_or(0) as u64;
+                let live = lease_live_ms(cur_until, now);
+                let other = cur_owner.as_deref().is_some_and(|o| o != owner.as_str());
+                if other && live {
+                    return Err(ClaimError::ClaimedElsewhere);
+                }
+                if !other && live && epoch > 0 {
+                    conn.execute(
+                        "UPDATE executions SET lease_until = ?2 WHERE id = ?1",
+                        params![id.as_str(), until],
+                    )
+                    .map_err(store_err)?;
+                    return Ok(LeaseEpoch(epoch));
+                }
+                let new_epoch = epoch.saturating_add(1).max(1);
+                conn.execute(
+                    "UPDATE executions SET owner = ?2, epoch = ?3, lease_until = ?4 WHERE id = ?1",
+                    params![id.as_str(), owner.as_str(), new_epoch as i64, until],
+                )
+                .map_err(store_err)?;
+                Ok(LeaseEpoch(new_epoch))
+            }
+        }
+    })();
+    match r {
+        Ok(epoch) => {
+            conn.execute("COMMIT", [])
+                .map_err(|e| ClaimError::Store(store_err(e)))?;
+            Ok(epoch)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
+fn heartbeat_conn(
+    conn: &Connection,
+    id: &ExecutionId,
+    epoch: LeaseEpoch,
+    now: Timestamp,
+) -> Result<(), ClaimError> {
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| ClaimError::Store(store_err(e)))?;
+    let r = (|| {
+        let n = conn
+            .execute(
+                "UPDATE executions SET lease_until = ?3 WHERE id = ?1 AND epoch = ?2",
+                params![id.as_str(), epoch.0 as i64, lease_until_ms(now)],
+            )
+            .map_err(store_err)?;
+        if n == 0 {
+            Err(ClaimError::ClaimedElsewhere)
+        } else {
+            Ok(())
+        }
+    })();
+    match r {
+        Ok(()) => {
+            conn.execute("COMMIT", [])
+                .map_err(|e| ClaimError::Store(store_err(e)))?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
+fn release_conn(conn: &Connection, id: &ExecutionId, epoch: LeaseEpoch) {
+    let _ = conn.execute(
+        "UPDATE executions SET owner = NULL, epoch = 0, lease_until = NULL
+         WHERE id = ?1 AND epoch = ?2",
+        params![id.as_str(), epoch.0 as i64],
+    );
+}
+
+fn release_owner_conn(conn: &Connection, owner: &OwnerId) {
+    let _ = conn.execute(
+        "UPDATE executions SET owner = NULL, epoch = 0, lease_until = NULL
+         WHERE owner = ?1",
+        params![owner.as_str()],
+    );
 }
 
 fn ensure_runnable_at_column(conn: &Connection) -> Result<(), StoreError> {
@@ -679,6 +873,43 @@ impl StateStore for SqliteStore {
         WorkflowDefinition::from_durable_bytes(&body)
             .map(Some)
             .map_err(|e| StoreError::Message(e.to_string()))
+    }
+
+    async fn claim(
+        &self,
+        id: &ExecutionId,
+        owner: &OwnerId,
+        now: Timestamp,
+    ) -> Result<LeaseEpoch, ClaimError> {
+        let conn = self.lock().map_err(ClaimError::Store)?;
+        claim_conn(&conn, id, owner, now)
+    }
+
+    async fn heartbeat(
+        &self,
+        id: &ExecutionId,
+        epoch: LeaseEpoch,
+        now: Timestamp,
+    ) -> Result<(), ClaimError> {
+        let conn = self.lock().map_err(ClaimError::Store)?;
+        heartbeat_conn(&conn, id, epoch, now)
+    }
+
+    async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
+        self.release_now(id, epoch);
+        Ok(())
+    }
+
+    fn release_now(&self, id: &ExecutionId, epoch: LeaseEpoch) {
+        if let Ok(conn) = self.lock() {
+            release_conn(&conn, id, epoch);
+        }
+    }
+
+    fn release_owner_now(&self, owner: &OwnerId) {
+        if let Ok(conn) = self.lock() {
+            release_owner_conn(&conn, owner);
+        }
     }
 }
 
@@ -1438,6 +1669,88 @@ mod tests {
                 runnable_at: Some(Timestamp(77))
             }
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lease_columns_migrate_on_legacy_executions_table() {
+        let path = tmp();
+        let id = ExecutionId::new();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE executions (
+                   id TEXT PRIMARY KEY, revision INTEGER, schema_version INTEGER,
+                   definition_hash TEXT, workflow_id TEXT, state TEXT, node_order TEXT);
+                 CREATE TABLE nodes (
+                   execution_id TEXT NOT NULL, node_id TEXT NOT NULL, body TEXT NOT NULL,
+                   PRIMARY KEY (execution_id, node_id));
+                 CREATE TABLE definitions (hash TEXT PRIMARY KEY, body BLOB);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO executions
+                   (id, revision, schema_version, definition_hash, workflow_id, state, node_order)
+                 VALUES (?1, 1, 1, 'legacy', 'wf', '\"Running\"', '[\"a\"]')",
+                params![id.as_str()],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let a = OwnerId::new();
+        let e = store.claim(&id, &a, Timestamp(0)).await.unwrap();
+        assert_eq!(e, LeaseEpoch(1));
+        match store.claim(&id, &OwnerId::new(), Timestamp(0)).await {
+            Err(ClaimError::ClaimedElsewhere) => {}
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn claim_does_not_use_insert_or_replace() {
+        let lib = include_str!("lib.rs");
+        let claim = lib.split("fn claim_conn").nth(1).expect("claim_conn");
+        let claim = claim.split("fn heartbeat_conn").next().unwrap();
+        assert!(
+            !claim.contains("INSERT OR REPLACE"),
+            "claim must not use INSERT OR REPLACE"
+        );
+        assert!(claim.contains("BEGIN IMMEDIATE"));
+        assert!(claim.contains("INSERT INTO executions"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_owner_claim_refreshes_without_bumping_epoch() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let id = ExecutionId::new();
+        let owner = OwnerId::new();
+        let e1 = store.claim(&id, &owner, Timestamp(0)).await.unwrap();
+        let e2 = store.claim(&id, &owner, Timestamp(1)).await.unwrap();
+        assert_eq!(e1, e2);
+        store.heartbeat(&id, e1, Timestamp(2)).await.unwrap();
+        store.release(&id, e1).await.unwrap();
+        store
+            .claim(&id, &OwnerId::new(), Timestamp(2))
+            .await
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heartbeat_wrong_epoch_is_claimed_elsewhere() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let id = ExecutionId::new();
+        let owner = OwnerId::new();
+        store.claim(&id, &owner, Timestamp(0)).await.unwrap();
+        match store.heartbeat(&id, LeaseEpoch(99), Timestamp(0)).await {
+            Err(ClaimError::ClaimedElsewhere) => {}
+            other => panic!("{other:?}"),
+        }
+        store.release_now(&id, LeaseEpoch(99));
+        store.release_owner_now(&owner);
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -68,6 +68,39 @@ async fn resume_of_live_start_is_already_active() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn shared_memory_store_second_runtime_resume_is_claimed_elsewhere() {
+    let store = MemoryStore::new();
+    let rt_a = Runtime::builder()
+        .store(store.clone())
+        .register_fn("a", |ctx: ExecutionContext| async move {
+            NodeOutcome::Waiting {
+                token: ctx.resume_token,
+            }
+        })
+        .build();
+    let handle = rt_a
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("a", "a")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    within(handle.wait_stable()).await;
+    let rt_b = Runtime::builder()
+        .store(store)
+        .register_fn("a", succeed("a"))
+        .build();
+    match rt_b.resume(&id).await {
+        Err(ResumeError::ClaimedElsewhere) => {}
+        other => panic!("shared MemoryStore must fence the second Runtime, got {other:?}"),
+    }
+    handle.cancel().await;
+    within(handle.wait()).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn resume_after_wait_returns_terminal_without_re_running() {
     let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let c = attempts.clone();
@@ -638,6 +671,9 @@ async fn resume_error_display_names_the_case() {
         .to_string()
         .contains("unknown"));
     assert!(ResumeError::AlreadyActive.to_string().contains("already"));
+    assert!(ResumeError::ClaimedElsewhere
+        .to_string()
+        .contains("elsewhere"));
     assert!(ResumeError::DefinitionMissing
         .to_string()
         .contains("definition"));
@@ -1655,6 +1691,50 @@ async fn complete_store_persist_err_is_store() {
         }
     })
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_complete_persist_err_is_not_ok() {
+    let store = Arc::new(FailingStore::fail_on_nth_put(0));
+    let rt = Runtime::builder()
+        .store_arc(store.clone() as Arc<dyn StateStore>)
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    within(handle.wait_stable()).await;
+    let token = handle
+        .inspect()
+        .await
+        .node(&NodeId::new("hold"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .expect("token");
+    enable("store.put", 1);
+    match rt
+        .complete(
+            token.clone(),
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
+        )
+        .await
+    {
+        Err(CompleteError::Apply(_)) => {}
+        other => panic!("complete Ok only after persist Ok, got {other:?}"),
+    }
+    disable("store.put");
+    rt.complete(
+        token,
+        Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
 }
 
 #[tokio::test(flavor = "current_thread")]

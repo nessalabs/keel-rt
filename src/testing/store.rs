@@ -2,7 +2,7 @@ use crate::domain::definition::WorkflowDefinition;
 use crate::domain::ids::ExecutionId;
 use crate::domain::snapshot::ExecutionSnapshot;
 use crate::domain::state::Execution;
-use crate::runtime::store::{MemoryStore, StateStore, StoreError};
+use crate::runtime::store::{ClaimError, LeaseEpoch, MemoryStore, OwnerId, StateStore, StoreError};
 use crate::testing::failpoint;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,6 +87,36 @@ impl StateStore for FailingStore {
     ) -> Result<Option<WorkflowDefinition>, StoreError> {
         self.inner.workflow_definition(id).await
     }
+
+    async fn claim(
+        &self,
+        id: &ExecutionId,
+        owner: &OwnerId,
+        now: crate::domain::time::Timestamp,
+    ) -> Result<LeaseEpoch, ClaimError> {
+        self.inner.claim(id, owner, now).await
+    }
+
+    async fn heartbeat(
+        &self,
+        id: &ExecutionId,
+        epoch: LeaseEpoch,
+        now: crate::domain::time::Timestamp,
+    ) -> Result<(), ClaimError> {
+        self.inner.heartbeat(id, epoch, now).await
+    }
+
+    async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
+        self.inner.release(id, epoch).await
+    }
+
+    fn release_now(&self, id: &ExecutionId, epoch: LeaseEpoch) {
+        self.inner.release_now(id, epoch);
+    }
+
+    fn release_owner_now(&self, owner: &OwnerId) {
+        self.inner.release_owner_now(owner);
+    }
 }
 
 /// Records every persist in order. Optional get sequence for scripted reads.
@@ -109,7 +139,10 @@ impl SequenceStore {
 #[async_trait]
 impl StateStore for SequenceStore {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
-        self.puts.lock().expect("sequence store").push(snapshot.clone());
+        self.puts
+            .lock()
+            .expect("sequence store")
+            .push(snapshot.clone());
         self.inner.put(snapshot).await
     }
 
@@ -138,5 +171,35 @@ impl StateStore for SequenceStore {
         id: &ExecutionId,
     ) -> Result<Option<WorkflowDefinition>, StoreError> {
         self.inner.workflow_definition(id).await
+    }
+
+    async fn claim(
+        &self,
+        id: &ExecutionId,
+        owner: &OwnerId,
+        now: crate::domain::time::Timestamp,
+    ) -> Result<LeaseEpoch, ClaimError> {
+        self.inner.claim(id, owner, now).await
+    }
+
+    async fn heartbeat(
+        &self,
+        id: &ExecutionId,
+        epoch: LeaseEpoch,
+        now: crate::domain::time::Timestamp,
+    ) -> Result<(), ClaimError> {
+        self.inner.heartbeat(id, epoch, now).await
+    }
+
+    async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
+        self.inner.release(id, epoch).await
+    }
+
+    fn release_now(&self, id: &ExecutionId, epoch: LeaseEpoch) {
+        self.inner.release_now(id, epoch);
+    }
+
+    fn release_owner_now(&self, owner: &OwnerId) {
+        self.inner.release_owner_now(owner);
     }
 }

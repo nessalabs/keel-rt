@@ -192,8 +192,8 @@ classDiagram
   }
   class ResumeError {
     <<enum>>
-    UnknownExecution AlreadyActive DefinitionMissing
-    Snapshot UnregisteredExecutors Store
+    UnknownExecution AlreadyActive ClaimedElsewhere
+    DefinitionMissing Snapshot UnregisteredExecutors Store
   }
   class FunctionExecutor
   FunctionExecutor ..|> Executor

@@ -1,8 +1,8 @@
 //! Standing sqlite chaos / load pack. Not coverage.
 //!
 //! High load and messy user scenarios against a **real file**. Fail-fast and
-//! AND-join stay the library defaults. Two Runtimes on one file are unfenced
-//! (ADR 0004) — hunt silent wrong terminals, not leases.
+//! AND-join stay the library defaults. Two Runtimes on one file are fenced
+//! by store lease + epoch (ADR 0004). Hunt silent wrong terminals.
 //!
 //! `cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture`
 
@@ -11,8 +11,8 @@ use bytes::Bytes;
 use keel_rt::testing::{FakeClock, FaultySink, ScriptedExecutor};
 use keel_rt::{
     AcceptPolicy, ApplyCmd, Execution, ExecutionContext, ExecutionId, ExecutionSnapshot,
-    ExecutionState, NodeId, NodeOutcome, NodeState, Policy, PolicyDecision, Resume, RetryPolicy,
-    Runtime, StateStore, StoreError, Timestamp, WorkflowDefinition,
+    ExecutionState, NodeId, NodeOutcome, NodeState, Policy, PolicyDecision, Resume, ResumeError,
+    RetryPolicy, Runtime, StateStore, StoreError, Timestamp, WorkflowDefinition,
 };
 use keel_rt_sqlite::SqliteStore;
 use std::path::PathBuf;
@@ -1244,7 +1244,7 @@ fn policy_panic_during_sqlite_put_stays_failed() {
     rm_db(&path);
 }
 
-/// Two Runtimes, one file, same Running diamond: unfenced re-invoke is allowed;
+/// Two Runtimes, one file, same Running diamond: B is ClaimedElsewhere;
 /// the file must not show writer Succeeded with a live predecessor.
 #[test]
 fn two_runtimes_diamond_no_silent_wrong_terminal() {
@@ -1291,9 +1291,11 @@ fn two_runtimes_diamond_no_silent_wrong_terminal() {
             })
             .build();
         let ha = runtime_a.resume(ex.id()).await.unwrap();
-        let hb = runtime_b.resume(ex.id()).await.unwrap();
+        match runtime_b.resume(ex.id()).await {
+            Err(ResumeError::ClaimedElsewhere) => {}
+            other => panic!("live lease must fence B, got {other:?}"),
+        }
         let _ = ha.wait().await;
-        let _ = hb.wait().await;
         let snap = store_a.get(ex.id()).await.unwrap().unwrap();
         let def = store_a
             .workflow_definition(ex.id())

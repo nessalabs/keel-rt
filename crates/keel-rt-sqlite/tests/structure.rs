@@ -81,6 +81,25 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         lib.contains("runnable_at INTEGER"),
         "T must be a nodes column, not a timer table"
     );
+    for col in ["owner TEXT", "epoch INTEGER", "lease_until INTEGER"] {
+        assert!(
+            lib.contains(col),
+            "lease column {col} must live on executions"
+        );
+    }
+    assert!(
+        lib.contains("fn claim_conn") && lib.contains("BEGIN IMMEDIATE"),
+        "claim SQL lives in keel-rt-sqlite"
+    );
+    let claim = lib
+        .split("fn claim_conn")
+        .nth(1)
+        .and_then(|s| s.split("fn heartbeat_conn").next())
+        .unwrap_or("");
+    assert!(
+        !claim.contains("INSERT OR REPLACE"),
+        "claim must not use INSERT OR REPLACE"
+    );
     for table in ["executions", "nodes", "definitions", "events"] {
         assert!(
             lib.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")),

@@ -53,7 +53,10 @@ pub use runtime::runtime::{
     DEFAULT_CANCEL_BOUND,
 };
 pub use runtime::sink::{EventSink, FnSink, SinkError};
-pub use runtime::store::{MemoryStore, NoopStore, StateStore, StoreError};
+pub use runtime::store::{
+    ClaimError, LeaseEpoch, MemoryStore, NoopStore, OwnerId, StateStore, StoreError,
+    DEFAULT_LEASE_TTL,
+};
 pub use runtime::time::Clock;
 pub use runtime::wait::{Wait, WAIT_ID};
 

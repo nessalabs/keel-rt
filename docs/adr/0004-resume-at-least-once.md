@@ -65,7 +65,11 @@ power loss may drop the last WAL frames. FULL 256-wide resume still meets
 the ≥50% cut vs the pre-opt baseline, so the default did not stay on NORMAL
 for the headline number. Crate README: `crates/keel-rt-sqlite/README.md`.
 
-**No process fence.** `AlreadyActive` is per `Runtime`. Two runtimes on
-one sqlite file can both resume and both re-invoke a Running node
-(`two_runtimes_same_file_are_not_fenced`). CAS still rejects a stale
-`put`. A distributed lease is out of scope.
+**Store lease + epoch.** `AlreadyActive` is per `Runtime`. Two Runtimes
+on one sqlite file (or one shared `MemoryStore`) take store-level
+ownership of one execution: `claim` / `heartbeat` / `release` on
+`StateStore`. A live lease for another owner is `ClaimedElsewhere`
+(`two_runtimes_same_file_are_not_fenced`). Persist and complete carry
+the epoch; a stale epoch is rejected. Default TTL is 30s (`Clock` `now`,
+not a wall sleep). This is not distributed workers / placement. CAS
+still rejects a stale `put`.

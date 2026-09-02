@@ -27,6 +27,10 @@ let fast = SqliteStore::open_fast("/tmp/keel-fast.db")?; // NORMAL
 
 ## Persist contract
 
+- Lease: `executions.owner`, `epoch`, `lease_until`. `claim` is
+  `BEGIN IMMEDIATE` and never `INSERT OR REPLACE`. Existing files get
+  `ALTER TABLE` on open; kernel `SCHEMA_VERSION` stays 1 (adapter
+  columns, not snapshot schema). Default TTL 30s.
 - One `BEGIN IMMEDIATE` … `COMMIT` per `persist`/`put` call.
 - First persist writes every node row. Later persists upsert dirty slots
   only; unchanged Pending rows are not deleted. Parked Ready{T} stores T

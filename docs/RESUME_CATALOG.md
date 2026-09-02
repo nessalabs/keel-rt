@@ -36,11 +36,11 @@ Sqlite adapter lines are not kernel `src/`.
 | StartNode on due T | `ApplyError::Illegal`; RetryDue first | `test: start_node_on_due_t_is_illegal_without_retry_due` |
 | Cancel vs due T same instant | Cancel in inbox beats Timer | `test: cancel_when_deadline_already_due_does_not_dispatch` `test: due_t_hung_wait_until_inbox_cancel_does_not_dispatch` |
 | 256 parked crash-resume | one advance, each fires once | `test: wide_256_parked_advance_once_each_fires_once` `test: crash_resume_256_parked_advance_once_each_once` |
-| Two Runtimes, parked T | still unfenced | `test: two_runtimes_parked_deadline_are_not_fenced` |
+| Two Runtimes, parked T | second resume `ClaimedElsewhere` while lease live | `test: two_runtimes_parked_deadline_are_not_fenced` |
 | Crash during timeout (Running + FakeClock Delay) | re-invoke; advance FakeClock → TimedOut | `test: start_arm_timeout_crash_before_fire_resume_advance_is_timed_out` |
 | Crash after terminal persist | terminal kept; succeeded/failed nodes do not re-run | `test: process_restart_is_new_runtime_same_file` `test: crash_after_fail_fast_stays_failed` |
 | `resume` while first resume still live, concurrent | one `Ok`, one `AlreadyActive` | `test: concurrent_resume_same_id_one_already_active` `test: concurrent_resume_same_runtime_one_already_active` `test: resume_of_live_start_is_already_active` `test: resume_twice_live_is_already_active` |
-| Two Runtimes, one sqlite file | **no process fence**; both may re-invoke. CAS: stale put loses | `test: two_runtimes_same_file_are_not_fenced` `test: stale_put_does_not_clobber` `test: stale_put_loses_on_memory_store` |
+| Two Runtimes, one sqlite file | store lease + epoch; second resume `ClaimedElsewhere` while lease live. CAS: stale put loses | `test: two_runtimes_same_file_are_not_fenced` `test: stale_put_does_not_clobber` `test: stale_put_loses_on_memory_store` `test: two_runtimes_lease_ttl_then_second_claims` `test: stale_epoch_persist_is_rejected` |
 | Persist CAS then kill before event | terminal not lost; executor not re-run; event may be absent | `test: crash_after_terminal_cas_before_emit_keeps_terminal` `test: persist_cas_then_drop_runtime_resume_keeps_terminal` `test: persist_panic_after_write_keeps_terminal_and_does_not_emit` `test: persist_succeeds_before_execution_succeeded_is_emitted` |
 | Persist `Err` then later persist `Ok` of the same snapshot | sink gets the events for that snapshot (Started not dropped); sqlite event rows on shutdown flush | `test: persist_err_then_ok_emits_events_for_the_durable_snapshot` `test: transient_terminal_persist_err_shutdown_still_emits_execution_succeeded` `test: cancel_persist_err_then_shutdown_emits_execution_cancelled` `test: transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded` |
 | sqlite event rows in the snapshot txn | rows exist; resume still snapshot-only | `test: event_rows_in_snapshot_txn_are_not_used_for_resume` `test: resume_reinvoke_emits_node_started_again` |
@@ -65,7 +65,8 @@ Sqlite adapter lines are not kernel `src/`.
 | Builtin `wait` + in-process `Runtime::complete` | parks without register; second task Complete Bytes; next node sees them | `test: complete_from_second_task_unblocks_wait_and_downstream_sees_bytes` `test: wait_is_registered_without_manual_executor` |
 | `complete` unknown token | `CompleteError::UnknownToken` | `test: complete_unknown_token_errors` `test: complete_unknown_token_is_unknown` |
 | `complete` after Drop/cancel | `CompleteError::Cancelled`; run stays Cancelled | `test: complete_after_drop_handle_does_not_revive` |
-| Engine-down complete (new Runtime, same store) | apply + persist + drive; successor runs | `test: complete_from_store_after_engine_down_unblocks_wait` `test: complete_after_sqlite_kill_new_runtime_unblocks_wait` |
+| Engine-down complete (new Runtime, same store) | lease released or expired; new Runtime claims; apply + persist + drive | `test: complete_from_store_after_engine_down_unblocks_wait` `test: complete_after_sqlite_kill_new_runtime_unblocks_wait` |
+| Shared MemoryStore, second Runtime resume | `ClaimedElsewhere` | `test: shared_memory_store_second_runtime_resume_is_claimed_elsewhere` |
 | HTTP adapter `POST /complete` | another process → `Runtime::complete`; secret required; loopback default | `test: post_complete_unblocks_wait_node` `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` (crate `keel-rt-http`) |
 | HTTP missing/wrong secret | 401; does not complete | `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` `test: post_query_secret_is_still_401` |
 | HTTP oversized body | 413/400; snapshot stays Waiting | `test: post_oversized_body_is_413_does_not_complete` |
@@ -74,11 +75,11 @@ Sqlite adapter lines are not kernel `src/`.
 | HTTP Reinvoke then stale Complete | new token; old token 404 | `test: post_reinvoke_then_stale_complete_is_404` |
 | `ResumeToken` nonce | 128-bit mix; not sequential ints; not guessable from id | `test: resume_tokens_are_not_sequential_ints` `test: guessed_sequential_nonces_do_not_complete` |
 | Token binds execution | A's token does not complete B | `test: complete_token_from_a_does_not_apply_to_b` |
-| persist Err on complete | snapshot stays Waiting; retry works | `test: complete_store_persist_err_is_store` |
+| persist Err on complete | snapshot stays Waiting; retry works; complete Ok only after persist Ok | `test: complete_store_persist_err_is_store` `test: live_complete_persist_err_is_not_ok` |
 | Wait is not Ready{T} | clock advance does not auto-complete | `test: wait_is_waiting_not_ready_t_and_clock_does_not_complete` |
 | complete vs fail-fast cancel | Cancelled; does not revive | `test: complete_while_fail_fast_already_cancelled_wait` |
 | 256 concurrent waits then complete | hang bound still cancels | `test: complete_256_wait_nodes_then_hang_bound_cancels` |
-| Two Runtimes one file both complete | **unfenced**; both may Ok | `test: two_runtimes_same_file_both_may_complete` |
+| Two Runtimes one file both complete | A owns; B `ClaimedElsewhere`; drop A (or TTL) then B Ok | `test: two_runtimes_same_file_both_may_complete` |
 | Crash after Running persist | file reopens (no leaked lock); Running re-invoked | `test: crash_after_running_persist_releases_lock_and_reinvokes` `test: crash_during_b_running_reinvokes_b_not_a` |
 | Drop handle after Running persist | **graph** cancel; resume stays Cancelled (not crash) | `test: drop_handle_after_running_persist_cancels_not_reinvoke` |
 | Fat `Bytes` snapshot | MemoryStore refcount; sqlite JSON copy preserves bytes | `test: fat_bytes_resume_join_is_refcount` `test: fat_bytes_sqlite_round_trip_preserves_bytes` `test: fat_payloads_64kib_times_eight_persist_resume` `test: fat_payloads_64kib_times_32_persist_resume_within_bound` `test: fat_bytes_join_input_is_refcount_not_copy` |
@@ -114,12 +115,19 @@ Sqlite adapter lines are not kernel `src/`.
 Numbers: [`benches/BASELINE.md`](../benches/BASELINE.md) (sqlite vs MemoryStore, labeled).
 Standing high-load / messy-user attacks (not coverage): [`docs/CHAOS_LOG.md`](CHAOS_LOG.md).
 
-## Documented no-fence
+## Store lease + epoch fence
 
-`AlreadyActive` is **per Runtime**. Two processes (or two `Runtime`s) on one
-sqlite file can both `resume` / both `complete` a Waiting node. CAS rejects
-a stale `put`; the loser’s in-memory apply is not rolled back (persist fail
-skips emit). Callers that need a lease do it outside the kernel. ADR 0004.
+`AlreadyActive` is still **per Runtime** (same process, same `Runtime`).
+Two `Runtime`s sharing one store (one sqlite file, or one `MemoryStore`)
+are fenced by `StateStore::claim` / `heartbeat` / `release`. A live lease
+for another owner is `ClaimedElsewhere`. Persist / complete carry the
+epoch; a stale epoch is `StoreError::StaleEpoch`. Default lease TTL is
+30s (`DEFAULT_LEASE_TTL`); `Clock` `now`, not a wall sleep in apply.
+Dead process: the other Runtime claims after TTL (or immediately after
+`Drop` of the owning Runtime, which `release`s). Live A heartbeats so B
+cannot steal. Two `MemoryStore`s are two worlds (no shared map). HTTP
+`POST /complete` stays on the owning process (secret + loopback); the
+other binary does not open the sqlite file while A lives. ADR 0004.
 
 - Default join is `Join::AllSucceeded`. Default `OnFailure` is `FailExecution`.
 - Waiting is a node state. Retry delay is `Ready { runnable_at }` (snapshot `Timestamp` T).

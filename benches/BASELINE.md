@@ -8,7 +8,8 @@ Median of 7 iterations unless noted.
 
 `ResumeToken::issue` mixes a process key with a counter (no per-token
 syscall). `apply` persist path unchanged. HTTP secret/bind/body cap live
-only in `keel-rt-http`. Two Runtimes on one sqlite file stay **unfenced**.
+only in `keel-rt-http`. Two Runtimes on one sqlite file are fenced by
+store lease + epoch (`claim` / `heartbeat` / `release`, default TTL 30s).
 
 ### MemoryStore no-timer medians vs Phase 5 column
 

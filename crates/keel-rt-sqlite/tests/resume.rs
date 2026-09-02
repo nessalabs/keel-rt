@@ -6,9 +6,10 @@
 use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionId, ExecutionSnapshot,
-    ExecutionState, Join, NodeId, NodeOutcome, NodeState, OnFailure, Recover, Resume, ResumeError,
-    RetryPolicy, Runtime, StateStore, StoreError, Timestamp, WorkflowDefinition, SCHEMA_VERSION,
+    AcceptPolicy, ApplyCmd, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
+    ExecutionSnapshot, ExecutionState, Join, LeaseEpoch, NodeId, NodeOutcome, NodeState, OnFailure,
+    OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime, StateStore, StoreError, Timestamp,
+    WorkflowDefinition, DEFAULT_LEASE_TTL, SCHEMA_VERSION,
 };
 use keel_rt_sqlite::SqliteStore;
 use std::path::PathBuf;
@@ -671,62 +672,62 @@ fn complete_after_sqlite_kill_new_runtime_unblocks_wait() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Unfenced: two Runtimes on one Waiting sqlite file may both complete.
+/// Lease fence: while A owns the Waiting file, B complete is ClaimedElsewhere.
+/// After drop Runtime A the lease is released and B may complete.
 #[test]
 fn two_runtimes_same_file_both_may_complete() {
     let path = tmp();
-    let token = {
-        let store = SqliteStore::open(&path).unwrap();
-        let rt = current_rt();
-        let token = rt.block_on(async {
-            let runtime = Runtime::builder().store(store.clone()).build();
-            let handle = runtime
-                .start(
-                    WorkflowDefinition::builder("wf")
-                        .node("hold", "wait")
-                        .build()
-                        .unwrap(),
-                )
-                .unwrap();
-            let id = handle.execution_id().clone();
-            wait_node(&store, &id, "hold", |s| {
-                matches!(s, NodeState::Waiting { .. })
-            })
-            .await;
-            let token = store
-                .get(&id)
-                .await
-                .unwrap()
-                .unwrap()
-                .node(&NodeId::new("hold"))
-                .unwrap()
-                .resume_token
-                .clone()
-                .expect("token");
-            std::mem::forget(handle);
-            drop(runtime);
-            token
-        });
-        drop(rt);
-        drop(store);
-        token
-    };
     let store_a = SqliteStore::open(&path).unwrap();
     let store_b = SqliteStore::open(&path).unwrap();
     let rt = current_rt();
     rt.block_on(async {
-        let ra = Runtime::builder().store(store_a).build();
+        let ra = Runtime::builder().store(store_a.clone()).build();
+        let handle = ra
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        wait_node(&store_a, &id, "hold", |s| {
+            matches!(s, NodeState::Waiting { .. })
+        })
+        .await;
+        let token = store_a
+            .get(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .node(&NodeId::new("hold"))
+            .unwrap()
+            .resume_token
+            .clone()
+            .expect("token");
         let rb = Runtime::builder().store(store_b).build();
         let outcome = Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"g")));
-        let (a, b) = tokio::join!(
-            ra.complete(token.clone(), outcome.clone()),
-            rb.complete(token, outcome)
-        );
-        let oks = u8::from(a.is_ok()) + u8::from(b.is_ok());
-        assert!(
-            oks >= 1,
-            "at least one complete must apply; both may (unfenced) a={a:?} b={b:?}"
-        );
+        match rb.complete(token.clone(), outcome.clone()).await {
+            Err(CompleteError::ClaimedElsewhere) => {}
+            other => panic!("live lease must fence B complete, got {other:?}"),
+        }
+        std::mem::forget(handle);
+        drop(ra);
+        rb.complete(token, outcome)
+            .await
+            .expect("B claims after drop Runtime A");
+        tokio::time::timeout(BOUND, async {
+            loop {
+                if let Some(snap) = store_a.get(&id).await.unwrap() {
+                    if snap.state == ExecutionState::Succeeded {
+                        return;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("B complete must persist Succeeded");
     });
     let _ = std::fs::remove_file(&path);
 }
@@ -1061,12 +1062,15 @@ fn two_runtimes_same_file_are_not_fenced() {
             })
             .build();
         let ha = runtime_a.resume(ex.id()).await.unwrap();
-        let hb = runtime_b.resume(ex.id()).await.unwrap();
+        match runtime_b.resume(ex.id()).await {
+            Err(ResumeError::ClaimedElsewhere) => {}
+            other => panic!("live lease must fence B resume, got {other:?}"),
+        }
         let _ = ha.wait().await;
-        let _ = hb.wait().await;
-        assert!(
-            runs.load(Ordering::SeqCst) >= 2,
-            "sqlite does not fence processes; both Runtimes re-invoke"
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "only the owning Runtime re-invokes"
         );
         let keep = store_a.get(ex.id()).await.unwrap().unwrap().revision;
         let mut older = store_a.get(ex.id()).await.unwrap().unwrap();
@@ -1078,6 +1082,80 @@ fn two_runtimes_same_file_are_not_fenced() {
             }) if found == keep => {}
             other => panic!("{other:?}"),
         }
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn two_runtimes_lease_ttl_then_second_claims() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let clock = Arc::new(FakeClock::new());
+    let rt = current_rt();
+    rt.block_on(async {
+        let def = WorkflowDefinition::builder("wf")
+            .node("hold", "wait")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        ex.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        store.persist(&ex).await.unwrap();
+        let a = OwnerId::new();
+        store.claim(ex.id(), &a, clock.now()).await.unwrap();
+        let rb = Runtime::builder()
+            .store(store.clone())
+            .clock(clock.clone())
+            .build();
+        match rb.resume(ex.id()).await {
+            Err(ResumeError::ClaimedElsewhere) => {}
+            other => panic!("before TTL B must fail, got {other:?}"),
+        }
+        clock.advance(DEFAULT_LEASE_TTL);
+        rb.resume(ex.id())
+            .await
+            .expect("after TTL B claims")
+            .cancel()
+            .await;
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn stale_epoch_persist_is_rejected() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let mut ex = Execution::new(
+            WorkflowDefinition::builder("wf")
+                .node("a", "e")
+                .build()
+                .unwrap(),
+        );
+        let a = OwnerId::new();
+        let b = OwnerId::new();
+        let e1 = store.claim(ex.id(), &a, Timestamp(0)).await.unwrap();
+        assert_eq!(e1, LeaseEpoch(1));
+        ex.set_fence_epoch(e1.0);
+        store.persist(&ex).await.unwrap();
+        let e2 = store
+            .claim(
+                ex.id(),
+                &b,
+                Timestamp(0).saturating_add(DEFAULT_LEASE_TTL + Duration::from_millis(1)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(e2, LeaseEpoch(2));
+        let err = store.persist(&ex).await.unwrap_err();
+        assert_eq!(
+            err,
+            StoreError::StaleEpoch {
+                found: 2,
+                attempted: 1
+            }
+        );
     });
     let _ = std::fs::remove_file(&path);
 }

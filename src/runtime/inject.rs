@@ -29,6 +29,8 @@ pub(crate) enum Event {
         node_id: NodeId,
     },
     ForceCancelBound,
+    /// Extend the store lease. Not a domain apply.
+    Heartbeat,
     /// Handle dropped (after wait or cancel). Ends the apply loop.
     Shutdown,
 }

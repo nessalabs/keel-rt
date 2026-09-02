@@ -21,6 +21,14 @@ is the explicit 0.0.0.0 path). Body larger than 1 MiB is 413 and does not
 complete. [`ResumeToken`] nonce is a 128-bit mix (not a counter). The kernel
 crate does not depend on the HTTP crate. No cron, no EventLog, no NodeReady.
 
+Two Runtimes on one store are fenced by a store lease: `StateStore::claim`
+/ `heartbeat` / `release`. Persist and complete carry a fencing `epoch`.
+Default TTL is 30s (`DEFAULT_LEASE_TTL`, Clock `now`). sqlite columns
+`owner`, `epoch`, `lease_until` on `executions` (`ALTER TABLE` on old
+files; kernel `SCHEMA_VERSION` stays 1). Claim uses `BEGIN IMMEDIATE`
+and never `INSERT OR REPLACE`. Drop Runtime releases; drop handle still
+cancels. HTTP `POST /complete` stays on the owning process.
+
 ## Phase 4 RetryFailed (`phase-4/retry-failed`)
 
 [`Runtime::resume`] is still Continue: Failed stay Failed. [`Runtime::resume_with`]

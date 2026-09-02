@@ -72,7 +72,10 @@ Another task or process calls `rt.complete(token, Resume::Complete(...))`.
 If that Runtime already owns the live drive, complete injects. If the engine
 is down, a new Runtime on the same store applies, persists, and drives.
 `keel-rt-http` exposes `POST /complete` for another binary. The adapter
-requires a shared secret and binds `127.0.0.1` by default. **Drop cancels.**
+requires a shared secret and binds `127.0.0.1` by default. Two Runtimes
+on one sqlite file take a store lease (`claim` / epoch); the other
+binary does not open the file while the owner lives. **Drop handle
+cancels. Drop Runtime releases the lease.**
 
 `start` returns a handle when you need `wait_stable` + token `resume` or
 inspect. `wait()` is terminal only; Waiting is not done.

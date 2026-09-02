@@ -397,6 +397,9 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "complete_token_from_a_does_not_apply_to_b",
         "complete_store_persist_err_is_store",
         "two_runtimes_same_file_both_may_complete",
+        "two_runtimes_lease_ttl_then_second_claims",
+        "stale_epoch_persist_is_rejected",
+        "shared_memory_store_second_runtime_resume_is_claimed_elsewhere",
         "complete_256_wait_nodes_then_hang_bound_cancels",
         "resume_tokens_are_not_sequential_ints",
     ] {

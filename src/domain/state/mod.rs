@@ -171,6 +171,8 @@ pub struct Execution {
     /// Remaining unsatisfied AND-join predecessors per slot. Decremented
     /// once when a predecessor becomes Succeeded. Zero + Pending ⇒ Ready.
     pub(crate) remain: Vec<u32>,
+    /// Store fencing token. Not snapshotted. Persist carries this epoch.
+    fence_epoch: Option<u64>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -278,11 +280,21 @@ impl Execution {
             n_failed: 0,
             n_cancelled: 0,
             remain,
+            fence_epoch: None,
         };
         for i in 0..n {
             exec.inc_kind(count_kind(&exec.nodes[i].state));
         }
         exec
+    }
+
+    /// Epoch this Runtime claimed. Persist rejects a stale value.
+    pub fn fence_epoch(&self) -> Option<u64> {
+        self.fence_epoch
+    }
+
+    pub fn set_fence_epoch(&mut self, epoch: u64) {
+        self.fence_epoch = Some(epoch);
     }
 
     pub fn id(&self) -> &ExecutionId {
