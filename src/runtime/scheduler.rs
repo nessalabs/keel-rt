@@ -145,7 +145,12 @@ impl Scheduler {
         if self.epoch.is_none() || self.exec.state().is_terminal() {
             return None;
         }
-        Some(self.last_heartbeat.saturating_add(DEFAULT_LEASE_TTL / 3))
+        let at = self.last_heartbeat.saturating_add(DEFAULT_LEASE_TTL / 3);
+        if at <= self.last_heartbeat {
+            // Clock is at Timestamp::MAX; a due heartbeat would spin.
+            return None;
+        }
+        Some(at)
     }
 
     pub(crate) fn execution_id(&self) -> crate::domain::ids::ExecutionId {
@@ -361,12 +366,25 @@ impl Scheduler {
     }
 
     async fn extend_lease(&mut self) -> bool {
-        let Some(epoch) = self.epoch else {
-            return false;
-        };
         let now = self.clock.now();
-        match self.store.heartbeat(self.exec.id(), epoch, now).await {
-            Ok(()) => {
+        if let Some(epoch) = self.epoch {
+            if self
+                .store
+                .heartbeat(self.exec.id(), epoch, now)
+                .await
+                .is_ok()
+            {
+                self.last_heartbeat = now;
+                return true;
+            }
+        }
+        // Drop Runtime releases; the drive may still be running (temporary
+        // Runtime in tests). Re-claim as the same owner. Another owner
+        // with a live lease is ClaimedElsewhere — stop without cancel.
+        match self.store.claim(self.exec.id(), &self.owner, now).await {
+            Ok(epoch) => {
+                self.epoch = Some(epoch);
+                self.exec.set_fence_epoch(epoch.0);
                 self.last_heartbeat = now;
                 true
             }

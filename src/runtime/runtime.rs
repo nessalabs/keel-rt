@@ -125,39 +125,49 @@ async fn next_drive_event(
     next_timer: Option<(Timestamp, NodeId)>,
     heartbeat_at: Option<Timestamp>,
 ) -> Event {
-    enum Due {
-        Timer(NodeId),
-        Heartbeat,
-    }
-    let deadline = match (next_timer, heartbeat_at) {
-        (Some((t, _id)), Some(h)) if h < t => Some((h, Due::Heartbeat)),
-        (Some((t, id)), _) => Some((t, Due::Timer(id))),
-        (None, Some(h)) => Some((h, Due::Heartbeat)),
-        (None, None) => None,
-    };
-    match deadline {
-        Some((when, kind)) => {
-            let now = clock.now();
-            if when <= now {
-                return match rx.try_recv() {
-                    Ok(ev) => ev,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Event::Shutdown,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => match kind {
-                        Due::Timer(node_id) => Event::Timer { node_id },
-                        Due::Heartbeat => Event::Heartbeat,
-                    },
-                };
+    let now = clock.now();
+    let timer_due = next_timer.as_ref().map(|(t, _)| *t <= now).unwrap_or(false);
+    let hb_due = heartbeat_at.map(|h| h <= now).unwrap_or(false);
+    if timer_due || hb_due {
+        return match rx.try_recv() {
+            Ok(ev) => ev,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Event::Shutdown,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                match (next_timer, heartbeat_at) {
+                    (Some((t, _id)), Some(h)) if hb_due && (!timer_due || h < t) => {
+                        Event::Heartbeat
+                    }
+                    (Some((_, id)), _) if timer_due => Event::Timer { node_id: id },
+                    (_, Some(_)) => Event::Heartbeat,
+                    _ => Event::Shutdown,
+                }
             }
+        };
+    }
+    match (next_timer, heartbeat_at) {
+        (None, None) => rx.recv().await.unwrap_or(Event::Shutdown),
+        (Some((t, id)), None) => {
             tokio::select! {
                 biased;
                 ev = rx.recv() => ev.unwrap_or(Event::Shutdown),
-                _ = clock.wait_until(when) => match kind {
-                    Due::Timer(node_id) => Event::Timer { node_id },
-                    Due::Heartbeat => Event::Heartbeat,
-                },
+                _ = clock.wait_until(t) => Event::Timer { node_id: id },
             }
         }
-        None => rx.recv().await.unwrap_or(Event::Shutdown),
+        (None, Some(h)) => {
+            tokio::select! {
+                biased;
+                ev = rx.recv() => ev.unwrap_or(Event::Shutdown),
+                _ = clock.wait_until(h) => Event::Heartbeat,
+            }
+        }
+        (Some((t, id)), Some(h)) => {
+            tokio::select! {
+                biased;
+                ev = rx.recv() => ev.unwrap_or(Event::Shutdown),
+                _ = clock.wait_until(h) => Event::Heartbeat,
+                _ = clock.wait_until(t) => Event::Timer { node_id: id },
+            }
+        }
     }
 }
 
@@ -898,7 +908,19 @@ mod tests {
         drop(handle);
     }
 
-    struct FailHeartbeat(MemoryStore);
+    struct FailHeartbeat {
+        inner: MemoryStore,
+        claimed: std::sync::atomic::AtomicBool,
+    }
+
+    impl FailHeartbeat {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStore::new(),
+                claimed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl StateStore for FailHeartbeat {
@@ -906,29 +928,29 @@ mod tests {
             &self,
             snap: &crate::domain::snapshot::ExecutionSnapshot,
         ) -> Result<(), StoreError> {
-            self.0.put(snap).await
+            self.inner.put(snap).await
         }
         async fn get(
             &self,
             id: &ExecutionId,
         ) -> Result<Option<crate::domain::snapshot::ExecutionSnapshot>, StoreError> {
-            self.0.get(id).await
+            self.inner.get(id).await
         }
         async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
-            self.0.persist(exec).await
+            self.inner.persist(exec).await
         }
         async fn persist_with_events(
             &self,
             exec: &Execution,
             events: &[crate::domain::events::Event],
         ) -> Result<(), StoreError> {
-            self.0.persist_with_events(exec, events).await
+            self.inner.persist_with_events(exec, events).await
         }
         async fn workflow_definition(
             &self,
             id: &ExecutionId,
         ) -> Result<Option<WorkflowDefinition>, StoreError> {
-            self.0.workflow_definition(id).await
+            self.inner.workflow_definition(id).await
         }
         async fn claim(
             &self,
@@ -936,7 +958,10 @@ mod tests {
             owner: &OwnerId,
             now: Timestamp,
         ) -> Result<crate::runtime::store::LeaseEpoch, ClaimError> {
-            self.0.claim(id, owner, now).await
+            if self.claimed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(ClaimError::ClaimedElsewhere);
+            }
+            self.inner.claim(id, owner, now).await
         }
         async fn heartbeat(
             &self,
@@ -947,7 +972,7 @@ mod tests {
             Err(ClaimError::ClaimedElsewhere)
         }
         fn release_owner_now(&self, owner: &OwnerId) {
-            self.0.release_owner_now(owner);
+            self.inner.release_owner_now(owner);
         }
     }
 
@@ -958,7 +983,7 @@ mod tests {
             tick: tokio::sync::Notify::new(),
         });
         let rt = Runtime::builder()
-            .store(FailHeartbeat(MemoryStore::new()))
+            .store(FailHeartbeat::new())
             .clock(clock.clone())
             .build();
         let handle = rt

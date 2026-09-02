@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
+    AcceptPolicy, ApplyCmd, Clock, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
     ExecutionSnapshot, ExecutionState, Join, LeaseEpoch, NodeId, NodeOutcome, NodeState, OnFailure,
     OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime, StateStore, StoreError, Timestamp,
     WorkflowDefinition, DEFAULT_LEASE_TTL, SCHEMA_VERSION,
