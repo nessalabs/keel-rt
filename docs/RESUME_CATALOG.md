@@ -31,7 +31,7 @@ Sqlite adapter lines are not kernel `src/`.
 | Backoff retry survives crash | same attempt policy; no extra attempts | `test: backoff_retry_survives_crash_same_attempt_policy` |
 | Cancel / Drop during parked deadline | Cancelled; FakeClock sleeper dropped | `test: cancel_during_parked_deadline_is_cancelled_sleeper_dropped` `test: drop_handle_during_parked_deadline_cancels_sleeper` `test: cancel_ready_with_future_deadline_does_not_start_later` `test: cancel_while_drive_waits_on_future_t_drops_waiter` |
 | Hung `wait_until` / `Timestamp::MAX` | hang bound or inbox cancel still terminates; no `thread::sleep` | `test: hung_wait_until_hang_bound_still_cancels` `test: timestamp_max_deadline_cancel_returns_without_thread_sleep` |
-| Persist of deadline drop / double-fire | T round-trips; due-on-resume dispatches once | `test: sqlite_deadline_persist_does_not_drop_or_double_fire` `test: persisted_deadline_already_due_on_resume_runs_once_not_twice` `test: incremental_persist_does_not_drop_runnable_at` `test: persist_resume_256_runnable_at_set_vs_unset` |
+| Persist of deadline drop / double-fire | T round-trips; `last_error` round-trips; due-on-resume dispatches once | `test: sqlite_deadline_persist_does_not_drop_or_double_fire` `test: persisted_deadline_already_due_on_resume_runs_once_not_twice` `test: incremental_persist_does_not_drop_runnable_at` `test: persist_resume_256_runnable_at_set_vs_unset` `test: parked_ready_t_uses_column_omits_nested_json_keeps_last_error` `test: dirty_persist_ready_t_to_t_prime_updates_only_runnable_at` |
 | Cancel vs due T same instant | Cancel in inbox beats Timer | `test: cancel_when_deadline_already_due_does_not_dispatch` `test: due_t_hung_wait_until_inbox_cancel_does_not_dispatch` |
 | 256 parked crash-resume | one advance, each fires once | `test: wide_256_parked_advance_once_each_fires_once` `test: crash_resume_256_parked_advance_once_each_once` |
 | Two Runtimes, parked T | still unfenced | `test: two_runtimes_parked_deadline_are_not_fenced` |
@@ -92,6 +92,6 @@ a stale `put`; the loser’s in-memory apply is not rolled back (persist fail
 skips emit). Callers that need a lease do it outside the kernel. ADR 0004.
 
 - Default join is `Join::AllSucceeded`. Default `OnFailure` is `FailExecution`.
-- Waiting is a node state. Retry delay is `Ready { runnable_at }` (snapshot Instant T).
+- Waiting is a node state. Retry delay is `Ready { runnable_at }` (snapshot `Timestamp` T).
 - Persist succeeds, then the sink is told. No persist queue (ADR 0001).
 - Kernel has no cron, no wall timezone, no sqlite timer table. Waiting for T is the Runtime drive (`Clock::wait_until`), not the scheduler.

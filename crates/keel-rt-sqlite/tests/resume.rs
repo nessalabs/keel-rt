@@ -2206,6 +2206,27 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
                     })
                     .count();
                 assert_eq!(kept, n, "get() must restore Ready {{ T }} for every row");
+                assert!(
+                    snap.nodes.values().all(|n| n.last_error.is_some()),
+                    "park persist must round-trip last_error"
+                );
+                let sample: String = {
+                    let conn = rusqlite::Connection::open(path).unwrap();
+                    conn.query_row(
+                        "SELECT body FROM nodes WHERE execution_id = ?1 LIMIT 1",
+                        rusqlite::params![ex.id().as_str()],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+                };
+                assert!(
+                    !sample.contains("runnable_at"),
+                    "T is the column, got {sample}"
+                );
+                assert!(
+                    sample.contains("last_error"),
+                    "compact parked JSON keeps last_error, got {sample}"
+                );
             } else {
                 assert_eq!(cols, 0);
             }
@@ -2244,13 +2265,14 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
         unset[2].as_secs_f64() * 1000.0,
         unset_bytes
     );
+    // Compact last_error (~38 B/row) is kept so inspect agrees. Nested T is not.
     assert!(
-        set_bytes <= unset_bytes + 512,
-        "parked Ready{{T}} JSON must match Ready-now once T is a column (got {set_bytes} vs {unset_bytes})"
+        set_bytes <= unset_bytes + 40 * 256 + 512,
+        "parked Ready{{T}} JSON is Ready-now + short last_error, not nested T (got {set_bytes} vs {unset_bytes})"
     );
     assert!(
-        set_bytes < 12_000,
-        "parked 256 JSON must not stay at the 22 016 B nested-T shape (got {set_bytes})"
+        set_bytes < 22_016,
+        "parked 256 JSON must not return to the 22 016 B nested-T shape (got {set_bytes})"
     );
 }
 

@@ -30,11 +30,12 @@ All four inside the 10% band. **No revert.**
 | T vs now | +19% time, 2.5× JSON | **~0% JSON; time within noise** | |
 
 `9c07d07` leftover was parked JSON (`attempt`, `last_error` "timed out", nested
-`Some(T)`). The adapter now stores T as `nodes.runnable_at INTEGER` and writes
-the compact Ready-now body (no nested T, no last_error on Ready-for-retry).
-Kernel snapshot type is still `Ready { runnable_at }`. First persist INSERTs
-only; dirty updates skip rewriting body when it already matches and only T
-moves. No timer table. MemoryStore hot path unchanged (sqlite-only).
+`Some(T)`). The adapter stores T as `nodes.runnable_at INTEGER` and writes the
+compact Ready-now body plus a short `last_error` (no nested T). Kernel snapshot
+type is still `Ready { runnable_at }`. First persist INSERTs only; dirty
+`persist()` updates skip rewriting body when it already matches and only T
+moves (`dirty_persist_ready_t_to_t_prime_updates_only_runnable_at`). No timer
+table. MemoryStore hot path unchanged (sqlite-only).
 
 Documented prior cut (omit nulls + stale token) was 4.091 → 3.527 ms (−14%)
 with the 2.5× JSON still in place. This cut removes that JSON gap.

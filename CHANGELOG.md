@@ -2,29 +2,33 @@
 
 ## Phase 5 snapshot deadlines (`phase-5/timers`)
 
-A node is not runnable until Instant **T**. T is `NodeState::Ready { runnable_at: Some(T) }`
-on the snapshot so crash-resume sees it. Policy (how long, retry/backoff counts)
-stays on `RetryPolicy` / `timeout_after`. Waiting stays HITL. Kernel has no cron,
-no wall timezone, no sqlite timer table. `Event::NodeTimedOut` already exists;
-do not emit `NodeReady`. Drop handle still cancels the Runtime drive waiter (RAII).
-Fail-fast / AND-join defaults unchanged. `Recover::RetryFailed` is not a kernel
-command. Domain and runtime name [`Clock`] only; `FakeClock` lives in
-`src/testing` and `tests/`. sqlite persists whatever the snapshot
-already has (`synchronous=FULL` default). Waiting for T is the Runtime drive
-(`inbox` vs `Clock::wait_until`); domain and scheduler apply given `now` and
-do not sleep. The drive prefers the apply inbox when T is already due
-(`try_recv`) so Cancel/Shutdown at the same instant as a due deadline does
-not dispatch. Constructed stuck-wait tests: haywire `wait_until` (Pending
-forever) still loses to hang bound / inbox cancel; `Timestamp::MAX` cancel
-returns without `thread::sleep`; due T does not call `wait_until`. When a
-caller persist/resume parked nodes, it used to write 2.5× node JSON (nested T
-+ `last_error`). Now T is `nodes.runnable_at` INTEGER; parked JSON matches
-Ready-now; crash-resume still restores `Ready { runnable_at: Some(T) }`.
-`Timestamp::saturating_add` saturates `Duration`
-millis that do not fit in `u64` (`1<<61` seconds used to wrap to T==now).
-Node JSON omits null optionals; a retry park drops the stale attempt token
-(Waiting still carries the token). MemoryStore no-timer medians stay within
-10% of `main` (`da1e6fa`).
+A node is not runnable until **T**. T is a [`Timestamp`] (u64 millis) on
+`NodeState::Ready { runnable_at: Some(T) }` so crash-resume sees it. Policy
+(how long, retry/backoff counts) stays on `RetryPolicy`. `timeout_after`
+keeps the node Running (executor Delay) and is not snapshot T. Waiting stays
+HITL. Kernel has no cron, no wall timezone, no sqlite timer table.
+`Event::NodeTimedOut` already exists; do not emit `NodeReady`. Drop handle
+still cancels the Runtime drive waiter (RAII). Fail-fast / AND-join defaults
+unchanged. `Recover::RetryFailed` is not a kernel command. Domain and runtime
+name [`Clock`] only; `FakeClock` lives in `src/testing` and `tests/`. sqlite
+persists whatever the snapshot already has (`synchronous=FULL` default).
+Waiting for T is the Runtime drive (`inbox` vs `Clock::wait_until`); domain
+and scheduler apply given `now` and do not sleep. The drive prefers the apply
+inbox when T is already due (`try_recv`) so Cancel/Shutdown at the same
+instant as a due deadline does not dispatch. Constructed stuck-wait tests:
+haywire `wait_until` (Pending forever) still loses to hang bound / inbox
+cancel; `Timestamp::MAX` cancel returns without `thread::sleep`; due T does
+not call `wait_until`. When a caller persist/resume parked nodes, T is
+`nodes.runnable_at` INTEGER; parked JSON is compact Ready-now plus a short
+`last_error` so live inspect and crash-resume inspect agree. Crash-resume
+still restores `Ready { runnable_at: Some(T) }`. `SCHEMA_VERSION` is still 1:
+new files write compact Ready + column; an old adapter that only reads JSON
+would load `Ready { None }` and dispatch immediately (same-repo is OK, not
+fail-closed). `Timestamp::saturating_add` saturates `Duration` millis that
+do not fit in `u64` (`1<<61` seconds used to wrap to T==now). Node JSON
+omits null optionals; a retry park drops the stale attempt token (Waiting
+still carries the token). MemoryStore no-timer medians stay within 10% of
+`main` (`da1e6fa`).
 
 ## Phase 3 events (`phase-3/events`)
 

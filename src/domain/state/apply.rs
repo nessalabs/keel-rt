@@ -522,6 +522,36 @@ impl Execution {
         self.next_deadline = None;
     }
 
+    /// Test-only: move a parked Ready deadline so the next
+    /// [`crate::StateStore::persist`] can `UPDATE runnable_at` without
+    /// rewriting body. Production apply never changes T alone.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn retarget_ready_deadline(
+        &mut self,
+        node_id: &NodeId,
+        runnable_at: Option<Timestamp>,
+    ) -> Result<(), ApplyError> {
+        let slot = self
+            .definition
+            .slot(node_id)
+            .ok_or_else(|| ApplyError::UnknownNode(node_id.clone()))?;
+        match self.nodes[slot.0].state {
+            NodeState::Ready { .. } => {}
+            _ => {
+                return Err(ApplyError::Illegal(
+                    "retarget_ready_deadline only on Ready".into(),
+                ));
+            }
+        }
+        self.set_state(slot, NodeState::Ready { runnable_at });
+        match runnable_at {
+            Some(at) => self.note_deadline(slot, at),
+            None => self.clear_deadline_if(slot),
+        }
+        self.revision += 1;
+        Ok(())
+    }
+
     fn note_deadline(&mut self, slot: NodeSlot, at: Timestamp) {
         match self.next_deadline {
             None => self.next_deadline = Some((at, slot)),

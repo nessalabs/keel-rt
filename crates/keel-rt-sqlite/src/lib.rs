@@ -316,9 +316,10 @@ fn ensure_runnable_at_column(conn: &Connection) -> Result<(), StoreError> {
 }
 
 /// T lives in `nodes.runnable_at` (INTEGER ms). JSON stays the compact
-/// Ready-now shape so parked rows are not 2.5× Ready-now. `last_error`
-/// ("timed out") is omitted on Ready-for-retry; inspect of a live run still
-/// has it in memory. Values that do not fit i64 stay in JSON (Timestamp::MAX).
+/// Ready-now shape so parked rows are not 2.5× Ready-now. A short
+/// `last_error` (`{"message":"timed out"}`) stays in the body so live
+/// inspect and crash-resume inspect agree. Values that do not fit i64
+/// stay in JSON (Timestamp::MAX).
 fn node_row_parts(node: &NodeSnapshot) -> Result<(String, Option<i64>), StoreError> {
     let mut stored = node.clone();
     let col = match node.state {
@@ -327,7 +328,6 @@ fn node_row_parts(node: &NodeSnapshot) -> Result<(String, Option<i64>), StoreErr
         } => match i64::try_from(at.as_millis()) {
             Ok(ms) => {
                 stored.state = NodeState::Ready { runnable_at: None };
-                stored.last_error = None;
                 Some(ms)
             }
             Err(_) => None,
@@ -1251,7 +1251,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn parked_ready_t_uses_column_omits_nested_json_and_last_error() {
+    async fn parked_ready_t_uses_column_omits_nested_json_keeps_last_error() {
         let path = tmp();
         let store = SqliteStore::open(&path).unwrap();
         let mut exec = one_node();
@@ -1276,12 +1276,9 @@ mod tests {
             now,
         )
         .unwrap();
-        let t = match &exec
-            .snapshot()
-            .node(&keel_rt::NodeId::new("a"))
-            .unwrap()
-            .state
-        {
+        let live = exec.snapshot().node(&keel_rt::NodeId::new("a")).unwrap();
+        assert!(live.last_error.is_some(), "live inspect has last_error");
+        let t = match &live.state {
             keel_rt::NodeState::Ready {
                 runnable_at: Some(at),
             } => *at,
@@ -1298,28 +1295,33 @@ mod tests {
             .unwrap()
         };
         assert!(
-            !body.contains("runnable_at") && !body.contains("last_error"),
-            "parked JSON must be compact Ready-now shape, got {body}"
+            !body.contains("runnable_at"),
+            "T is the column, not nested JSON, got {body}"
+        );
+        assert!(
+            body.contains("last_error"),
+            "compact Ready JSON keeps a short last_error, got {body}"
         );
         assert_eq!(col, Some(t.as_millis() as i64));
+        let loaded = store.get(exec.id()).await.unwrap().unwrap();
+        let node = loaded.node(&keel_rt::NodeId::new("a")).unwrap();
         assert_eq!(
-            store
-                .get(exec.id())
-                .await
-                .unwrap()
-                .unwrap()
-                .node(&keel_rt::NodeId::new("a"))
-                .unwrap()
-                .state,
+            node.state,
             keel_rt::NodeState::Ready {
                 runnable_at: Some(t)
             }
         );
+        assert!(
+            node.last_error.is_some(),
+            "sqlite get() must restore last_error so inspect agrees with MemoryStore"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Production path: `persist()` → `upsert_dirty_nodes`. `put` is a full
+    /// DELETE+INSERT and does not prove a T-only column UPDATE.
     #[tokio::test(flavor = "current_thread")]
-    async fn only_t_column_update_skips_unchanged_body() {
+    async fn dirty_persist_ready_t_to_t_prime_updates_only_runnable_at() {
         let path = tmp();
         let store = SqliteStore::open(&path).unwrap();
         let mut exec = one_node();
@@ -1354,17 +1356,15 @@ mod tests {
             )
             .unwrap()
         };
-        // Same compact body, later T: UPDATE runnable_at only.
+        // Crash-resume shape: dirty empty, revision matches disk. Then only T
+        // moves — persist() must UPDATE runnable_at and reuse the body.
+        let mut live =
+            Execution::from_snapshot(exec.definition().clone(), exec.snapshot()).unwrap();
         let later = Timestamp(9_000);
-        let mut snap = exec.snapshot();
-        snap.revision += 1;
-        snap.nodes
-            .get_mut(&keel_rt::NodeId::new("a"))
-            .unwrap()
-            .state = keel_rt::NodeState::Ready {
-            runnable_at: Some(later),
-        };
-        store.put(&snap).await.unwrap();
+        live.retarget_ready_deadline(&keel_rt::NodeId::new("a"), Some(later))
+            .unwrap();
+        assert_eq!(live.dirty_nodes().len(), 1);
+        store.persist(&live).await.unwrap();
         let (body1, col): (String, Option<i64>) = {
             let conn = store.lock().unwrap();
             conn.query_row(
@@ -1374,21 +1374,20 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(body1, body0, "only T changed; JSON body must be reused");
-        assert_eq!(col, Some(9_000));
         assert_eq!(
-            store
-                .get(exec.id())
-                .await
-                .unwrap()
-                .unwrap()
-                .node(&keel_rt::NodeId::new("a"))
-                .unwrap()
-                .state,
+            body1, body0,
+            "dirty Ready{{T→T'}} persist must reuse JSON body"
+        );
+        assert_eq!(col, Some(9_000));
+        let loaded = store.get(exec.id()).await.unwrap().unwrap();
+        let node = loaded.node(&keel_rt::NodeId::new("a")).unwrap();
+        assert_eq!(
+            node.state,
             keel_rt::NodeState::Ready {
                 runnable_at: Some(later)
             }
         );
+        assert!(node.last_error.is_some());
         let _ = std::fs::remove_file(&path);
     }
 

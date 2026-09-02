@@ -9,7 +9,7 @@ DX APIs (`register_fn`, `Clock`, `builder(String)`, start fail-fast,
 | 1 | **fixed** | `pub(crate) mod domain` / `runtime`; root re-exports. `tests/structure.rs` `lib_does_not_export_module_trees` |
 | 2 | **fixed** | `EdgePredicate` deleted; `Edge` is `from`/`to` |
 | 3 | **fixed** | `iter_ordered` deleted; `iter_nodes` owns the iterator |
-| 4 | **fixed** | `Park` / `FakePark` deleted; `ChannelPark::recv` |
+| 4 | **fixed** | `Park` / `FakePark` / `ChannelPark` deleted; wait is `next_drive_event` in `runtime.rs` (inbox vs `Clock::wait_until`) |
 | 5 | **fixed** | `JoinKind` deleted; `Event::NodeFinished` is `Result<NodeOutcome, String>` |
 | 6 | **fixed** | `launch_slot` `expect`s the executor cache |
 | 7 | **fixed** | Handle rustdoc says Waiting / resume |

@@ -46,7 +46,7 @@ row is `test:` (existing proof) or `gap-closed-by:` (new named test). **Zero MIS
 | At-least-once executor invoke | second invoke on retry is intentional | `test: retry_is_at_least_once_two_execute_invocations` |
 | Fail-fast × AllSucceeded | default | `test: all_succeeded_reducer_with_failed_pred_terminates` `test: diamond_fail_execution_still_fail_fasts` |
 | Fail-fast × AllDone | reducer never ready; execution still terminates | `gap-closed-by: fail_execution_all_done_reducer_never_runs_but_terminates` |
-| FailSubtree × AllSucceeded | opt-in | `test: diamond_fail_subtree_all_succeeded_completes` `test: fanin_all_succeeded_reducer_cancelled` |
+| FailSubtree × AllSucceeded | opt-in | `test: diamond_fail_subtree_all_succeeded_completes` `test: fanin_all_succeeded_reducer_cancelled` `test: fail_subtree_parked_sibling_not_in_subtree_stays_parked` |
 | FailSubtree × AllDone | opt-in; mixed terminals | `test: fanin_all_done_reducer_runs` `test: mixed_timed_out_failed_succeeded_fanin_all_done` |
 | Fan-in mixed / straggler / hourglass | exist; hourglass+fail was untested | `test: mixed_timed_out_failed_succeeded_fanin_all_done` `test: straggler_join` `test: hourglass` `gap-closed-by: hourglass_neck_fail_cancels_sinks_and_terminates` |
 | Empty / cycle / unknown executor / unknown join node | DefinitionError | `test: empty_graph_rejected` `test: cycle_is_rejected` `test: start_unknown_executor_errors_and_nothing_runs` `gap-closed-by: join_unknown_node_is_disconnected` |
@@ -167,6 +167,7 @@ exactly-once must make the executor idempotent.
 | Nested FailSubtree | uncle/writer run; down Cancelled | `nested_fail_subtree_uncle_writer_runs` | subtree only |
 | Hourglass neck fail, FailExecution | sources Succeeded; sinks Cancelled never started; execution Failed | `hourglass` (success); **gap-closed-by:** `hourglass_neck_fail_cancels_sinks_and_terminates` | fail-fast |
 | TimedOut + FailSubtree | descendants Cancelled, siblings live | `timeout_fail_subtree_siblings_live` | FailSubtree |
+| FailSubtree + parked sibling not in subtree | sibling stays `Ready { T }`; default FailExecution still cancels everyone | `fail_subtree_parked_sibling_not_in_subtree_stays_parked` | subtree only |
 | User cancel under FailSubtree | whole graph Cancelled | `user_cancel_overrides_fail_subtree` | cancel wins |
 
 ## HITL / resume
@@ -253,7 +254,8 @@ exactly-once must make the executor idempotent.
 | `SCHEMA_VERSION` on live snapshot | `1` | `live_snapshot_carries_schema_version_1` | constant |
 | MemoryStore after Failed / Cancelled / Completed | stored snapshot matches terminal | **gap-closed-by:** `memory_store_persists_failed_cancelled_completed_terminals` | persist |
 | Display every `Event` | each variant names itself | `event_display_covers_every_variant` | Display |
-| Display every `NodeState` / `ExecutionState` | each variant names itself | `node_state_and_execution_state_display_covers_every_variant` / `snapshot_display_names_every_execution_and_node_state` | Display |
+| Display every `NodeState` / `ExecutionState` | each variant names itself; parked Ready prints `Ready(T)` | `node_state_and_execution_state_display_covers_every_variant` / `snapshot_display_names_every_execution_and_node_state` | Display |
+| Inspect parked Ready{T} after persist | `last_error` round-trips (MemoryStore and sqlite); T is the column | `memory_store_parked_ready_round_trips_last_error` / `parked_ready_t_uses_column_omits_nested_json_keeps_last_error` | persist |
 
 ## ADR 0001 / persist backpressure
 

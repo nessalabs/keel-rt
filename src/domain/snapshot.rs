@@ -100,7 +100,7 @@ impl fmt::Display for ExecutionSnapshot {
             self.nodes.len()
         )?;
         for (id, n) in self.iter_nodes() {
-            write!(f, "\n  {id} {}", format_node(&n.state))?;
+            write!(f, "\n  {id} {}", n.state)?;
         }
         Ok(())
     }
@@ -146,19 +146,6 @@ fn format_state(s: ExecutionState) -> &'static str {
         ExecutionState::Failed => "Failed",
         ExecutionState::Cancelled => "Cancelled",
         ExecutionState::Completed => "Completed",
-    }
-}
-
-fn format_node(s: &NodeState) -> String {
-    match s {
-        NodeState::Pending => "Pending".into(),
-        NodeState::Ready { .. } => "Ready".into(),
-        NodeState::Running { attempt } => format!("Running({attempt})"),
-        NodeState::Waiting { .. } => "Waiting".into(),
-        NodeState::Succeeded => "Succeeded".into(),
-        NodeState::Failed => "Failed".into(),
-        NodeState::Cancelled => "Cancelled".into(),
-        NodeState::TimedOut => "TimedOut".into(),
     }
 }
 
@@ -295,6 +282,16 @@ mod tests {
             NodeState::Ready { runnable_at: None }
         )
         .contains("Ready"));
+        assert!(
+            snap(
+                ExecutionState::Running,
+                NodeState::Ready {
+                    runnable_at: Some(crate::domain::time::Timestamp(42)),
+                }
+            )
+            .contains("Ready(42)"),
+            "inspect-as-string must show the parked deadline"
+        );
         assert!(
             snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Waiting")
         );

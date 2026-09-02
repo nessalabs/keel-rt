@@ -273,8 +273,7 @@ mod tests {
         assert_eq!(def.id().as_str(), "wf");
         let stored = store.get(exec.id()).await.unwrap().unwrap();
         assert!(
-            stored.definition_hash.is_empty()
-                || stored.definition_hash == def.content_hash(),
+            stored.definition_hash.is_empty() || stored.definition_hash == def.content_hash(),
             "MemoryStore may leave hash empty until a file adapter computes it"
         );
     }
@@ -353,9 +352,61 @@ mod tests {
                 attempted: 0
             }
         );
-        assert_eq!(
-            store.get(exec.id()).await.unwrap().unwrap().revision,
-            found
+        assert_eq!(store.get(exec.id()).await.unwrap().unwrap().revision, found);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn memory_store_parked_ready_round_trips_last_error() {
+        use crate::domain::ids::NodeId;
+        use crate::domain::outcome::NodeOutcome;
+        use crate::domain::policy::RetryPolicy;
+        use crate::domain::state::{ApplyCmd, NodeState};
+        use crate::domain::time::Timestamp;
+        use std::time::Duration;
+
+        let store = MemoryStore::new();
+        let mut exec = one_node();
+        let p = RetryPolicy::new(3, Duration::from_millis(50));
+        let now = Timestamp(0);
+        exec.apply(ApplyCmd::Start, &p, now).unwrap();
+        exec.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        exec.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(
+            exec.snapshot()
+                .node(&NodeId::new("a"))
+                .unwrap()
+                .last_error
+                .is_some(),
+            "live inspect has last_error on the retry park"
+        );
+        store.persist(&exec).await.unwrap();
+        let loaded = store.get(exec.id()).await.unwrap().unwrap();
+        let node = loaded.node(&NodeId::new("a")).unwrap();
+        assert!(matches!(
+            node.state,
+            NodeState::Ready {
+                runnable_at: Some(_)
+            }
+        ));
+        assert!(
+            node.last_error.is_some(),
+            "MemoryStore persist/get must keep last_error on Ready{{T}}"
         );
     }
 }

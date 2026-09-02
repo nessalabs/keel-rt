@@ -1,9 +1,10 @@
 //! Phase 5: snapshot deadline T. Public API + FakeClock.
 //!
-//! T is `NodeState::Ready { runnable_at: Some(Timestamp) }`. Policy
-//! (`RetryPolicy` delay, `timeout_after`) still chooses how long; the kernel
-//! only parks until Instant T. Waiting stays HITL. No EventLog, no NodeReady,
-//! no `Recover::RetryFailed`.
+//! T is `NodeState::Ready { runnable_at: Some(Timestamp) }` (u64 millis).
+//! `RetryPolicy` delay parks as Ready{T}. `timeout_after` keeps the node
+//! Running (executor Delay); crash restores Running as Ready-now and
+//! re-invokes. Kernel T is only the retry park. Waiting stays HITL. No
+//! EventLog, no NodeReady, no `Recover::RetryFailed`.
 //!
 //! `cargo test --test timers -- --test-threads=1`
 

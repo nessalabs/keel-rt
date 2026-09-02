@@ -13,9 +13,9 @@ use thiserror::Error;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeState {
     Pending,
-    /// Dispatchable now (`runnable_at: None`) or parked until Instant **T**
-    /// (`Some(T)`). T is the snapshot deadline for retry backoff (and any
-    /// other "not runnable until T" policy). Waiting is an executor yield, not a timer.
+    /// Dispatchable now (`runnable_at: None`) or parked until **T**
+    /// (`Some(T)`). T is a [`Timestamp`] (u64 millis) — the snapshot
+    /// deadline for retry backoff. Waiting is an executor yield, not a timer.
     Ready {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runnable_at: Option<Timestamp>,
@@ -418,7 +418,7 @@ impl Execution {
     }
 
     /// Next snapshot deadline T (`Ready { runnable_at: Some(T) }`). The
-    /// Runtime drive loop waits until this Instant. Waiting is not consulted.
+    /// Runtime drive loop waits until this [`Timestamp`]. Waiting is not consulted.
     pub fn next_deadline(&self) -> Option<(Timestamp, NodeId)> {
         self.next_deadline
             .map(|(ts, slot)| (ts, self.definition.id_at(slot).clone()))
@@ -753,7 +753,11 @@ mod tests {
         );
         assert_eq!(ex.state, ExecutionState::Running);
         assert!(
-            ex.snapshot().node(&NodeId::new("a")).unwrap().resume_token.is_none(),
+            ex.snapshot()
+                .node(&NodeId::new("a"))
+                .unwrap()
+                .resume_token
+                .is_none(),
             "retry park must not persist the stale attempt token"
         );
         let (at, id) = ex.next_deadline().expect("deadline on aggregate");
@@ -903,6 +907,149 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, ApplyError::ResumeAfterCancel);
+    }
+
+    #[test]
+    fn fail_subtree_parked_sibling_not_in_subtree_stays_parked() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+
+        fn two_sources(on_failure: OnFailure) -> Execution {
+            Execution::new(
+                WorkflowDefinition::builder("wf")
+                    .on_failure(on_failure)
+                    .node("park", "e")
+                    .node("boom", "e")
+                    .build()
+                    .unwrap(),
+            )
+        }
+        fn park_then_boom(ex: &mut Execution) -> Timestamp {
+            let now = Timestamp(0);
+            let retry = RetryPolicy::new(3, Duration::from_millis(50));
+            let accept = AcceptPolicy;
+            ex.apply(ApplyCmd::Start, &accept, now).unwrap();
+            for id in ["park", "boom"] {
+                ex.apply(ApplyCmd::StartNode { node_id: id.into() }, &accept, now)
+                    .unwrap();
+            }
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: "park".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::TimedOut),
+                },
+                &retry,
+                now,
+            )
+            .unwrap();
+            let t = match ex.snapshot().node(&NodeId::new("park")).unwrap().state {
+                NodeState::Ready {
+                    runnable_at: Some(at),
+                } => at,
+                other => panic!("park must be Ready{{T}}, got {other:?}"),
+            };
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: "boom".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::failed("boom")),
+                },
+                &accept,
+                now,
+            )
+            .unwrap();
+            t
+        }
+
+        let mut subtree = two_sources(OnFailure::FailSubtree);
+        let t = park_then_boom(&mut subtree);
+        assert_eq!(
+            subtree.snapshot().node(&NodeId::new("park")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(t)
+            },
+            "FailSubtree must not cancel a parked sibling outside the subtree"
+        );
+        assert!(matches!(
+            subtree.snapshot().node(&NodeId::new("boom")).unwrap().state,
+            NodeState::Failed
+        ));
+        assert_eq!(subtree.state, ExecutionState::Running);
+
+        let mut fail_fast = two_sources(OnFailure::FailExecution);
+        park_then_boom(&mut fail_fast);
+        assert!(
+            matches!(
+                fail_fast
+                    .snapshot()
+                    .node(&NodeId::new("park"))
+                    .unwrap()
+                    .state,
+                NodeState::Cancelled
+            ),
+            "default FailExecution still clears everyone, including a parked sibling"
+        );
+        assert_eq!(fail_fast.state, ExecutionState::Failed);
+    }
+
+    #[test]
+    fn retarget_ready_deadline_only_on_ready_bumps_revision() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = RetryPolicy::new(3, Duration::from_millis(50));
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let err = ex
+            .retarget_ready_deadline(&NodeId::new("a"), Some(Timestamp(9_000)))
+            .unwrap_err();
+        assert!(matches!(err, ApplyError::Illegal(_)));
+        assert_eq!(
+            ex.retarget_ready_deadline(&NodeId::new("missing"), Some(Timestamp(1)))
+                .unwrap_err(),
+            ApplyError::UnknownNode(NodeId::new("missing"))
+        );
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let rev = ex.revision();
+        ex.retarget_ready_deadline(&NodeId::new("a"), Some(Timestamp(9_000)))
+            .unwrap();
+        assert_eq!(ex.revision(), rev + 1);
+        assert_eq!(
+            ex.snapshot().node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(Timestamp(9_000))
+            }
+        );
+        assert!(
+            ex.dirty_nodes().iter().any(|(id, n)| {
+                id.as_str() == "a"
+                    && matches!(
+                        n.state,
+                        NodeState::Ready {
+                            runnable_at: Some(t)
+                        } if t == Timestamp(9_000)
+                    )
+            }),
+            "retarget must mark the parked slot dirty for persist()"
+        );
     }
 
     #[test]
