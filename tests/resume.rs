@@ -1214,6 +1214,7 @@ async fn resume_with_retry_failed_persist_err_leaves_failed_then_retry_works() {
         snap.node(&NodeId::new("a")).unwrap().state,
         NodeState::Failed
     ));
+    drop(rt);
     let rt = Runtime::builder()
         .store(store.inner().clone())
         .register_fn("a", |_ctx: ExecutionContext| async {
