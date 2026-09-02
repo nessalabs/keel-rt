@@ -222,7 +222,7 @@ classDiagram
 - No `utils` / `common` / `helpers` / `shared`.
 - No Runtime-wide FailSubtree or AllDone switch.
 - No test-only constructor that builds an illegal `WorkflowDefinition`.
-- Waiting is a node state. Retry delay is `Ready { runnable_at }` (Instant T on the snapshot).
+- Waiting is a node state. Retry delay is `Ready { runnable_at }` (`Timestamp` T on the snapshot).
 - Snapshot is execution state. Definition is data (hash on the snapshot).
 
 File store lives in sibling `crates/keel-rt-sqlite`. It depends on `keel-rt`.
@@ -266,13 +266,17 @@ edit `scheduler.rs`.
   tasks ≤ that number.
 - **Apply inbox:** unbounded mpsc (ADR 0001). Producers are execute tasks +
   handle ops; they must not block on apply. Persist is inline, not a queue.
-- **Retry:** `RetryPolicy::max_attempts` is the only retry bound. Delay is Instant
-  **T** on `Ready { runnable_at: Some(T) }`, not a wait state and not a sqlite
-  timer row. Resume restores T. Apply is given `now`: dispatchable iff
-  `now >= T`. If `now < T` the Runtime drive waits (`Clock::wait_until`).
-  If `now >= T`, `RetryDue` then dispatch (or TimedOut when policy Accepts).
-  Tests inject Clock at the Runtime builder. Drop of the handle cancels the
-  drive waiter (RAII).
+- **Retry:** `RetryPolicy::max_attempts` is the only retry bound. Delay is
+  **T** (`Timestamp` millis) on `Ready { runnable_at: Some(T) }`, not a wait
+  state and not a sqlite timer row. Resume restores T. Apply is given `now`:
+  a due park is not `StartNode`-able until `RetryDue` clears T (`is_ready_now`
+  is true when `at <= now`; `StartNode` still requires `Ready { None }`).
+  If `now < T` the Runtime drive waits (`Clock::wait_until`). If `now >= T`,
+  `RetryDue` then dispatch. `TimedOut` is already on the snapshot when policy
+  **Accepts** a timeout at `FinishNode` — the deadline does not re-decide.
+  `timeout_after` / executor Delay is **Running**, not snapshot T. Tests inject
+  `Clock` at the Runtime builder (`FakeClock` is harness-only). Drop of the
+  handle cancels the drive waiter (RAII).
 - **Cancel hang:** `cancel_bound` is **wall** time (`tokio::time::sleep` in
   the Runtime drive), not `Clock`. A paused test clock does not stretch it.
   The sleeper is an `AbortHandle` on the drive loop and is aborted when the

@@ -153,6 +153,7 @@ fn format_state(s: ExecutionState) -> &'static str {
 mod tests {
     use super::*;
     use crate::domain::ids::NodeId;
+    use crate::domain::time::Timestamp;
 
     fn empty_node() -> NodeSnapshot {
         NodeSnapshot {
@@ -286,7 +287,7 @@ mod tests {
             snap(
                 ExecutionState::Running,
                 NodeState::Ready {
-                    runnable_at: Some(crate::domain::time::Timestamp(42)),
+                    runnable_at: Some(Timestamp::from_millis(42)),
                 }
             )
             .contains("Ready(42)"),

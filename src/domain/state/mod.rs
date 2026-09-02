@@ -41,6 +41,11 @@ impl NodeState {
         )
     }
 
+    /// True for `Ready { None }` or `Ready { Some(at) }` when `at <= now`.
+    ///
+    /// This is not “call [`ApplyCmd::StartNode`]”. `StartNode` still requires
+    /// `Ready { runnable_at: None }`. A due `Some(T)` must go
+    /// [`ApplyCmd::RetryDue`] first (Runtime `Event::Timer` path).
     pub fn is_ready_now(&self, now: Timestamp) -> bool {
         match self {
             Self::Ready { runnable_at: None } => true,
@@ -187,6 +192,8 @@ pub enum ApplyError {
 #[derive(Clone, Debug)]
 pub enum ApplyCmd {
     Start,
+    /// Dispatch a `Ready { runnable_at: None }` node. Illegal on `Some(T)`
+    /// even when `is_ready_now` is true — apply [`Self::RetryDue`] first.
     StartNode {
         node_id: NodeId,
     },
@@ -200,6 +207,9 @@ pub enum ApplyCmd {
         resume: Resume,
     },
     Cancel,
+    /// Clear a due `Ready { runnable_at: Some(T) }` (`at <= now`) to
+    /// `Ready { None }` so [`Self::StartNode`] can dispatch. No-op if T is
+    /// still in the future, the node is not parked, or the execution is cancelled.
     RetryDue {
         node_id: NodeId,
     },
@@ -299,6 +309,8 @@ impl Execution {
         self.nodes.get(slot.0)
     }
 
+    /// See [`NodeState::is_ready_now`]. Due `Ready { Some(T) }` is true here
+    /// but [`ApplyCmd::StartNode`] is still illegal until [`ApplyCmd::RetryDue`].
     pub fn is_ready_now(&self, id: &NodeId, now: Timestamp) -> bool {
         self.node(id)
             .map(|n| n.state.is_ready_now(now))
@@ -763,6 +775,153 @@ mod tests {
         let (at, id) = ex.next_deadline().expect("deadline on aggregate");
         assert_eq!(at, Timestamp(1050));
         assert_eq!(id.as_str(), "a");
+    }
+
+    #[test]
+    fn start_node_on_due_t_is_illegal_without_retry_due() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+        let mut ex = linear();
+        let p = RetryPolicy::new(3, Duration::from_millis(50));
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("x")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let due = Timestamp(1050);
+        assert!(
+            ex.is_ready_now(&NodeId::new("a"), due),
+            "due T is is_ready_now; StartNode still requires Ready {{ None }}"
+        );
+        let err = ex
+            .apply(
+                ApplyCmd::StartNode {
+                    node_id: "a".into(),
+                },
+                &p,
+                due,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, ApplyError::Illegal(_)),
+            "StartNode on Ready {{ Some(T) }} must be Illegal, got {err:?}"
+        );
+        ex.apply(
+            ApplyCmd::RetryDue {
+                node_id: "a".into(),
+            },
+            &p,
+            due,
+        )
+        .unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        );
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            due,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Running { attempt: 2 }
+        ));
+    }
+
+    #[test]
+    fn fail_subtree_parked_sibling_keeps_deadline() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("park", "e")
+            .node("fail", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let retry = RetryPolicy::new(3, Duration::from_millis(50));
+        let accept = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &accept, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "park".into(),
+            },
+            &accept,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "fail".into(),
+            },
+            &accept,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "park".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &retry,
+            now,
+        )
+        .unwrap();
+        let t = match &ex.node(&NodeId::new("park")).unwrap().state {
+            NodeState::Ready {
+                runnable_at: Some(at),
+            } => *at,
+            other => panic!("{other:?}"),
+        };
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "fail".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("boom")),
+            },
+            &accept,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("park")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(t)
+            },
+            "FailSubtree walks successors only; parked sibling keeps T"
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("fail")).unwrap().state,
+            NodeState::Failed
+        );
+        let (at, id) = ex.next_deadline().expect("sibling deadline remains");
+        assert_eq!(at, t);
+        assert_eq!(id.as_str(), "park");
+        assert!(
+            !ex.state().is_terminal(),
+            "parked sibling keeps the execution live"
+        );
     }
 
     #[test]

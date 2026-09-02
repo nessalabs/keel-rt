@@ -16,7 +16,9 @@
 //! [`RuntimeBuilder::register_fn`] → [`Runtime::run`] / [`Runtime::start`].
 //! After process death, [`Runtime::resume`] loads the snapshot (at-least-once).
 //! Announce via [`Event`] + [`EventSink`] (no EventLog). Persist then emit.
-//! Snapshot deadline T is `Ready { runnable_at: Some(T) }` (FakeClock in tests).
+//! Snapshot deadline T is `Ready { runnable_at: Some(Timestamp) }`. The Runtime
+//! drive waits via [`Clock::wait_until`]; `FakeClock` is test harness only.
+//! `timeout_after` keeps the node Running (executor Delay), not snapshot T.
 //! Waiting is an executor yield, not a timer. Use [`ExecutionState::is_successful_finish`]
 //! (not `== Succeeded`) so
 //! FailSubtree [`Completed`](ExecutionState::Completed) counts as ok.

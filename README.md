@@ -26,7 +26,8 @@ on `Ready { runnable_at: Some(T) }`. `RetryPolicy` delay parks as Ready{T}.
 Running as Ready-now and re-invokes; the new invoke re-arms Delay. Kernel T
 is only the retry park. Waiting stays HITL. Domain/runtime name `Clock`
 only — `FakeClock` is a test type. Wait is Runtime `next_drive_event`
-(inbox vs `Clock::wait_until`). sqlite has no timer table.
+(inbox vs `Clock::wait_until`). sqlite has no timer table
+(`nodes.runnable_at` INTEGER).
 
 The runtime is a **bundle** (scheduler + optional store/sink + handle). The
 scheduler does not know resource types. Drivers only wake. This is a
@@ -227,8 +228,9 @@ you pass to `Runtime::start`.
   during backoff restores T. A parked retry that is due is `RetryDue` →
   `Ready { runnable_at: None }` → `StartNode`; it does not become TimedOut.
   TimedOut is already on the snapshot when policy **Accepts** a timeout.
-  `timeout_after` is not snapshot T. Drop of `ExecutionHandle` cancels the
-  Runtime drive waiter.
+  `timeout_after` is executor Delay while Running — crash re-invokes and the
+  new invoke re-arms Delay; that is not snapshot T. Drop of `ExecutionHandle`
+  cancels the Runtime drive waiter (`Clock::wait_until`).
 - **Cancel.** `CancellationToken` to running executors. Pending/Ready/Waiting
   become Cancelled. Dropping `ExecutionHandle` **cancels** (JoinSet semantics,
   not detach). Hung executors that ignore cancel are aborted after
@@ -331,12 +333,16 @@ use keel_rt::{RetryPolicy, Runtime, WorkflowDefinition};
 let clock = Arc::new(FakeClock::new());
 let delay = Duration::from_millis(50);
 let h = rt.start(def)?;
-// crash while a node is parked on retry backoff (Ready { runnable_at: T })
+// crash while parked on retry T (`Ready { runnable_at: Some(T) }`)
 // timeout_after is Running Delay — crash re-invokes; the new invoke re-arms Delay
 let h = rt.resume(&id).await?;
 clock.advance(delay);
 // RetryDue → Ready { runnable_at: None } → StartNode; not TimedOut
 ```
+
+The Runtime drive selects the apply inbox against `Clock::wait_until(T)`.
+Tests do not need epoll.
+
 
 ## Swap StateStore
 

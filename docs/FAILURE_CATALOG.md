@@ -245,6 +245,10 @@ exactly-once must make the executor idempotent.
 | Hung `wait_until` / `Timestamp::MAX` | hang bound / cancel still terminates | `hung_wait_until_hang_bound_still_cancels` `timestamp_max_deadline_cancel_returns_without_thread_sleep` | CancelBoundGuard + inbox |
 | 256 parked, one advance | each node once | `wide_256_parked_advance_once_each_fires_once` `crash_resume_256_parked_advance_once_each_once` | Timer drain |
 | last_persisted on park resume | no extra persist | `resume_parked_does_not_open_extra_persist` | seed from snapshot |
+| persist dirty T→T' | column updates; JSON body reused | `dirty_persist_ready_t_to_t_prime_updates_only_runnable_at` | `upsert_dirty_nodes` UPDATE |
+| FailSubtree + parked sibling | sibling keeps `Ready { T }` | `fail_subtree_parked_sibling_keeps_deadline` `fail_subtree_parked_sibling_not_in_subtree_stays_parked` | successors only |
+| StartNode on due T | `ApplyError::Illegal`; RetryDue first | `start_node_on_due_t_is_illegal_without_retry_due` | Ready{None} only |
+| Snapshot Display of Ready{T} | `Ready(42)` | `snapshot_display_names_every_execution_and_node_state` | `NodeState` Display |
 
 ## Ids / snapshots / Display
 

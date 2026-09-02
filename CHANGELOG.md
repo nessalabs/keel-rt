@@ -12,10 +12,12 @@ still cancels the Runtime drive waiter (RAII). Fail-fast / AND-join defaults
 unchanged. `Recover::RetryFailed` is not a kernel command. Domain and runtime
 name [`Clock`] only; `FakeClock` lives in `src/testing` and `tests/`. sqlite
 persists whatever the snapshot already has (`synchronous=FULL` default).
-Waiting for T is the Runtime drive (`inbox` vs `Clock::wait_until`); domain
-and scheduler apply given `now` and do not sleep. The drive prefers the apply
-inbox when T is already due (`try_recv`) so Cancel/Shutdown at the same
-instant as a due deadline does not dispatch. Constructed stuck-wait tests:
+Waiting for T is the Runtime drive (`next_drive_event`: inbox vs
+`Clock::wait_until`); domain and scheduler apply given `now` and do not sleep.
+The drive prefers the apply inbox when T is already due (`try_recv`) so
+Cancel/Shutdown at the same instant as a due deadline does not dispatch.
+Due T is `RetryDue` then dispatch — not TimedOut. TimedOut is already on the
+snapshot when policy Accepts at `FinishNode`. Constructed stuck-wait tests:
 haywire `wait_until` (Pending forever) still loses to hang bound / inbox
 cancel; `Timestamp::MAX` cancel returns without `thread::sleep`; due T does
 not call `wait_until`. When a caller persist/resume parked nodes, T is
