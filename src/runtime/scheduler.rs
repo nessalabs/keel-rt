@@ -140,7 +140,7 @@ impl Scheduler {
     }
 
     /// Next lease heartbeat. `None` when we do not hold an epoch or the
-    /// execution is already terminal. Interval is TTL/3 (Clock, not sleep).
+    /// execution is already terminal. Interval is TTL/3 (Clock `now`).
     pub(crate) fn next_heartbeat(&self) -> Option<Timestamp> {
         if self.epoch.is_none() || self.exec.state().is_terminal() {
             return None;

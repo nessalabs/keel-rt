@@ -801,15 +801,44 @@ mod tests {
         );
     }
 
+    struct JumpClock {
+        now: std::sync::Mutex<Timestamp>,
+        tick: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl Clock for JumpClock {
+        fn now(&self) -> Timestamp {
+            *self.now.lock().unwrap()
+        }
+        async fn sleep(&self, duration: Duration) {
+            if duration.is_zero() {
+                return;
+            }
+            let target = self.now().saturating_add(duration);
+            loop {
+                let notified = self.tick.notified();
+                if self.now() >= target {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn future_heartbeat_waits_until_clock() {
         let (_tx, mut rx) = inject::channel();
-        let clock = Arc::new(crate::testing::FakeClock::new());
+        let clock = Arc::new(JumpClock {
+            now: std::sync::Mutex::new(Timestamp(0)),
+            tick: tokio::sync::Notify::new(),
+        });
         let clock_c = clock.clone();
         let task = tokio::spawn(async move {
             next_drive_event(&mut rx, clock_c.as_ref(), None, Some(Timestamp(10))).await
         });
-        clock.advance(Duration::from_millis(10));
+        *clock.now.lock().unwrap() = Timestamp(10);
+        clock.tick.notify_waiters();
         assert!(matches!(task.await.unwrap(), Event::Heartbeat));
     }
 
@@ -924,7 +953,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn heartbeat_lost_lease_stops_drive_without_cancel() {
-        let clock = Arc::new(crate::testing::FakeClock::new());
+        let clock = Arc::new(JumpClock {
+            now: std::sync::Mutex::new(Timestamp(0)),
+            tick: tokio::sync::Notify::new(),
+        });
         let rt = Runtime::builder()
             .store(FailHeartbeat(MemoryStore::new()))
             .clock(clock.clone())
@@ -938,10 +970,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(handle.wait_stable().await, ExecutionState::Waiting);
-        clock.advance(crate::runtime::store::DEFAULT_LEASE_TTL / 3);
+        *clock.now.lock().unwrap() =
+            Timestamp(0).saturating_add(crate::runtime::store::DEFAULT_LEASE_TTL / 3);
+        clock.tick.notify_waiters();
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
-        std::mem::forget(handle);
+        drop(handle);
     }
 
     #[tokio::test(flavor = "current_thread")]
