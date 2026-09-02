@@ -26,8 +26,8 @@
 
 use async_trait::async_trait;
 use keel_rt::{
-    Event, Execution, ExecutionId, ExecutionSnapshot, StateStore, StoreError,
-    WorkflowDefinition,
+    Event, Execution, ExecutionId, ExecutionSnapshot, NodeSnapshot, NodeState, StateStore,
+    StoreError, Timestamp, WorkflowDefinition,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   execution_id TEXT NOT NULL,
   node_id TEXT NOT NULL,
   body TEXT NOT NULL,
+  runnable_at INTEGER,
   PRIMARY KEY (execution_id, node_id)
 );
 CREATE TABLE IF NOT EXISTS definitions (
@@ -149,6 +150,7 @@ impl SqliteStore {
         conn.pragma_update(None, "wal_autocheckpoint", 1000)
             .map_err(store_err)?;
         conn.execute_batch(SCHEMA).map_err(store_err)?;
+        ensure_runnable_at_column(&conn)?;
         Ok(Self {
             path,
             conn: Arc::new(Mutex::new(conn)),
@@ -157,6 +159,32 @@ impl SqliteStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// On-disk `SUM(LENGTH(body))` for one execution. Resume never calls this.
+    pub fn node_json_bytes(&self, id: &ExecutionId) -> Result<usize, StoreError> {
+        let conn = self.lock()?;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM nodes WHERE execution_id = ?1",
+                params![id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(store_err)?;
+        Ok(n as usize)
+    }
+
+    /// Rows with a `runnable_at` column. Resume never calls this.
+    pub fn parked_deadline_count(&self, id: &ExecutionId) -> Result<u64, StoreError> {
+        let conn = self.lock()?;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE execution_id = ?1 AND runnable_at IS NOT NULL",
+                params![id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(store_err)?;
+        Ok(n as u64)
     }
 
     /// Adapter inspect. Resume never calls this.
@@ -176,9 +204,7 @@ impl SqliteStore {
     pub fn event_bodies(&self, id: &ExecutionId) -> Result<Vec<String>, StoreError> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT body FROM events WHERE execution_id = ?1 ORDER BY seq",
-            )
+            .prepare("SELECT body FROM events WHERE execution_id = ?1 ORDER BY seq")
             .map_err(store_err)?;
         let rows = stmt
             .query_map(params![id.as_str()], |row| row.get(0))
@@ -272,6 +298,70 @@ impl SqliteStore {
     }
 }
 
+fn ensure_runnable_at_column(conn: &Connection) -> Result<(), StoreError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(nodes)")
+        .map_err(store_err)?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(store_err)?;
+    for c in cols {
+        if c.map_err(store_err)? == "runnable_at" {
+            return Ok(());
+        }
+    }
+    conn.execute("ALTER TABLE nodes ADD COLUMN runnable_at INTEGER", [])
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// T lives in `nodes.runnable_at` (INTEGER ms). JSON stays the compact
+/// Ready-now shape so parked rows are not 2.5× Ready-now. `last_error`
+/// ("timed out") is omitted on Ready-for-retry; inspect of a live run still
+/// has it in memory. Values that do not fit i64 stay in JSON (Timestamp::MAX).
+fn node_row_parts(node: &NodeSnapshot) -> Result<(String, Option<i64>), StoreError> {
+    let mut stored = node.clone();
+    let col = match node.state {
+        NodeState::Ready {
+            runnable_at: Some(at),
+        } => match i64::try_from(at.as_millis()) {
+            Ok(ms) => {
+                stored.state = NodeState::Ready { runnable_at: None };
+                stored.last_error = None;
+                Some(ms)
+            }
+            Err(_) => None,
+        },
+        _ => None,
+    };
+    let body = serde_json::to_string(&stored).map_err(json_err)?;
+    Ok((body, col))
+}
+
+fn node_from_row(body: &str, runnable_at: Option<i64>) -> Result<NodeSnapshot, StoreError> {
+    let mut node: NodeSnapshot = serde_json::from_str(body).map_err(json_err)?;
+    if let Some(ms) = runnable_at {
+        if matches!(node.state, NodeState::Ready { .. }) {
+            node.state = NodeState::Ready {
+                runnable_at: Some(Timestamp::from_millis(ms as u64)),
+            };
+        }
+    }
+    Ok(node)
+}
+
+fn insert_node_row(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    execution_id: &str,
+    node_id: &str,
+    node: &NodeSnapshot,
+) -> Result<(), StoreError> {
+    let (body, t) = node_row_parts(node)?;
+    stmt.execute(params![execution_id, node_id, body, t])
+        .map_err(store_err)?;
+    Ok(())
+}
+
 fn store_err(e: rusqlite::Error) -> StoreError {
     StoreError::Message(e.to_string())
 }
@@ -356,10 +446,7 @@ fn insert_definition(
     Ok(())
 }
 
-fn upsert_execution_row(
-    conn: &Connection,
-    snapshot: &ExecutionSnapshot,
-) -> Result<(), StoreError> {
+fn upsert_execution_row(conn: &Connection, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
     let state = serde_json::to_string(&snapshot.state).map_err(json_err)?;
     let order = serde_json::to_string(&snapshot.node_order).map_err(json_err)?;
     conn.execute(
@@ -408,10 +495,7 @@ fn upsert_execution_meta(conn: &Connection, exec: &Execution) -> Result<(), Stor
     upsert_execution_row(conn, &meta)
 }
 
-fn upsert_full_snapshot(
-    conn: &Connection,
-    snapshot: &ExecutionSnapshot,
-) -> Result<(), StoreError> {
+fn upsert_full_snapshot(conn: &Connection, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
     let found: Option<i64> = conn
         .query_row(
             "SELECT revision FROM executions WHERE id = ?1",
@@ -442,10 +526,7 @@ fn upsert_full_snapshot(
     }
 }
 
-fn insert_new_snapshot(
-    conn: &Connection,
-    snapshot: &ExecutionSnapshot,
-) -> Result<(), StoreError> {
+fn insert_new_snapshot(conn: &Connection, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
     upsert_execution_row(conn, snapshot)?;
     insert_nodes(conn, snapshot)
 }
@@ -453,30 +534,40 @@ fn insert_new_snapshot(
 fn insert_nodes(conn: &Connection, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
     let mut stmt = conn
         .prepare_cached(
-            "INSERT OR REPLACE INTO nodes (execution_id, node_id, body) VALUES (?1, ?2, ?3)",
+            "INSERT OR REPLACE INTO nodes (execution_id, node_id, body, runnable_at)
+             VALUES (?1, ?2, ?3, ?4)",
         )
         .map_err(store_err)?;
     for (id, node) in &snapshot.nodes {
-        let body = serde_json::to_string(node).map_err(json_err)?;
-        stmt.execute(params![
-            snapshot.execution_id.as_str(),
-            id.as_str(),
-            body
-        ])
-        .map_err(store_err)?;
+        insert_node_row(&mut stmt, snapshot.execution_id.as_str(), id.as_str(), node)?;
     }
     Ok(())
 }
 
 fn upsert_dirty_nodes(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
-    let mut stmt = conn
+    let mut upd = conn
         .prepare_cached(
-            "INSERT OR REPLACE INTO nodes (execution_id, node_id, body) VALUES (?1, ?2, ?3)",
+            "UPDATE nodes SET runnable_at = ?3
+             WHERE execution_id = ?1 AND node_id = ?2 AND body = ?4",
+        )
+        .map_err(store_err)?;
+    let mut ins = conn
+        .prepare_cached(
+            "INSERT OR REPLACE INTO nodes (execution_id, node_id, body, runnable_at)
+             VALUES (?1, ?2, ?3, ?4)",
         )
         .map_err(store_err)?;
     for (id, node) in exec.dirty_nodes() {
-        let body = serde_json::to_string(&node).map_err(json_err)?;
-        stmt.execute(params![exec.id().as_str(), id.as_str(), body])
+        let (body, t) = node_row_parts(&node)?;
+        if t.is_some() {
+            let n = upd
+                .execute(params![exec.id().as_str(), id.as_str(), t, body])
+                .map_err(store_err)?;
+            if n > 0 {
+                continue;
+            }
+        }
+        ins.execute(params![exec.id().as_str(), id.as_str(), body, t])
             .map_err(store_err)?;
     }
     Ok(())
@@ -508,15 +599,15 @@ fn load_snapshot(
         return Ok(None);
     };
     let mut stmt = conn
-        .prepare_cached("SELECT node_id, body FROM nodes WHERE execution_id = ?1")
+        .prepare_cached("SELECT node_id, body, runnable_at FROM nodes WHERE execution_id = ?1")
         .map_err(store_err)?;
     let mut rows = stmt.query(params![id.as_str()]).map_err(store_err)?;
     let mut nodes = std::collections::HashMap::new();
     while let Some(row) = rows.next().map_err(store_err)? {
         let nid: String = row.get(0).map_err(store_err)?;
         let body: String = row.get(1).map_err(store_err)?;
-        let node: keel_rt::NodeSnapshot =
-            serde_json::from_str(&body).map_err(json_err)?;
+        let at: Option<i64> = row.get(2).map_err(store_err)?;
+        let node = node_from_row(&body, at)?;
         nodes.insert(keel_rt::NodeId::new(nid), node);
     }
     Ok(Some(ExecutionSnapshot {
@@ -719,9 +810,7 @@ mod tests {
             let _init = SqliteStore::open(&path).unwrap();
         }
         let blocker = Connection::open(&path).unwrap();
-        blocker
-            .busy_timeout(Duration::from_millis(0))
-            .unwrap();
+        blocker.busy_timeout(Duration::from_millis(0)).unwrap();
         blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
         let err = match SqliteStore::open_with_busy_timeout(&path, Duration::ZERO) {
             Err(e) => e,
@@ -756,7 +845,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn schema_version_in_json_fail_closed() {
-        use keel_rt::{SCHEMA_VERSION, SnapshotError};
+        use keel_rt::{SnapshotError, SCHEMA_VERSION};
         let path = tmp();
         let store = SqliteStore::open(&path).unwrap();
         let exec = one_node();
@@ -770,11 +859,7 @@ mod tests {
             .unwrap();
         }
         let loaded = store.get(exec.id()).await.unwrap().unwrap();
-        let def = store
-            .workflow_definition(exec.id())
-            .await
-            .unwrap()
-            .unwrap();
+        let def = store.workflow_definition(exec.id()).await.unwrap().unwrap();
         match Execution::from_snapshot(def, loaded) {
             Err(SnapshotError::SchemaMismatch {
                 found: 99,
@@ -874,11 +959,7 @@ mod tests {
             .unwrap();
         let exec = Execution::new(def);
         store.persist(&exec).await.unwrap();
-        let def = store
-            .workflow_definition(exec.id())
-            .await
-            .unwrap()
-            .unwrap();
+        let def = store.workflow_definition(exec.id()).await.unwrap().unwrap();
         let snap = store.get(exec.id()).await.unwrap().unwrap();
         let mut exec = Execution::from_snapshot(def, snap).unwrap();
         exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
@@ -1008,7 +1089,10 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(n1, n0, "incremental persist must not DELETE unchanged nodes");
+        assert_eq!(
+            n1, n0,
+            "incremental persist must not DELETE unchanged nodes"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1076,10 +1160,7 @@ mod tests {
                 attempted: 0
             }
         );
-        assert_eq!(
-            store.get(exec.id()).await.unwrap().unwrap().revision,
-            keep
-        );
+        assert_eq!(store.get(exec.id()).await.unwrap().unwrap().revision, keep);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1094,7 +1175,10 @@ mod tests {
             at: Timestamp(0),
             schema_version: keel_rt::SCHEMA_VERSION,
         };
-        store.persist_with_events(&exec, std::slice::from_ref(&ev)).await.unwrap();
+        store
+            .persist_with_events(&exec, std::slice::from_ref(&ev))
+            .await
+            .unwrap();
         exec.apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
             .unwrap();
         store
@@ -1162,6 +1246,197 @@ mod tests {
         assert_eq!(
             store.get(exec.id()).await.unwrap().unwrap().state,
             keel_rt::ExecutionState::Succeeded
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parked_ready_t_uses_column_omits_nested_json_and_last_error() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut exec = one_node();
+        let p = keel_rt::RetryPolicy::new(3, Duration::from_millis(50));
+        let now = Timestamp(0);
+        exec.apply(ApplyCmd::Start, &p, now).unwrap();
+        exec.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        exec.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(keel_rt::NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let t = match &exec
+            .snapshot()
+            .node(&keel_rt::NodeId::new("a"))
+            .unwrap()
+            .state
+        {
+            keel_rt::NodeState::Ready {
+                runnable_at: Some(at),
+            } => *at,
+            other => panic!("{other:?}"),
+        };
+        store.persist(&exec).await.unwrap();
+        let (body, col): (String, Option<i64>) = {
+            let conn = store.lock().unwrap();
+            conn.query_row(
+                "SELECT body, runnable_at FROM nodes WHERE execution_id = ?1",
+                params![exec.id().as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert!(
+            !body.contains("runnable_at") && !body.contains("last_error"),
+            "parked JSON must be compact Ready-now shape, got {body}"
+        );
+        assert_eq!(col, Some(t.as_millis() as i64));
+        assert_eq!(
+            store
+                .get(exec.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&keel_rt::NodeId::new("a"))
+                .unwrap()
+                .state,
+            keel_rt::NodeState::Ready {
+                runnable_at: Some(t)
+            }
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_t_column_update_skips_unchanged_body() {
+        let path = tmp();
+        let store = SqliteStore::open(&path).unwrap();
+        let mut exec = one_node();
+        let p = keel_rt::RetryPolicy::new(3, Duration::from_millis(50));
+        let now = Timestamp(0);
+        exec.apply(ApplyCmd::Start, &p, now).unwrap();
+        exec.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        exec.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(keel_rt::NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        store.persist(&exec).await.unwrap();
+        let body0: String = {
+            let conn = store.lock().unwrap();
+            conn.query_row(
+                "SELECT body FROM nodes WHERE execution_id = ?1",
+                params![exec.id().as_str()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        // Same compact body, later T: UPDATE runnable_at only.
+        let later = Timestamp(9_000);
+        let mut snap = exec.snapshot();
+        snap.revision += 1;
+        snap.nodes
+            .get_mut(&keel_rt::NodeId::new("a"))
+            .unwrap()
+            .state = keel_rt::NodeState::Ready {
+            runnable_at: Some(later),
+        };
+        store.put(&snap).await.unwrap();
+        let (body1, col): (String, Option<i64>) = {
+            let conn = store.lock().unwrap();
+            conn.query_row(
+                "SELECT body, runnable_at FROM nodes WHERE execution_id = ?1",
+                params![exec.id().as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(body1, body0, "only T changed; JSON body must be reused");
+        assert_eq!(col, Some(9_000));
+        assert_eq!(
+            store
+                .get(exec.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&keel_rt::NodeId::new("a"))
+                .unwrap()
+                .state,
+            keel_rt::NodeState::Ready {
+                runnable_at: Some(later)
+            }
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_nested_runnable_at_json_loads_when_column_null() {
+        let path = tmp();
+        let id = ExecutionId::new();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE executions (
+                   id TEXT PRIMARY KEY, revision INTEGER, schema_version INTEGER,
+                   definition_hash TEXT, workflow_id TEXT, state TEXT, node_order TEXT);
+                 CREATE TABLE nodes (
+                   execution_id TEXT NOT NULL, node_id TEXT NOT NULL, body TEXT NOT NULL,
+                   PRIMARY KEY (execution_id, node_id));
+                 CREATE TABLE definitions (hash TEXT PRIMARY KEY, body BLOB);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO executions
+                   (id, revision, schema_version, definition_hash, workflow_id, state, node_order)
+                 VALUES (?1, 1, 1, 'legacy', 'wf', '\"Running\"', '[\"a\"]')",
+                params![id.as_str()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO nodes (execution_id, node_id, body) VALUES (?1, 'a', ?2)",
+                params![
+                    id.as_str(),
+                    r#"{"state":{"Ready":{"runnable_at":77}},"attempt":1}"#
+                ],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(
+            store
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&keel_rt::NodeId::new("a"))
+                .unwrap()
+                .state,
+            keel_rt::NodeState::Ready {
+                runnable_at: Some(Timestamp(77))
+            }
         );
         let _ = std::fs::remove_file(&path);
     }

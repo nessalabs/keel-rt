@@ -77,6 +77,10 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "sqlite must not grow a timer table; T lives on the snapshot"
     );
     assert!(!lib.contains("CREATE TABLE IF NOT EXISTS timers"));
+    assert!(
+        lib.contains("runnable_at INTEGER"),
+        "T must be a nodes column, not a timer table"
+    );
     for table in ["executions", "nodes", "definitions", "events"] {
         assert!(
             lib.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")),
@@ -91,6 +95,7 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "fn crash_after_timeout_persisted_before_dispatch_does_not_double_run",
         "fn incremental_persist_does_not_drop_runnable_at",
         "fn crash_resume_256_parked_advance_once_each_once",
+        "fn persist_resume_256_runnable_at_set_vs_unset",
         "fn incremental_fire_does_not_overwrite_sibling_runnable_at",
         "fn busy_on_park_persist_rolls_back_then_t_lands",
         "fn reader_lock_does_not_block_park_persist",

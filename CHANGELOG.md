@@ -16,7 +16,11 @@ do not sleep. The drive prefers the apply inbox when T is already due
 (`try_recv`) so Cancel/Shutdown at the same instant as a due deadline does
 not dispatch. Constructed stuck-wait tests: haywire `wait_until` (Pending
 forever) still loses to hang bound / inbox cancel; `Timestamp::MAX` cancel
-returns without `thread::sleep`; due T does not call `wait_until`. `Timestamp::saturating_add` saturates `Duration`
+returns without `thread::sleep`; due T does not call `wait_until`. When a
+caller persist/resume parked nodes, it used to write 2.5× node JSON (nested T
++ `last_error`). Now T is `nodes.runnable_at` INTEGER; parked JSON matches
+Ready-now; crash-resume still restores `Ready { runnable_at: Some(T) }`.
+`Timestamp::saturating_add` saturates `Duration`
 millis that do not fit in `u64` (`1<<61` seconds used to wrap to T==now).
 Node JSON omits null optionals; a retry park drops the stale attempt token
 (Waiting still carries the token). MemoryStore no-timer medians stay within

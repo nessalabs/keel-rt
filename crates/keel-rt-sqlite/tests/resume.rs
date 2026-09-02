@@ -2152,7 +2152,7 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
         }
         b.build().unwrap()
     }
-    fn persist_shape(path: &std::path::Path, parked: bool) -> (Duration, usize, usize) {
+    fn persist_shape(path: &std::path::Path, parked: bool) -> (Duration, usize, usize, u64) {
         let n = 256usize;
         let store = SqliteStore::open(path).unwrap();
         let rt = current_rt();
@@ -2184,14 +2184,32 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
                     .unwrap();
                 }
             }
-            let bodies: usize = ex
-                .dirty_nodes()
-                .iter()
-                .map(|(_, n)| serde_json::to_vec(n).unwrap().len())
-                .sum();
+            let dirty = ex.dirty_nodes().len();
             let t0 = std::time::Instant::now();
             store.persist(&ex).await.unwrap();
-            (t0.elapsed(), bodies, ex.dirty_nodes().len())
+            let elapsed = t0.elapsed();
+            let bytes = store.node_json_bytes(ex.id()).unwrap();
+            let cols = store.parked_deadline_count(ex.id()).unwrap();
+            let snap = store.get(ex.id()).await.unwrap().unwrap();
+            if parked {
+                assert_eq!(cols, n as u64, "each parked row must store T in the column");
+                let kept = snap
+                    .nodes
+                    .values()
+                    .filter(|n| {
+                        matches!(
+                            n.state,
+                            NodeState::Ready {
+                                runnable_at: Some(_)
+                            }
+                        )
+                    })
+                    .count();
+                assert_eq!(kept, n, "get() must restore Ready {{ T }} for every row");
+            } else {
+                assert_eq!(cols, 0);
+            }
+            (elapsed, bytes, dirty, cols)
         });
         drop(rt);
         d
@@ -2203,12 +2221,14 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
     for i in 0..5 {
         let a = tmp();
         let b = tmp();
-        let (dt, bytes, dirty) = persist_shape(&a, true);
+        let (dt, bytes, dirty, cols) = persist_shape(&a, true);
         assert_eq!(dirty, 256);
+        assert_eq!(cols, 256);
         set.push(dt);
         set_bytes = bytes;
-        let (dt, bytes, dirty) = persist_shape(&b, false);
+        let (dt, bytes, dirty, cols) = persist_shape(&b, false);
         assert_eq!(dirty, 256);
+        assert_eq!(cols, 0);
         unset.push(dt);
         unset_bytes = bytes;
         let _ = std::fs::remove_file(&a);
@@ -2218,11 +2238,19 @@ fn persist_resume_256_runnable_at_set_vs_unset() {
     set.sort();
     unset.sort();
     eprintln!(
-        "sqlite_persist_256 runnable_at_set={}ms ({} node-json B) runnable_at_unset={}ms ({} node-json B) (median n=5)",
+        "sqlite_persist_256 runnable_at_set={}ms ({} on-disk node-json B) runnable_at_unset={}ms ({} on-disk node-json B) (median n=5)",
         set[2].as_secs_f64() * 1000.0,
         set_bytes,
         unset[2].as_secs_f64() * 1000.0,
         unset_bytes
+    );
+    assert!(
+        set_bytes <= unset_bytes + 512,
+        "parked Ready{{T}} JSON must match Ready-now once T is a column (got {set_bytes} vs {unset_bytes})"
+    );
+    assert!(
+        set_bytes < 12_000,
+        "parked 256 JSON must not stay at the 22 016 B nested-T shape (got {set_bytes})"
     );
 }
 
@@ -2268,8 +2296,8 @@ fn incremental_fire_does_not_overwrite_sibling_runnable_at() {
             store.persist(&ex).await.unwrap();
             let id = ex.id().clone();
             let def = store.workflow_definition(&id).await.unwrap().unwrap();
-            let mut ex = Execution::from_snapshot(def, store.get(&id).await.unwrap().unwrap())
-                .unwrap();
+            let mut ex =
+                Execution::from_snapshot(def, store.get(&id).await.unwrap().unwrap()).unwrap();
             ex.apply(
                 ApplyCmd::RetryDue {
                     node_id: "w0".into(),
@@ -2299,9 +2327,7 @@ fn incremental_fire_does_not_overwrite_sibling_runnable_at() {
         assert!(
             matches!(
                 snap.node(&NodeId::new("w0")).unwrap().state,
-                NodeState::Ready {
-                    runnable_at: None
-                }
+                NodeState::Ready { runnable_at: None }
             ),
             "fired slot is Ready now"
         );
@@ -2455,11 +2481,9 @@ fn reader_lock_does_not_block_park_persist() {
         .unwrap();
     rt.block_on(async {
         let snap = store.get(&id).await.unwrap().unwrap();
-        let mut ex = Execution::from_snapshot(
-            store.workflow_definition(&id).await.unwrap().unwrap(),
-            snap,
-        )
-        .unwrap();
+        let mut ex =
+            Execution::from_snapshot(store.workflow_definition(&id).await.unwrap().unwrap(), snap)
+                .unwrap();
         let p = RetryPolicy::new(3, delay);
         ex.apply(
             ApplyCmd::StartNode {
@@ -2526,13 +2550,14 @@ fn many_park_wakes_wal_stays_bounded() {
                 }
             })
             .build();
-        let handle = runtime.start(
-            WorkflowDefinition::builder("wf")
-                .node("a", "a")
-                .build()
-                .unwrap(),
-        )
-        .unwrap();
+        let handle = runtime
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("a", "a")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
         for _ in 0..16 {
             clock.advance(Duration::from_millis(1));
             tokio::task::yield_now().await;

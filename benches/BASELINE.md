@@ -23,17 +23,21 @@ All four inside the 10% band. **No revert.**
 
 ### sqlite persist Ready { T } vs Ready now (256-wide, FULL, n=5)
 
-| | before this opt | after (omit nulls + stale token) | node-json bytes |
+| | PR tip `9c07d07` (this VM) | after (`runnable_at` column) | on-disk node-json |
 |---|---:|---:|---:|
-| Ready { T } | 4.091 ms | **3.527 ms (−14%)** | 22 016 B |
-| Ready now | 3.314 ms | 2.787 ms | 8 704 B |
-| T vs now | **+23%** | +27% | 2.5× JSON |
+| Ready { T } | 3.448 ms / 22 016 B | **3.01 ms / 8 704 B** | **1.0× Ready-now** |
+| Ready now | 2.907 ms / 8 704 B | 3.00 ms / 8 704 B | 8 704 B |
+| T vs now | +19% time, 2.5× JSON | **~0% JSON; time within noise** | |
 
-The leftover is not dirty-slot rewrite or WAL: first persist writes 256 rows
-either way (`dirty=256`). Parked bodies carry `attempt`, `last_error` ("timed
-out"), and `runnable_at: Some(T)`. Ready now is `Ready {}` + `attempt: 0`.
-Omitting null optionals and the stale retry token cut **absolute** T persist
-14%. Ready now shrank more, so the ratio stayed. Not a MemoryStore regression.
+`9c07d07` leftover was parked JSON (`attempt`, `last_error` "timed out", nested
+`Some(T)`). The adapter now stores T as `nodes.runnable_at INTEGER` and writes
+the compact Ready-now body (no nested T, no last_error on Ready-for-retry).
+Kernel snapshot type is still `Ready { runnable_at }`. First persist INSERTs
+only; dirty updates skip rewriting body when it already matches and only T
+moves. No timer table. MemoryStore hot path unchanged (sqlite-only).
+
+Documented prior cut (omit nulls + stale token) was 4.091 → 3.527 ms (−14%)
+with the 2.5× JSON still in place. This cut removes that JSON gap.
 
 ### With timers (this branch)
 
