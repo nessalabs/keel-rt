@@ -239,8 +239,9 @@ exactly-once must make the executor idempotent.
 | FakeClock lost-wake | sleep still completes | `sleep_does_not_lose_advance_notify` | subscribe-before-check |
 | Crash while parked on T | restore same `runnable_at`; advance FakeClock to fire | `start_timeout_retry_crash_during_backoff_resume_advance_succeeds` `crash_resume_full_file_keeps_deadline` | snapshot T |
 | Due T on resume | dispatch once, not twice | `persisted_deadline_already_due_on_resume_runs_once_not_twice` `sqlite_deadline_persist_does_not_drop_or_double_fire` | RetryDue + park |
-| Cancel during parked T | Cancelled; live_sleeps == 0 | `cancel_during_parked_deadline_is_cancelled_sleeper_dropped` | RAII Drop |
-| Cancel vs due T same instant | Cancel wins; no retry dispatch | `cancel_when_deadline_already_due_does_not_dispatch` `due_deadline_prefers_queued_cancel` | park try_recv inbox first |
+| Cancel during parked T | Cancelled; live_sleeps == 0 | `cancel_during_parked_deadline_is_cancelled_sleeper_dropped` `cancel_while_drive_waits_on_future_t_drops_waiter` | RAII Drop |
+| Cancel vs due T same instant | Cancel wins; no retry dispatch | `cancel_when_deadline_already_due_does_not_dispatch` `due_deadline_prefers_queued_cancel` `due_t_hung_wait_until_inbox_cancel_does_not_dispatch` `due_deadline_does_not_call_wait_until` | drive try_recv inbox first |
+| Hung `wait_until` / `Timestamp::MAX` | hang bound / cancel still terminates | `hung_wait_until_hang_bound_still_cancels` `timestamp_max_deadline_cancel_returns_without_thread_sleep` | CancelBoundGuard + inbox |
 | 256 parked, one advance | each node once | `wide_256_parked_advance_once_each_fires_once` `crash_resume_256_parked_advance_once_each_once` | Timer drain |
 | last_persisted on park resume | no extra persist | `resume_parked_does_not_open_extra_persist` | seed from snapshot |
 

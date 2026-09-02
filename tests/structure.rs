@@ -331,6 +331,10 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "crash_resume_full_file_keeps_deadline",
         "persisted_deadline_already_due_on_resume_runs_once_not_twice",
         "cancel_during_parked_deadline_is_cancelled_sleeper_dropped",
+        "hung_wait_until_hang_bound_still_cancels",
+        "timestamp_max_deadline_cancel_returns_without_thread_sleep",
+        "cancel_while_drive_waits_on_future_t_drops_waiter",
+        "due_t_hung_wait_until_inbox_cancel_does_not_dispatch",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
@@ -513,6 +517,10 @@ fn apply_path_does_not_sleep() {
     assert!(
         rt.contains("async fn next_drive_event"),
         "wait loop is next_drive_event in runtime.rs, not the scheduler"
+    );
+    assert!(
+        rt.contains("struct CancelBoundGuard") && rt.contains("cancel_bound_guard.arm"),
+        "hang bound must be wired on Runtime drive after park.rs deletion"
     );
 }
 

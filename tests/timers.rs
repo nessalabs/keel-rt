@@ -15,7 +15,7 @@ use keel_rt::{
     Timestamp, WorkflowDefinition,
 };
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -542,6 +542,299 @@ async fn cancel_when_deadline_already_due_does_not_dispatch() {
     .unwrap();
     handle.cancel().await;
     assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "queued Cancel must beat due Timer"
+    );
+}
+
+/// `wait_until` stays Pending forever (haywire clock). Hang bound on the
+/// Runtime drive must still terminate; scheduler must not sleep.
+struct HungWaitClock {
+    now: Timestamp,
+    wait_until_calls: AtomicUsize,
+    live_waits: AtomicUsize,
+    last_wait: Mutex<Option<Timestamp>>,
+}
+
+impl HungWaitClock {
+    fn new(now: Timestamp) -> Self {
+        Self {
+            now,
+            wait_until_calls: AtomicUsize::new(0),
+            live_waits: AtomicUsize::new(0),
+            last_wait: Mutex::new(None),
+        }
+    }
+
+    fn wait_until_calls(&self) -> usize {
+        self.wait_until_calls.load(Ordering::SeqCst)
+    }
+
+    fn live_waits(&self) -> usize {
+        self.live_waits.load(Ordering::SeqCst)
+    }
+
+    fn last_wait(&self) -> Option<Timestamp> {
+        *self.last_wait.lock().expect("hung wait clock")
+    }
+}
+
+#[async_trait::async_trait]
+impl Clock for HungWaitClock {
+    fn now(&self) -> Timestamp {
+        self.now
+    }
+
+    async fn sleep(&self, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+        std::future::pending::<()>().await;
+    }
+
+    async fn wait_until(&self, when: Timestamp) {
+        self.wait_until_calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_wait.lock().expect("hung wait clock") = Some(when);
+        self.live_waits.fetch_add(1, Ordering::SeqCst);
+        struct LiveWait<'a>(&'a AtomicUsize);
+        impl Drop for LiveWait<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _live = LiveWait(&self.live_waits);
+        // Never completes. Inbox / hang bound must recover. Drop of the
+        // drive waiter still runs LiveWait (RAII); we do not leak the future.
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn persist_hang_running_and_parked_deadline(
+    store: &impl StateStore,
+    delay: Duration,
+) -> keel_rt::ExecutionId {
+    let def = WorkflowDefinition::builder("wf")
+        .node("h", "h")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let p = RetryPolicy::new(3, delay);
+    let now = Timestamp(0);
+    let mut ex = Execution::new(def);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "h".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "a".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    ex.apply(
+        ApplyCmd::FinishNode {
+            node_id: "a".into(),
+            attempt: 1,
+            outcome: Ok(NodeOutcome::TimedOut),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    assert!(matches!(
+        ex.snapshot().node(&NodeId::new("h")).unwrap().state,
+        NodeState::Running { .. }
+    ));
+    assert!(matches!(
+        ex.snapshot().node(&NodeId::new("a")).unwrap().state,
+        NodeState::Ready {
+            runnable_at: Some(_)
+        }
+    ));
+    store.persist(&ex).await.unwrap();
+    ex.id().clone()
+}
+
+/// wait_until never completes + ignore-cancel hang. Drive hang bound
+/// (`CancelBoundGuard`) must still terminate. No scheduler sleep.
+#[tokio::test(flavor = "current_thread")]
+async fn hung_wait_until_hang_bound_still_cancels() {
+    let bound = Duration::from_millis(20);
+    let clock = Arc::new(HungWaitClock::new(Timestamp(0)));
+    let store = MemoryStore::new();
+    let id = persist_hang_running_and_parked_deadline(&store, DELAY).await;
+    let hang = ScriptedExecutor::new("h").hang(true);
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .cancel_bound(bound)
+            .concurrency(2)
+            .policy(RetryPolicy::new(3, DELAY))
+            .register(hang.clone())
+            .register_fn("a", move |_ctx: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"late")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    within(hang.wait_until_hanging()).await;
+    within(async {
+        loop {
+            if clock.wait_until_calls() >= 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let wait = async {
+        handle.cancel().await;
+        handle.wait().await
+    };
+    let state = tokio::time::timeout(bound + Duration::from_millis(200), wait)
+        .await
+        .expect("hang bound must terminate despite wait_until never completing");
+    assert_eq!(state, ExecutionState::Cancelled);
+    assert_eq!(fired.load(Ordering::SeqCst), 0, "parked node must not run");
+}
+
+/// `runnable_at = Timestamp::MAX`: cancel returns. No thread::sleep.
+#[tokio::test(flavor = "current_thread")]
+async fn timestamp_max_deadline_cancel_returns_without_thread_sleep() {
+    let store = MemoryStore::new();
+    let (id, t) = persist_retry_at(&store, "a", Duration::MAX, Timestamp(0)).await;
+    assert_eq!(t, Timestamp::MAX);
+    let clock = Arc::new(HungWaitClock::new(Timestamp(0)));
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .policy(RetryPolicy::new(3, Duration::MAX))
+            .register_fn("a", move |_ctx: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"late")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    within(async {
+        loop {
+            if clock.last_wait() == Some(Timestamp::MAX) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    handle.cancel().await;
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+    assert_eq!(fired.load(Ordering::SeqCst), 0);
+    within(async {
+        loop {
+            if clock.live_waits() == 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+
+/// Drive is waiting on future T; inbox Cancel → Cancelled and waiter dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_while_drive_waits_on_future_t_drops_waiter() {
+    let clock = Arc::new(HungWaitClock::new(Timestamp(0)));
+    let store = MemoryStore::new();
+    let (id, t) = persist_backoff(&store, DELAY).await;
+    assert!(t > clock.now());
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .policy(RetryPolicy::new(3, DELAY))
+            .register_fn("a", move |_ctx: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"late")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    within(async {
+        loop {
+            if clock.live_waits() >= 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    handle.cancel().await;
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+    assert_eq!(fired.load(Ordering::SeqCst), 0);
+    within(async {
+        loop {
+            if clock.live_waits() == 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+
+/// T already due + hung wait_until: inbox-first, do not call wait_until.
+#[tokio::test(flavor = "current_thread")]
+async fn due_t_hung_wait_until_inbox_cancel_does_not_dispatch() {
+    let store = MemoryStore::new();
+    let (id, t) = persist_backoff(&store, DELAY).await;
+    let clock = Arc::new(HungWaitClock::new(t));
+    assert!(t <= clock.now(), "T is due; wait_until must not be called");
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let handle = within(
+        Runtime::builder()
+            .store(store)
+            .clock(clock.clone())
+            .policy(RetryPolicy::new(3, DELAY))
+            .register_fn("a", move |_ctx: ExecutionContext| {
+                f.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .build()
+            .resume(&id),
+    )
+    .await
+    .unwrap();
+    handle.cancel().await;
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+    assert_eq!(
+        clock.wait_until_calls(),
+        0,
+        "due T must try_recv inbox, not hang in wait_until"
+    );
     assert_eq!(
         fired.load(Ordering::SeqCst),
         0,
@@ -1376,14 +1669,8 @@ async fn same_t_huge_jump_and_clock_backwards() {
     let mut ex = Execution::new(def);
     ex.apply(ApplyCmd::Start, &p, now).unwrap();
     for id in ["a", "b"] {
-        ex.apply(
-            ApplyCmd::StartNode {
-                node_id: id.into(),
-            },
-            &p,
-            now,
-        )
-        .unwrap();
+        ex.apply(ApplyCmd::StartNode { node_id: id.into() }, &p, now)
+            .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: id.into(),
@@ -1418,7 +1705,11 @@ async fn same_t_huge_jump_and_clock_backwards() {
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(fired.load(Ordering::SeqCst), 0, "backwards/stay must not fire");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "backwards/stay must not fire"
+    );
     clock.advance(Duration::from_secs(365 * 86400));
     assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
     assert_eq!(fired.load(Ordering::SeqCst), 2);
@@ -1492,7 +1783,11 @@ async fn resume_255_due_one_future_then_one_tick() {
         }
     })
     .await;
-    assert_eq!(fired.load(Ordering::SeqCst), 255, "future sibling must wait");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        255,
+        "future sibling must wait"
+    );
     clock.advance(Duration::from_millis(1));
     assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
     assert_eq!(fired.load(Ordering::SeqCst), 256);
@@ -1632,7 +1927,14 @@ async fn drop_runtime_while_256_parks_armed_does_not_cancel() {
     ex.apply(ApplyCmd::Start, &p, now).unwrap();
     for i in 0..n {
         let id = format!("w{i}");
-        ex.apply(ApplyCmd::StartNode { node_id: id.clone().into() }, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: id.clone().into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: id.into(),
@@ -1691,7 +1993,10 @@ async fn stale_complete_while_parked_is_not_waiting_then_t_fires_once() {
     .unwrap();
     let stale = keel_rt::ResumeToken::issue(id.clone(), NodeId::new("a"), 1);
     let err = handle
-        .resume(stale, keel_rt::Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))))
+        .resume(
+            stale,
+            keel_rt::Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
+        )
         .await;
     assert!(err.is_err(), "Ready {{ T }} is not Waiting: {err:?}");
     assert_eq!(fired.load(Ordering::SeqCst), 0);
@@ -1724,8 +2029,17 @@ async fn stale_put_while_park_in_flight_does_not_drop_t() {
     .await
     .unwrap();
     assert_eq!(
-        store.get(&id).await.unwrap().unwrap().node(&NodeId::new("a")).unwrap().state,
-        NodeState::Ready { runnable_at: Some(t) }
+        store
+            .get(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .node(&NodeId::new("a"))
+            .unwrap()
+            .state,
+        NodeState::Ready {
+            runnable_at: Some(t)
+        }
     );
     clock.advance(DELAY);
     assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
@@ -1805,8 +2119,17 @@ async fn clock_sleep_panic_while_parked_keeps_t_on_store() {
     .unwrap();
     assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
     assert_eq!(
-        store.get(&id).await.unwrap().unwrap().node(&NodeId::new("a")).unwrap().state,
-        NodeState::Ready { runnable_at: Some(t) }
+        store
+            .get(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .node(&NodeId::new("a"))
+            .unwrap()
+            .state,
+        NodeState::Ready {
+            runnable_at: Some(t)
+        }
     );
 }
 
@@ -1827,7 +2150,14 @@ async fn crash_between_park_and_timeout_fail_fast_vs_fail_subtree() {
         let mut ex = Execution::new(def);
         let now = Timestamp(0);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "park".into() }, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "park".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "park".into(),
@@ -1850,7 +2180,9 @@ async fn crash_between_park_and_timeout_fail_fast_vs_fail_subtree() {
             .store(store)
             .clock(clock)
             .policy(AcceptPolicy)
-            .register_fn("park", |_c: ExecutionContext| async { panic!("fail-fast must cancel park") })
+            .register_fn("park", |_c: ExecutionContext| async {
+                panic!("fail-fast must cancel park")
+            })
             .register(ScriptedExecutor::new("boom").timeout())
             .register_fn("child", |_c: ExecutionContext| async {
                 NodeOutcome::Succeeded(Bytes::from_static(b"c"))
@@ -1888,7 +2220,11 @@ async fn crash_between_park_and_timeout_fail_fast_vs_fail_subtree() {
     within(async {
         loop {
             if matches!(
-                handle.inspect().await.node(&NodeId::new("boom")).map(|n| &n.state),
+                handle
+                    .inspect()
+                    .await
+                    .node(&NodeId::new("boom"))
+                    .map(|n| &n.state),
                 Some(NodeState::TimedOut)
             ) {
                 return;
@@ -1902,4 +2238,3 @@ async fn crash_between_park_and_timeout_fail_fast_vs_fail_subtree() {
     assert_eq!(within(handle.wait()).await, ExecutionState::Completed);
     assert_eq!(park_hits.load(Ordering::SeqCst), 1);
 }
-

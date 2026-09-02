@@ -510,4 +510,33 @@ mod tests {
             Event::Shutdown
         ));
     }
+
+    struct PanicIfWaitUntil;
+
+    #[async_trait::async_trait]
+    impl Clock for PanicIfWaitUntil {
+        fn now(&self) -> Timestamp {
+            Timestamp(0)
+        }
+        async fn sleep(&self, _: Duration) {}
+        async fn wait_until(&self, _: Timestamp) {
+            panic!("due T must try_recv inbox, not wait_until");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn due_deadline_does_not_call_wait_until() {
+        let (tx, mut rx) = inject::channel();
+        let _ = tx.send(Event::Cancel);
+        let ev = next_drive_event(
+            &mut rx,
+            &PanicIfWaitUntil,
+            Some((Timestamp(0), NodeId::new("a"))),
+        )
+        .await;
+        assert!(
+            matches!(ev, Event::Cancel),
+            "inbox must beat due Timer without wait_until, got {ev:?}"
+        );
+    }
 }

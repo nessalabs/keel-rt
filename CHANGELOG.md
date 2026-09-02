@@ -14,7 +14,9 @@ already has (`synchronous=FULL` default). Waiting for T is the Runtime drive
 (`inbox` vs `Clock::wait_until`); domain and scheduler apply given `now` and
 do not sleep. The drive prefers the apply inbox when T is already due
 (`try_recv`) so Cancel/Shutdown at the same instant as a due deadline does
-not dispatch. `Timestamp::saturating_add` saturates `Duration`
+not dispatch. Constructed stuck-wait tests: haywire `wait_until` (Pending
+forever) still loses to hang bound / inbox cancel; `Timestamp::MAX` cancel
+returns without `thread::sleep`; due T does not call `wait_until`. `Timestamp::saturating_add` saturates `Duration`
 millis that do not fit in `u64` (`1<<61` seconds used to wrap to T==now).
 Node JSON omits null optionals; a retry park drops the stale attempt token
 (Waiting still carries the token). MemoryStore no-timer medians stay within

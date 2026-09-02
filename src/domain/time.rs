@@ -7,6 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct Timestamp(pub u64);
 
 impl Timestamp {
+    /// Largest Instant a snapshot can store. Saturating backoff lands here.
+    pub const MAX: Self = Self(u64::MAX);
+
     pub fn from_millis(ms: u64) -> Self {
         Self(ms)
     }
