@@ -4,11 +4,11 @@
 //! `cargo test --test resume -- --test-threads=1`
 
 use bytes::Bytes;
-use keel_rt::testing::{FakeClock, ScriptedExecutor, WorkflowTest};
+use keel_rt::testing::{disable, enable, FailingStore, FakeClock, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, ApplyError, Event, Execution, ExecutionContext, ExecutionId,
-    ExecutionState, FnSink, Join, MemoryStore, NodeId, NodeOutcome, NodeState, OnFailure, Recover,
-    Resume, ResumeError, RetryPolicy, Runtime, SnapshotError, StateStore, StoreError, Timestamp,
+    AcceptPolicy, ApplyCmd, Event, Execution, ExecutionContext, ExecutionId, ExecutionState,
+    FnSink, Join, MemoryStore, NodeId, NodeOutcome, NodeState, OnFailure, Recover, Resume,
+    ResumeError, RetryPolicy, Runtime, SnapshotError, StateStore, StoreError, Timestamp,
     WorkflowDefinition, SCHEMA_VERSION,
 };
 use std::future::Future;
@@ -642,11 +642,6 @@ async fn resume_error_display_names_the_case() {
         .to_string()
         .contains("definition"));
     assert!(ResumeError::NotFailed.to_string().contains("Failed"));
-    assert!(
-        ResumeError::Apply(ApplyError::UnknownNode(NodeId::new("ghost")))
-            .to_string()
-            .contains("ghost")
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -816,8 +811,8 @@ async fn resume_with_retry_failed_fail_subtree_all_done_retries_failed_page() {
 
     let p1 = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let p2 = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let j = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let (c1, c2, cj) = (p1.clone(), p2.clone(), j.clone());
+    let (c1, c2) = (p1.clone(), p2.clone());
+    let join = ScriptedExecutor::new("j").succeed(Bytes::from_static(b"join2"));
     let rt = Runtime::builder()
         .store(store)
         .register_fn("e", move |ctx: ExecutionContext| {
@@ -828,10 +823,7 @@ async fn resume_with_retry_failed_fail_subtree_all_done_retries_failed_page() {
             }
             async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
         })
-        .register_fn("j", move |_ctx: ExecutionContext| {
-            cj.fetch_add(1, Ordering::SeqCst);
-            async { NodeOutcome::Succeeded(Bytes::from_static(b"join")) }
-        })
+        .register(join.clone())
         .build();
     let h = within(rt.resume_with(&id, Recover::RetryFailed))
         .await
@@ -844,9 +836,15 @@ async fn resume_with_retry_failed_fail_subtree_all_done_retries_failed_page() {
     assert_eq!(p1.load(Ordering::SeqCst), 1, "failed page retried");
     assert_eq!(p2.load(Ordering::SeqCst), 0, "succeeded page not re-run");
     assert_eq!(
-        j.load(Ordering::SeqCst),
-        0,
-        "AllDone reducer already Succeeded; it does not re-run"
+        join.attempts().len(),
+        1,
+        "AllDone reducer re-runs once after the retried pred Succeeded"
+    );
+    let inputs = join.last_inputs().expect("join ran");
+    assert_eq!(
+        inputs.get(&NodeId::new("p1")).map(|b| b.as_ref()),
+        Some(b"ok".as_slice()),
+        "join inputs_for includes p1's new Bytes"
     );
 }
 
@@ -963,9 +961,9 @@ async fn start_after_failed_is_new_id_and_reruns_all_nodes() {
     assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
 
-/// HITL Waiting uses `handle.resume(token)`, not `Recover::RetryFailed`.
+/// Live handle owns the id: RetryFailed is AlreadyActive, not Recover.
 #[tokio::test(flavor = "current_thread")]
-async fn hitl_waiting_is_handle_resume_not_recover_retry_failed() {
+async fn hitl_live_handle_retry_failed_is_already_active() {
     let store = MemoryStore::new();
     let rt = Runtime::builder()
         .store(store)
@@ -1100,4 +1098,162 @@ async fn resume_with_retry_failed_on_cancelled_is_not_failed() {
         Ok(_) => panic!("user-Cancelled is not RetryFailed"),
         Err(e) => panic!("user-Cancelled is NotFailed, got {e}"),
     }
+}
+
+/// max_attempts=1 Accepts the first fail. Recover resets attempt; a new
+/// Runtime with max_attempts=2 must Retry the next fail (fresh budget),
+/// not Accept because leftover attempt was already max.
+#[tokio::test(flavor = "current_thread")]
+async fn resume_with_retry_failed_resets_retry_policy_budget() {
+    let store = MemoryStore::new();
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .policy(RetryPolicy::new(1, Duration::ZERO))
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::failed("boom")
+        })
+        .build();
+    let h = rt.start(def).unwrap();
+    let id = h.execution_id().clone();
+    assert_eq!(within(h.wait()).await, ExecutionState::Failed);
+
+    let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let c = attempts.clone();
+    let rt = Runtime::builder()
+        .store(store)
+        .policy(RetryPolicy::new(2, Duration::ZERO))
+        .register_fn("a", move |_ctx: ExecutionContext| {
+            let n = c.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                if n == 1 {
+                    NodeOutcome::failed("again")
+                } else {
+                    NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+                }
+            }
+        })
+        .build();
+    let h = within(rt.resume_with(&id, Recover::RetryFailed))
+        .await
+        .unwrap();
+    assert_eq!(
+        within(h.wait()).await,
+        ExecutionState::Succeeded,
+        "fresh budget: first fail after Recover must Retry, not Accept"
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_with_retry_failed_persist_err_leaves_failed_then_retry_works() {
+    let store = Arc::new(FailingStore::fail_on_nth_put(0));
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store_arc(store.clone() as Arc<dyn StateStore>)
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::failed("boom")
+        })
+        .build();
+    let h = rt.start(def).unwrap();
+    let id = h.execution_id().clone();
+    assert_eq!(within(h.wait()).await, ExecutionState::Failed);
+    enable("store.put", 1);
+    match rt.resume_with(&id, Recover::RetryFailed).await {
+        Err(ResumeError::Store(_)) => {}
+        Ok(_) => panic!("recover persist Err must surface"),
+        Err(e) => panic!("expected Store, got {e}"),
+    }
+    disable("store.put");
+    let snap = store.get(&id).await.unwrap().unwrap();
+    assert_eq!(snap.state, ExecutionState::Failed);
+    assert!(matches!(
+        snap.node(&NodeId::new("a")).unwrap().state,
+        NodeState::Failed
+    ));
+    let rt = Runtime::builder()
+        .store(store.inner().clone())
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build();
+    let h = within(rt.resume_with(&id, Recover::RetryFailed))
+        .await
+        .unwrap();
+    assert_eq!(within(h.wait()).await, ExecutionState::Succeeded);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_with_retry_failed_on_waiting_then_continue_keeps_token() {
+    let store = MemoryStore::new();
+    let id = {
+        let rt = Runtime::builder()
+            .store(store.clone())
+            .register_fn("a", |ctx: ExecutionContext| async move {
+                NodeOutcome::Waiting {
+                    token: ctx.resume_token,
+                }
+            })
+            .build();
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("a", "a")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        within(async {
+            loop {
+                if let Some(snap) = store.get(&id).await.unwrap() {
+                    if matches!(
+                        snap.node(&NodeId::new("a")).unwrap().state,
+                        NodeState::Waiting { .. }
+                    ) {
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        std::mem::forget(handle);
+        drop(rt);
+        id
+    };
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register_fn("a", succeed("a"))
+        .build();
+    match rt.resume_with(&id, Recover::RetryFailed).await {
+        Err(ResumeError::NotFailed) => {}
+        Ok(_) => panic!("Waiting is token resume"),
+        Err(e) => panic!("Waiting is token resume, got {e}"),
+    }
+    let h = within(rt.resume(&id)).await.unwrap();
+    let snap = h.inspect().await;
+    assert!(matches!(
+        snap.node(&NodeId::new("a")).unwrap().state,
+        NodeState::Waiting { .. }
+    ));
+    let token = snap
+        .node(&NodeId::new("a"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .expect("token");
+    h.resume(
+        token,
+        Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(within(h.wait()).await, ExecutionState::Succeeded);
 }

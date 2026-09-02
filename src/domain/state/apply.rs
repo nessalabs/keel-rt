@@ -594,35 +594,50 @@ impl Execution {
         }
     }
 
-    /// Failed/TimedOut become Pending (keep `attempt`; do not reset like
-    /// Cancelled). Remain is recounted after that loop. `remain == 0` →
-    /// Ready-now / `newly_runnable`. Leaves whose preds are still Succeeded
-    /// become Ready. An AllDone join that itself Failed waits: the retried
-    /// pred is no longer terminal. Do not enqueue Failed nodes in the first
-    /// loop. Succeeded keep Bytes. Waiting stays Waiting.
+    /// Failed/TimedOut/Cancelled become Pending via [`Self::set_state`]
+    /// (attempt 0; drop token/output/`last_outcome`/`reinvoke`; keep
+    /// `last_error`). Remain is rebuilt after that. `remain == 0` →
+    /// Ready-now. Succeeded AllDone joins whose fan-in includes a retried
+    /// pred go Pending (output cleared) and wait. Leaves whose preds are
+    /// still Succeeded become Ready. An AllDone join that itself Failed
+    /// waits. Do not enqueue Failed nodes in the first loop. Waiting stays.
     fn apply_retry_failed(&mut self, effect: &mut ApplyEffect) {
         let n = self.nodes.len();
+        let mut retried: Vec<NodeSlot> = Vec::new();
         for i in 0..n {
             match self.nodes[i].state {
                 NodeState::Failed | NodeState::TimedOut => {
-                    self.nodes[i].state = NodeState::Pending;
-                    self.mark_dirty(NodeSlot(i));
+                    retried.push(NodeSlot(i));
+                    self.reset_recover_fields(NodeSlot(i));
+                    self.set_state(NodeSlot(i), NodeState::Pending);
                 }
                 NodeState::Cancelled => {
-                    let n = &mut self.nodes[i];
-                    n.state = NodeState::Pending;
-                    n.attempt = 0;
-                    n.resume_token = None;
-                    n.output = None;
-                    n.reinvoke = false;
-                    self.mark_dirty(NodeSlot(i));
+                    self.reset_recover_fields(NodeSlot(i));
+                    self.set_state(NodeSlot(i), NodeState::Pending);
                 }
                 _ => {}
             }
         }
         self.cancelled = false;
         self.fail_execution = false;
-        self.recount_counts();
+        for i in 0..n {
+            if !matches!(self.nodes[i].state, NodeState::Succeeded) {
+                continue;
+            }
+            if !matches!(self.definition.join_at(NodeSlot(i)), Join::AllDone) {
+                continue;
+            }
+            let preds = self.definition.pred_slots(NodeSlot(i));
+            if !preds.iter().any(|p| retried.contains(p)) {
+                continue;
+            }
+            {
+                let n = &mut self.nodes[i];
+                n.output = None;
+                n.last_outcome = None;
+            }
+            self.set_state(NodeSlot(i), NodeState::Pending);
+        }
         for i in 0..n {
             self.remain[i] = super::restore::remain_for(&self.definition, &self.nodes, NodeSlot(i));
         }
@@ -634,6 +649,16 @@ impl Execution {
         self.rebuild_deadline();
     }
 
+    fn reset_recover_fields(&mut self, slot: NodeSlot) {
+        let n = &mut self.nodes[slot.0];
+        n.attempt = 0;
+        n.resume_token = None;
+        n.last_outcome = None;
+        n.reinvoke = false;
+        n.output = None;
+    }
+
+    #[allow(dead_code)]
     fn recount_counts(&mut self) {
         self.n_pending = 0;
         self.n_ready = 0;

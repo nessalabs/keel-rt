@@ -344,8 +344,10 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "resume_with_retry_failed_fail_subtree_all_done_retries_failed_page",
         "resume_with_retry_failed_failed_all_done_join_waits_for_retried_pred",
         "resume_with_retry_failed_on_cancelled_is_not_failed",
-        "retry_failed_illegal_is_not_failed_other_apply_is_not",
-        "retry_failed_persist_crash_mid_retry_is_at_least_once",
+        "resume_with_retry_failed_resets_retry_policy_budget",
+        "resume_with_retry_failed_persist_err_leaves_failed_then_retry_works",
+        "hitl_live_handle_retry_failed_is_already_active",
+        "retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
@@ -561,12 +563,10 @@ fn resume_with_takes_execution_id_and_recover_not_snapshot() {
 #[test]
 fn retry_failed_runtime_maps_illegal_not_any_apply_err() {
     let src = fs::read_to_string(src_root().join("runtime/runtime.rs")).unwrap();
-    let mapper = rust_fn_body(&src, "fn map_retry_failed_apply_err");
-    assert!(mapper.contains("ApplyError::Illegal"));
-    assert!(mapper.contains("ResumeError::NotFailed"));
+    let resume_err = rust_fn_body(&src, "pub enum ResumeError");
     assert!(
-        !mapper.contains("StoreError"),
-        "do not wrap apply errors as StoreError::Message"
+        !resume_err.contains("Apply("),
+        "ResumeError::Apply is a ghost; RetryFailed returns only Illegal"
     );
     let spawn = rust_fn_body(&src, "async fn spawn_resume");
     assert!(
@@ -578,6 +578,12 @@ fn retry_failed_runtime_maps_illegal_not_any_apply_err() {
         .nth(1)
         .expect("RetryFailed branch");
     let branch = retry.split("let (tx, rx)").next().unwrap();
+    assert!(branch.contains("ApplyError::Illegal"));
+    assert!(branch.contains("ResumeError::NotFailed"));
+    assert!(
+        !branch.contains("StoreError"),
+        "do not wrap apply errors as StoreError::Message"
+    );
     assert!(
         !branch.contains("exec.state()"),
         "do not re-check exec.state() in Runtime"

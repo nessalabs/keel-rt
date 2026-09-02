@@ -6,8 +6,8 @@
 use crate::common::within;
 use bytes::Bytes;
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, Execution, ExecutionContext, ExecutionState, Join,
-    MemoryStore, NodeId, NodeOutcome, ResumeError, Runtime, StateStore, StoreError, Timestamp,
+    AcceptPolicy, ApplyCmd, Execution, ExecutionContext, ExecutionState, Join, MemoryStore, NodeId,
+    NodeOutcome, Recover, ResumeError, Runtime, StateStore, StoreError, Timestamp,
     WorkflowDefinition,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -54,8 +54,14 @@ async fn persist_cas_then_drop_runtime_resume_keeps_terminal() {
     let p = AcceptPolicy;
     let now = Timestamp(0);
     ex.apply(ApplyCmd::Start, &p, now).unwrap();
-    ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-        .unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "a".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
     ex.apply(
         ApplyCmd::FinishNode {
             node_id: "a".into(),
@@ -100,8 +106,14 @@ async fn fat_bytes_resume_join_is_refcount() {
     let p = AcceptPolicy;
     let now = Timestamp(0);
     ex.apply(ApplyCmd::Start, &p, now).unwrap();
-    ex.apply(ApplyCmd::StartNode { node_id: "fat".into() }, &p, now)
-        .unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "fat".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
     ex.apply(
         ApplyCmd::FinishNode {
             node_id: "fat".into(),
@@ -223,8 +235,14 @@ async fn fail_subtree_all_done_resume_runs_reducer_once() {
     let p = AcceptPolicy;
     let now = Timestamp(0);
     ex.apply(ApplyCmd::Start, &p, now).unwrap();
-    ex.apply(ApplyCmd::StartNode { node_id: "p1".into() }, &p, now)
-        .unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "p1".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
     ex.apply(
         ApplyCmd::FinishNode {
             node_id: "p1".into(),
@@ -253,4 +271,40 @@ async fn fail_subtree_all_done_resume_runs_reducer_once() {
     let handle = within(rt.resume(&id)).await.unwrap();
     assert_eq!(within(handle.wait()).await, ExecutionState::Completed);
     assert_eq!(red.load(Ordering::SeqCst), 1);
+}
+
+/// Persist-then-emit still holds after RetryFailed recover: Failed leaf
+/// is re-invoked; Succeeded pred is not.
+#[tokio::test(flavor = "current_thread")]
+async fn resume_with_retry_failed_reruns_failed_leaf_not_succeeded() {
+    let store = MemoryStore::new();
+    let def = WorkflowDefinition::builder("wf")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register_fn("a", |_ctx: ExecutionContext| async {
+            NodeOutcome::failed("boom")
+        })
+        .build();
+    let handle = rt.start(def).unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Failed);
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register_fn("a", move |_ctx: ExecutionContext| {
+            c.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+        })
+        .build();
+    let h = within(rt.resume_with(&id, Recover::RetryFailed))
+        .await
+        .unwrap();
+    assert_eq!(within(h.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let snap = store.get(&id).await.unwrap().unwrap();
+    assert_eq!(snap.state, ExecutionState::Succeeded);
 }

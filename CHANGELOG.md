@@ -3,21 +3,24 @@
 ## Phase 4 RetryFailed (`phase-4/retry-failed`)
 
 [`Runtime::resume`] is still Continue: Failed stay Failed. [`Runtime::resume_with`]
-`Recover::RetryFailed` turns Failed/TimedOut into Pending (keep `attempt`;
-do not reset like Cancelled), recounts remain, then Ready-now only when
-`remain == 0` (next dispatch is attempt + 1). Leaves whose preds are still
-Succeeded become Ready. An AllDone join that itself Failed waits until
-retried preds are terminal again. Fail-fast/subtree Cancelled become
-Pending (Ready when preds Succeeded). Succeeded Bytes and Waiting tokens
+`Recover::RetryFailed` turns Failed/TimedOut/Cancelled into Pending through
+`set_state` (attempt 0, drop token/output; keep `last_error`), rebuilds
+remain, then Ready-now only when `remain == 0` (dispatch is attempt 1, a
+fresh [`RetryPolicy`] budget). A Succeeded AllDone join whose fan-in
+includes a retried pred goes Pending (output cleared) and re-runs after
+the pred Succeeded. An AllDone join that itself Failed waits
+(`remain > 0`) then re-runs. Leaves whose preds are still Succeeded
+become Ready. Non-consumer Succeeded nodes keep Bytes. Waiting tokens
 stay. Execution must be Failed or Completed-with-failures; Succeeded /
 Waiting / Cancelled → [`ResumeError::NotFailed`] (`ApplyError::Illegal`
-only; other apply errors are [`ResumeError::Apply`], not Store). Persist the recovered
-snapshot before dispatch; CAS still applies. New attempts use the
-definition `OnFailure` (fail-fast default unchanged). HITL is still
-[`ExecutionHandle::resume`] (`Resume::Complete` / `Reinvoke`). No cron, no
-per-node freshness, no EventLog, no NodeReady. Wait is still the Runtime
-drive (`next_drive_event`: inbox vs `Clock::wait_until`). Due T is
-`RetryDue` then dispatch — not TimedOut.
+only). Persist the recovered snapshot before dispatch (Ready-now on the
+store in that gap; `inspect` after resume_with is post-Restore). CAS
+still applies. New attempts use the definition `OnFailure` (fail-fast
+default unchanged). Token resume is still [`ExecutionHandle::resume`]
+(`Resume::Complete` / `Reinvoke`). No cron, no per-node freshness, no
+EventLog, no NodeReady. Wait is still the Runtime drive
+(`next_drive_event`: inbox vs `Clock::wait_until`). Due T is `RetryDue`
+then dispatch — not TimedOut.
 
 ## Phase 5 snapshot deadlines (`phase-5/timers`)
 
