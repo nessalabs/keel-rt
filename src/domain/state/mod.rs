@@ -943,7 +943,7 @@ mod tests {
                 now,
             )
             .unwrap();
-            let t = match ex.snapshot().node(&NodeId::new("park")).unwrap().state {
+            let t = match &ex.snapshot().node(&NodeId::new("park")).unwrap().state {
                 NodeState::Ready {
                     runnable_at: Some(at),
                 } => at,

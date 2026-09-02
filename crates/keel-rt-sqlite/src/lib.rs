@@ -1276,7 +1276,8 @@ mod tests {
             now,
         )
         .unwrap();
-        let live = exec.snapshot().node(&keel_rt::NodeId::new("a")).unwrap();
+        let live_snap = exec.snapshot();
+        let live = live_snap.node(&keel_rt::NodeId::new("a")).unwrap();
         assert!(live.last_error.is_some(), "live inspect has last_error");
         let t = match &live.state {
             keel_rt::NodeState::Ready {
