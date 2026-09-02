@@ -251,6 +251,162 @@ impl StateStore for StallAfterFirstPersist {
     }
 }
 
+fn fail_subtree_all_done_map_reduce() -> WorkflowDefinition {
+    WorkflowDefinition::builder("wf")
+        .on_failure(OnFailure::FailSubtree)
+        .node("p1", "e")
+        .node("p2", "e")
+        .node("join", "j")
+        .edge("p1", "join")
+        .edge("p2", "join")
+        .join("join", Join::AllDone)
+        .build()
+        .unwrap()
+}
+
+/// FailSubtree AllDone map-reduce × many: recover persist lands p1 Ready-now
+/// (join Pending, p2 still Succeeded), kill before StartNode, Continue
+/// re-invokes p1 and the join. Waiting until Running would not prove persist.
+#[test]
+fn retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many() {
+    const N: usize = 16;
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let def = fail_subtree_all_done_map_reduce();
+    let ids = {
+        let rt = current_rt();
+        let ids = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .register_fn("e", |ctx: ExecutionContext| async move {
+                    if ctx.node_id.as_str() == "p1" {
+                        NodeOutcome::failed("page")
+                    } else {
+                        NodeOutcome::Succeeded(Bytes::from_static(b"p2"))
+                    }
+                })
+                .register_fn("j", |_ctx: ExecutionContext| async {
+                    NodeOutcome::Succeeded(Bytes::from_static(b"join"))
+                })
+                .build();
+            let mut ids = Vec::with_capacity(N);
+            for i in 0..N {
+                let handle = runtime.start(def.clone()).unwrap();
+                let id = handle.execution_id().clone();
+                assert_eq!(
+                    handle.wait().await,
+                    ExecutionState::Completed,
+                    "exec {i} first run"
+                );
+                ids.push(id);
+            }
+            ids
+        });
+        drop(rt);
+        ids
+    };
+    for (i, id) in ids.iter().enumerate() {
+        let recovered = Arc::new(tokio::sync::Notify::new());
+        let hold = Arc::new(tokio::sync::Notify::new());
+        let stall = StallAfterFirstPersist {
+            inner: store.clone(),
+            recovered: recovered.clone(),
+            hold: hold.clone(),
+            first: AtomicU32::new(0),
+        };
+        let rt = current_rt();
+        rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(stall)
+                .register_fn("e", |_ctx: ExecutionContext| async {
+                    panic!("StartNode must not run; recover persist is stalled")
+                })
+                .register_fn("j", |_ctx: ExecutionContext| async {
+                    panic!("join must not dispatch before recover persist returns")
+                })
+                .build();
+            let resume_id = id.clone();
+            let task =
+                tokio::spawn(
+                    async move { runtime.resume_with(&resume_id, Recover::RetryFailed).await },
+                );
+            tokio::time::timeout(BOUND, recovered.notified())
+                .await
+                .unwrap_or_else(|_| panic!("exec {i}: recover persist must commit"));
+            let snap = store.get(id).await.unwrap().unwrap();
+            let p1 = snap.node(&NodeId::new("p1")).unwrap();
+            assert!(
+                matches!(p1.state, NodeState::Ready { runnable_at: None }),
+                "exec {i}: get() after recover persist must be Ready-now, got {:?}",
+                p1.state
+            );
+            assert!(
+                matches!(
+                    snap.node(&NodeId::new("p2")).unwrap().state,
+                    NodeState::Succeeded
+                ),
+                "exec {i}: succeeded page stays Succeeded"
+            );
+            assert!(
+                matches!(
+                    snap.node(&NodeId::new("join")).unwrap().state,
+                    NodeState::Pending
+                ),
+                "exec {i}: AllDone join is Pending after recover, got {:?}",
+                snap.node(&NodeId::new("join")).unwrap().state
+            );
+            assert_ne!(snap.state, ExecutionState::Failed);
+            assert_ne!(snap.state, ExecutionState::Completed);
+            task.abort();
+        });
+        drop(rt);
+    }
+    drop(store);
+    let store = SqliteStore::open(&path).unwrap();
+    let p1_runs = Arc::new(AtomicU32::new(0));
+    let p2_runs = Arc::new(AtomicU32::new(0));
+    let join_runs = Arc::new(AtomicU32::new(0));
+    let (c1, c2, cj) = (p1_runs.clone(), p2_runs.clone(), join_runs.clone());
+    let rt = current_rt();
+    rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store)
+            .register_fn("e", move |ctx: ExecutionContext| {
+                if ctx.node_id.as_str() == "p1" {
+                    c1.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    c2.fetch_add(1, Ordering::SeqCst);
+                }
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+            })
+            .register_fn("j", move |_ctx: ExecutionContext| {
+                cj.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"join2")) }
+            })
+            .build();
+        for (i, id) in ids.iter().enumerate() {
+            let handle = runtime.resume(id).await.unwrap();
+            assert_eq!(
+                handle.wait().await,
+                ExecutionState::Succeeded,
+                "exec {i} Continue after recover persist"
+            );
+        }
+    });
+    assert_eq!(
+        p1_runs.load(Ordering::SeqCst) as usize,
+        N,
+        "Continue from Ready-never-Running must re-invoke each failed page"
+    );
+    assert_eq!(p2_runs.load(Ordering::SeqCst), 0, "succeeded pages stay");
+    assert_eq!(
+        join_runs.load(Ordering::SeqCst) as usize,
+        N,
+        "AllDone join re-runs once per recovered execution"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn crash_diamond_join_runs_writer_once() {
     let path = tmp();

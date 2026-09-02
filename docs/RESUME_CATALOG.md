@@ -59,6 +59,8 @@ Sqlite adapter lines are not kernel `src/`.
 | Live handle + RetryFailed | `AlreadyActive` | `test: hitl_live_handle_retry_failed_is_already_active` |
 | Waiting after drop handle | RetryFailed is `NotFailed`; Continue keeps token; Complete works | `test: resume_with_retry_failed_on_waiting_then_continue_keeps_token` |
 | RetryFailed recover persist then kill before StartNode | store get is Ready-now (not Failed); Continue re-invokes | `test: retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes` |
+| RetryFailed FailSubtree AllDone map-reduce × many, kill before StartNode | each get() is p1 Ready-now / join Pending; Continue re-invokes p1 + join | `test: retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many` |
+| RetryFailed fail-fast diamond × N | Failed critic retried; Succeeded research not; Cancelled writer runs | `test: retry_failed_fail_fast_diamond_times_n` |
 | RetryFailed persist `Err` after apply | on-disk stays Failed; next `resume_with(RetryFailed)` works | `test: resume_with_retry_failed_persist_err_leaves_failed_then_retry_works` |
 | RetryFailed resets `RetryPolicy` budget | attempt 0; dispatch 1; max_attempts is a new budget | `test: resume_with_retry_failed_resets_retry_policy_budget` |
 | Adversarial RetryFailed | failed leaf re-run; persist-then-emit | `test: resume_with_retry_failed_reruns_failed_leaf_not_succeeded` |

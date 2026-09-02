@@ -13,7 +13,7 @@ use bytes::Bytes;
 use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
 use keel_rt::{
     AcceptPolicy, Event, ExecutionContext, ExecutionState, Executor, FunctionExecutor,
-    MemoryStore, NodeId, NodeOutcome, NodeState, Resume, RetryPolicy, Runtime, StateStore,
+    MemoryStore, NodeId, NodeOutcome, NodeState, Recover, Resume, RetryPolicy, Runtime, StateStore,
     WorkflowDefinition,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -821,6 +821,83 @@ async fn many_executions_8_concurrent() {
     }
     eprintln!(
         "workload many_executions_8_concurrent N={n} mix=one-Runtime-many-schedulers elapsed={} profile={}",
+        format_ms(started.elapsed()),
+        profile_name()
+    );
+}
+
+/// Fail-fast diamond × N: RetryFailed re-invokes the Failed node and cancelled
+/// successors; Succeeded research is not re-run.
+#[tokio::test(flavor = "current_thread")]
+async fn retry_failed_fail_fast_diamond_times_n() {
+    const N: usize = 64;
+    let started = Instant::now();
+    let store = MemoryStore::new();
+    let def = diamond_def();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .concurrency(4)
+        .register_fn("research", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"A"))
+        })
+        .register_fn("summarizer", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"S"))
+        })
+        .register_fn("critic", |_ctx: ExecutionContext| async {
+            NodeOutcome::failed("boom")
+        })
+        .register_fn("writer", |_ctx: ExecutionContext| async {
+            panic!("writer must not run on fail-fast")
+        })
+        .build();
+    let mut ids = Vec::with_capacity(N);
+    for i in 0..N {
+        let h = rt.start(def.clone()).expect("start");
+        let id = h.execution_id().clone();
+        let state = tokio::time::timeout(BOUND, h.wait())
+            .await
+            .unwrap_or_else(|_| panic!("fail-fast diamond {i} timed out"));
+        assert_eq!(state, ExecutionState::Failed);
+        ids.push(id);
+    }
+    let research = Arc::new(AtomicUsize::new(0));
+    let critic = Arc::new(AtomicUsize::new(0));
+    let writer = Arc::new(AtomicUsize::new(0));
+    let (rc, cc, wc) = (research.clone(), critic.clone(), writer.clone());
+    let rt = Runtime::builder()
+        .store(store)
+        .concurrency(4)
+        .register_fn("research", move |_ctx: ExecutionContext| {
+            rc.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::Succeeded(Bytes::from_static(b"A")) }
+        })
+        .register_fn("summarizer", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"S"))
+        })
+        .register_fn("critic", move |_ctx: ExecutionContext| {
+            cc.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::Succeeded(Bytes::from_static(b"C")) }
+        })
+        .register_fn("writer", move |_ctx: ExecutionContext| {
+            wc.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::Succeeded(Bytes::from_static(b"W")) }
+        })
+        .build();
+    for (i, id) in ids.iter().enumerate() {
+        let h = tokio::time::timeout(BOUND, rt.resume_with(id, Recover::RetryFailed))
+            .await
+            .unwrap_or_else(|_| panic!("RetryFailed {i} timed out"))
+            .unwrap();
+        let state = tokio::time::timeout(BOUND, h.wait())
+            .await
+            .unwrap_or_else(|_| panic!("RetryFailed wait {i} timed out"));
+        assert_eq!(state, ExecutionState::Succeeded);
+    }
+    assert_eq!(research.load(Ordering::SeqCst), 0, "Succeeded A stays");
+    assert_eq!(critic.load(Ordering::SeqCst), N, "Failed critic retried");
+    assert_eq!(writer.load(Ordering::SeqCst), N, "Cancelled writer runs");
+    eprintln!(
+        "workload retry_failed_fail_fast_diamond_times_n N={N} elapsed={} profile={}",
         format_ms(started.elapsed()),
         profile_name()
     );

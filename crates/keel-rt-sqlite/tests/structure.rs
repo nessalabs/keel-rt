@@ -101,6 +101,7 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "fn reader_lock_does_not_block_park_persist",
         "fn many_park_wakes_wal_stays_bounded",
         "fn retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes",
+        "fn retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many",
     ] {
         assert!(resume.contains(name), "resume.rs missing {name}");
     }

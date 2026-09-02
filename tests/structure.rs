@@ -348,6 +348,8 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "resume_with_retry_failed_persist_err_leaves_failed_then_retry_works",
         "hitl_live_handle_retry_failed_is_already_active",
         "retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes",
+        "retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many",
+        "retry_failed_fail_fast_diamond_times_n",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
