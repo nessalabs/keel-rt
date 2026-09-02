@@ -693,8 +693,8 @@ fn apply_path_does_not_sleep() {
 
     let rt = fs::read_to_string(src_root().join("runtime/runtime.rs")).unwrap();
     assert!(
-        rt.contains("clock.wait_until(when)"),
-        "Runtime drive is the allowed waiter: inbox vs Clock::wait_until(T)"
+        rt.contains("clock.wait_until(t)") && rt.contains("clock.wait_until(h)"),
+        "Runtime drive is the allowed waiter: inbox vs Clock::wait_until(T) and heartbeat"
     );
     assert!(
         rt.contains("async fn next_drive_event"),
