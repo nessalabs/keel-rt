@@ -15,7 +15,11 @@ cancels; complete does not revive Cancelled. Unknown token is
 Failed Complete uses definition `OnFailure` (fail-fast default).
 
 Cross-process HTTP is [`keel-rt-http`]: `POST /complete` with token + Resume.
-The kernel crate does not depend on it. No cron, no EventLog, no NodeReady.
+A shared secret is required (`Authorization: Bearer …` or `X-Keel-Complete`).
+Missing/wrong secret is 401. Default bind is `127.0.0.1` only (`serve_on`
+is the explicit 0.0.0.0 path). Body larger than 1 MiB is 413 and does not
+complete. [`ResumeToken`] nonce is a 128-bit mix (not a counter). The kernel
+crate does not depend on the HTTP crate. No cron, no EventLog, no NodeReady.
 
 ## Phase 4 RetryFailed (`phase-4/retry-failed`)
 

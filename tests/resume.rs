@@ -9,12 +9,12 @@ use keel_rt::{
     AcceptPolicy, ApplyCmd, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
     ExecutionState, FnSink, Join, MemoryStore, NodeId, NodeOutcome, NodeState, OnFailure, Recover,
     Resume, ResumeError, RetryPolicy, Runtime, SnapshotError, StateStore, StoreError, Timestamp,
-    WorkflowDefinition, SCHEMA_VERSION,
+    WorkflowDefinition, DEFAULT_CANCEL_BOUND, SCHEMA_VERSION,
 };
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BOUND: Duration = Duration::from_secs(5);
 
@@ -1618,11 +1618,11 @@ async fn complete_store_persist_err_is_store() {
     drop(rt);
     enable("store.put", 1);
     let rt = Runtime::builder()
-        .store_arc(store as Arc<dyn StateStore>)
+        .store_arc(store.clone() as Arc<dyn StateStore>)
         .build();
     match rt
         .complete(
-            token,
+            token.clone(),
             Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
         )
         .await
@@ -1630,7 +1630,31 @@ async fn complete_store_persist_err_is_store() {
         Err(CompleteError::Store(_)) => {}
         other => panic!("{other:?}"),
     }
+    let snap = store.get(token.execution_id()).await.unwrap().unwrap();
+    assert_eq!(snap.state, ExecutionState::Waiting);
+    assert!(matches!(
+        snap.node(&NodeId::new("hold")).unwrap().state,
+        NodeState::Waiting { .. }
+    ));
     disable("store.put");
+    let id = token.execution_id().clone();
+    rt.complete(
+        token,
+        Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
+    )
+    .await
+    .unwrap();
+    within(async {
+        loop {
+            if let Some(s) = store.get(&id).await.unwrap() {
+                if s.state == ExecutionState::Succeeded {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1774,4 +1798,258 @@ async fn complete_schema_mismatch_is_snapshot() {
         Err(CompleteError::Snapshot(SnapshotError::SchemaMismatch { found: 99, .. })) => {}
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_token_from_a_does_not_apply_to_b() {
+    let rt = Runtime::builder().build();
+    let ha = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let hb = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    within(ha.wait_stable()).await;
+    within(hb.wait_stable()).await;
+    let token_a = ha
+        .inspect()
+        .await
+        .node(&NodeId::new("hold"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .unwrap();
+    let token_b = hb
+        .inspect()
+        .await
+        .node(&NodeId::new("hold"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .unwrap();
+    rt.complete(
+        token_a.clone(),
+        Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"a"))),
+    )
+    .await
+    .unwrap();
+    within(ha.wait()).await;
+    assert_eq!(hb.inspect().await.state, ExecutionState::Waiting);
+    let mut forged = serde_json::to_value(&token_a).unwrap();
+    forged["execution_id"] = serde_json::json!(token_b.execution_id().as_str());
+    let forged: keel_rt::ResumeToken = serde_json::from_value(forged).unwrap();
+    match rt
+        .complete(
+            forged,
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"nope"))),
+        )
+        .await
+    {
+        Err(CompleteError::UnknownToken) => {}
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(hb.inspect().await.state, ExecutionState::Waiting);
+    hb.cancel().await;
+    within(hb.wait()).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_is_waiting_not_ready_t_and_clock_does_not_complete() {
+    let clock = Arc::new(FakeClock::new());
+    let rt = Runtime::builder().clock(clock.clone()).build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    within(handle.wait_stable()).await;
+    let snap = handle.inspect().await;
+    match &snap.node(&NodeId::new("hold")).unwrap().state {
+        NodeState::Waiting { .. } => {}
+        other => panic!("wait must be Waiting, not {other:?}"),
+    }
+    clock.advance(Duration::from_secs(3600));
+    tokio::task::yield_now().await;
+    assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
+    handle.cancel().await;
+    within(handle.wait()).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_while_fail_fast_already_cancelled_wait() {
+    let release = Arc::new(AtomicBool::new(false));
+    let r = release.clone();
+    let rt = Runtime::builder()
+        .register_fn("boom", move |_ctx: ExecutionContext| {
+            let r = r.clone();
+            async move {
+                while !r.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+                NodeOutcome::failed("boom")
+            }
+        })
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .node("boom", "boom")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let token = within(async {
+        loop {
+            let snap = handle.inspect().await;
+            if let Some(t) = snap
+                .node(&NodeId::new("hold"))
+                .and_then(|n| n.resume_token.clone())
+            {
+                if matches!(
+                    snap.node(&NodeId::new("hold")).unwrap().state,
+                    NodeState::Waiting { .. }
+                ) {
+                    return t;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    release.store(true, Ordering::SeqCst);
+    within(async {
+        loop {
+            let snap = handle.inspect().await;
+            if let Some(n) = snap.node(&NodeId::new("hold")) {
+                if matches!(n.state, NodeState::Cancelled) || snap.state.is_terminal() {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    match rt
+        .complete(
+            token,
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"late"))),
+        )
+        .await
+    {
+        Err(CompleteError::Cancelled) => {}
+        other => panic!("{other:?}"),
+    }
+    within(handle.wait()).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_256_wait_nodes_then_hang_bound_cancels() {
+    let mut b = WorkflowDefinition::builder("wf");
+    for i in 0..256 {
+        b = b.node(format!("w{i}"), "wait");
+    }
+    let def = b.build().unwrap();
+    let rt = Runtime::builder()
+        .cancel_bound(DEFAULT_CANCEL_BOUND)
+        .concurrency(32)
+        .build();
+    let handle = rt.start(def).unwrap();
+    within(handle.wait_stable()).await;
+    let snap = handle.inspect().await;
+    let started = Instant::now();
+    for i in 0..256 {
+        let token = snap
+            .node(&NodeId::new(format!("w{i}")))
+            .unwrap()
+            .resume_token
+            .clone()
+            .expect("token");
+        rt.complete(
+            token,
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"g"))),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    eprintln!(
+        "complete_256_wait_nodes elapsed_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+
+    let parked = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    within(parked.wait_stable()).await;
+    let t0 = Instant::now();
+    parked.cancel().await;
+    assert_eq!(within(parked.wait()).await, ExecutionState::Cancelled);
+    assert!(
+        t0.elapsed() < DEFAULT_CANCEL_BOUND * 20,
+        "hang bound must still cancel a parked wait, elapsed={:?}",
+        t0.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn guessed_sequential_nonces_do_not_complete() {
+    let rt = Runtime::builder().build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    within(handle.wait_stable()).await;
+    let real = handle
+        .inspect()
+        .await
+        .node(&NodeId::new("hold"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .unwrap();
+    for i in 1u128..=32 {
+        let guess: keel_rt::ResumeToken = serde_json::from_value(serde_json::json!({
+            "execution_id": real.execution_id().as_str(),
+            "node_id": "hold",
+            "attempt": 1,
+            "nonce": format!("{i:032x}")
+        }))
+        .unwrap();
+        match rt
+            .complete(
+                guess,
+                Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
+            )
+            .await
+        {
+            Err(CompleteError::UnknownToken) => {}
+            other => panic!("guess {i} {other:?}"),
+        }
+    }
+    assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
+    handle.cancel().await;
+    within(handle.wait()).await;
 }

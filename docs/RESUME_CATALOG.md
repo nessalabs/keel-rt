@@ -66,7 +66,19 @@ Sqlite adapter lines are not kernel `src/`.
 | `complete` unknown token | `CompleteError::UnknownToken` | `test: complete_unknown_token_errors` `test: complete_unknown_token_is_unknown` |
 | `complete` after Drop/cancel | `CompleteError::Cancelled`; run stays Cancelled | `test: complete_after_drop_handle_does_not_revive` |
 | Engine-down complete (new Runtime, same store) | apply + persist + drive; successor runs | `test: complete_from_store_after_engine_down_unblocks_wait` `test: complete_after_sqlite_kill_new_runtime_unblocks_wait` |
-| HTTP adapter `POST /complete` | another process → `Runtime::complete` | `test: post_complete_unblocks_wait_node` (crate `keel-rt-http`) |
+| HTTP adapter `POST /complete` | another process → `Runtime::complete`; secret required; loopback default | `test: post_complete_unblocks_wait_node` `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` (crate `keel-rt-http`) |
+| HTTP missing/wrong secret | 401; does not complete | `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` `test: post_query_secret_is_still_401` |
+| HTTP oversized body | 413/400; snapshot stays Waiting | `test: post_oversized_body_is_413_does_not_complete` |
+| HTTP replay after success / cancel | 200 noop / 409 Cancelled | `test: post_duplicate_complete_is_200_noop` `test: post_after_cancel_is_409_does_not_revive` |
+| Two HTTP completes one token | one Succeeded; downstream once | `test: two_http_completes_one_token_downstream_runs_once` |
+| HTTP Reinvoke then stale Complete | new token; old token 404 | `test: post_reinvoke_then_stale_complete_is_404` |
+| `ResumeToken` nonce | 128-bit mix; not sequential ints; not guessable from id | `test: resume_tokens_are_not_sequential_ints` `test: guessed_sequential_nonces_do_not_complete` |
+| Token binds execution | A's token does not complete B | `test: complete_token_from_a_does_not_apply_to_b` |
+| persist Err on complete | snapshot stays Waiting; retry works | `test: complete_store_persist_err_is_store` |
+| Wait is not Ready{T} | clock advance does not auto-complete | `test: wait_is_waiting_not_ready_t_and_clock_does_not_complete` |
+| complete vs fail-fast cancel | Cancelled; does not revive | `test: complete_while_fail_fast_already_cancelled_wait` |
+| 256 concurrent waits then complete | hang bound still cancels | `test: complete_256_wait_nodes_then_hang_bound_cancels` |
+| Two Runtimes one file both complete | **unfenced**; both may Ok | `test: two_runtimes_same_file_both_may_complete` |
 | Crash after Running persist | file reopens (no leaked lock); Running re-invoked | `test: crash_after_running_persist_releases_lock_and_reinvokes` `test: crash_during_b_running_reinvokes_b_not_a` |
 | Drop handle after Running persist | **graph** cancel; resume stays Cancelled (not crash) | `test: drop_handle_after_running_persist_cancels_not_reinvoke` |
 | Fat `Bytes` snapshot | MemoryStore refcount; sqlite JSON copy preserves bytes | `test: fat_bytes_resume_join_is_refcount` `test: fat_bytes_sqlite_round_trip_preserves_bytes` `test: fat_payloads_64kib_times_eight_persist_resume` `test: fat_payloads_64kib_times_32_persist_resume_within_bound` `test: fat_bytes_join_input_is_refcount_not_copy` |
@@ -105,7 +117,7 @@ Standing high-load / messy-user attacks (not coverage): [`docs/CHAOS_LOG.md`](CH
 ## Documented no-fence
 
 `AlreadyActive` is **per Runtime**. Two processes (or two `Runtime`s) on one
-sqlite file can both `resume` and both re-invoke a Running node. CAS rejects
+sqlite file can both `resume` / both `complete` a Waiting node. CAS rejects
 a stale `put`; the loser’s in-memory apply is not rolled back (persist fail
 skips emit). Callers that need a lease do it outside the kernel. ADR 0004.
 

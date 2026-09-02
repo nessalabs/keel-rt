@@ -4,6 +4,34 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Wait / gate (`sdk/wait-gate`, 2026-09-02)
+
+`ResumeToken::issue` mixes a process key with a counter (no per-token
+syscall). `apply` persist path unchanged. HTTP secret/bind/body cap live
+only in `keel-rt-http`. Two Runtimes on one sqlite file stay **unfenced**.
+
+### MemoryStore no-timer medians vs Phase 5 column
+
+| bench | phase-5/timers | this PR (n=7) | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 | 4.563 ms | 4.435 ms | −2.8% |
+| deep_chain_128 | 2.054 ms | 2.022 ms | −1.6% |
+| diamond_10k | 165.753 ms | 160.756 ms | −3.0% |
+| apply_only | 15.013 ms | 15.045 ms | +0.2% |
+
+All four inside the 10% band. **No revert.** (A first pass printed
+wide=5.285 ms / +15.8%; rerun 4.435 ms — debug noise, apply_only stable.)
+
+### Wait + complete (this VM, debug)
+
+| path | n | elapsed |
+|---|---:|---:|
+| 256 concurrent wait nodes then complete (MemoryStore) | 1 | 1.853 ms |
+| HTTP `POST /complete` 32 parked waits (loopback + secret) | 1 | 10.723 ms |
+| sqlite complete-after-crash (new Runtime, same file, no HTTP) | 1 | 4.452 ms |
+
+Hang bound still cancels a parked wait (`complete_256_wait_nodes_then_hang_bound_cancels`).
+
 ## Phase 5 snapshot deadlines (2026-09-01)
 
 T is `Ready { runnable_at: Some(T) }` on the snapshot. FakeClock park; no

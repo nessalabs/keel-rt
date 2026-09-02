@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 /// Stable node identity. Clones are refcount bumps (`Arc<str>`).
@@ -194,24 +194,55 @@ impl fmt::Display for ExecutorId {
     }
 }
 
-/// Bound to `(execution, node, attempt)` plus a nonce so tokens are not interchangeable.
+/// Bound to `(execution, node, attempt)` plus a 128-bit nonce so tokens
+/// are not interchangeable or guessable from the id alone.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResumeToken {
     execution_id: ExecutionId,
     node_id: NodeId,
     attempt: u32,
-    nonce: u64,
+    #[serde(serialize_with = "ser_nonce", deserialize_with = "de_nonce")]
+    nonce: u128,
 }
 
 static TOKEN_SEQ: AtomicU64 = AtomicU64::new(1);
+static PROCESS_KEY: OnceLock<u128> = OnceLock::new();
+
+fn process_key() -> u128 {
+    *PROCESS_KEY.get_or_init(|| {
+        let mut b = [0u8; 16];
+        let _ = getrandom::getrandom(&mut b);
+        u128::from_le_bytes(b) | 1
+    })
+}
+
+/// SplitMix-style mix: one atomic + arithmetic, no per-token syscall.
+/// Consecutive `issue` values are not sequential integers.
+fn mix_nonce(seq: u64) -> u128 {
+    let key = process_key();
+    let mut z = key ^ ((seq as u128) << 64 | seq as u128);
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835);
+    z = (z ^ (z >> 64)).wrapping_mul(0xBF58_476D_1CE4_E5B9_2917_F0D7_C8C5_D3A5);
+    z ^ (z >> 64)
+}
+
+fn ser_nonce<S: Serializer>(n: &u128, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format!("{n:032x}"))
+}
+
+fn de_nonce<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
+    let raw = String::deserialize(d)?;
+    u128::from_str_radix(&raw, 16).map_err(serde::de::Error::custom)
+}
 
 impl ResumeToken {
     pub fn issue(execution_id: ExecutionId, node_id: NodeId, attempt: u32) -> Self {
+        let seq = TOKEN_SEQ.fetch_add(1, Ordering::Relaxed);
         Self {
             execution_id,
             node_id,
             attempt,
-            nonce: TOKEN_SEQ.fetch_add(1, Ordering::Relaxed),
+            nonce: mix_nonce(seq),
         }
     }
 
@@ -227,7 +258,7 @@ impl ResumeToken {
         self.attempt
     }
 
-    pub fn nonce(&self) -> u64 {
+    pub fn nonce(&self) -> u128 {
         self.nonce
     }
 }
@@ -254,5 +285,42 @@ mod tests {
         assert_eq!(DefinitionHash::parse("abc").unwrap().as_str(), "abc");
         assert!(DefinitionHash::default().is_empty());
         assert_eq!(DefinitionHash::parse("abc").unwrap().to_string(), "abc");
+    }
+
+    #[test]
+    fn resume_tokens_are_not_sequential_ints() {
+        let e = ExecutionId::parse("exec-1").unwrap();
+        let n = NodeId::new("hold");
+        let a = ResumeToken::issue(e.clone(), n.clone(), 1);
+        let b = ResumeToken::issue(e, n, 1);
+        assert_ne!(a.nonce(), b.nonce());
+        assert_ne!(
+            a.nonce().abs_diff(b.nonce()),
+            1,
+            "consecutive issue() must not be sequential integers"
+        );
+        assert_ne!(a.nonce(), 1);
+        assert_ne!(b.nonce(), 2);
+    }
+
+    #[test]
+    fn resume_token_nonce_round_trips_as_hex_not_guessable_from_id() {
+        let e = ExecutionId::parse("exec-1").unwrap();
+        let n = NodeId::new("hold");
+        let t = ResumeToken::issue(e.clone(), n.clone(), 1);
+        let v = serde_json::to_value(&t).unwrap();
+        let hex = v["nonce"].as_str().expect("nonce is hex, not a JSON int");
+        assert_eq!(hex.len(), 32);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+        let back: ResumeToken = serde_json::from_value(v).unwrap();
+        assert_eq!(back.nonce(), t.nonce());
+        let guess: ResumeToken = serde_json::from_value(serde_json::json!({
+            "execution_id": e.as_str(),
+            "node_id": "hold",
+            "attempt": 1,
+            "nonce": "00000000000000000000000000000001"
+        }))
+        .unwrap();
+        assert_ne!(guess.nonce(), t.nonce());
     }
 }

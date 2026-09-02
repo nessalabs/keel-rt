@@ -241,7 +241,7 @@ edit `scheduler.rs`.
 | File-backed store                            | `crates/keel-rt-sqlite`                    | `scheduler.rs` / kernel `Cargo.toml` |
 | Snapshot resume / CAS                        | `restore.rs` + `Runtime::resume`           | event replay              |
 | RetryFailed recover                          | `apply` + `Runtime::resume_with`           | `handle.resume` (token)   |
-| Wait / gate complete                         | `Wait` + `Runtime::complete`               | HTTP crate                |
+| Wait / gate complete                         | `Wait` + `Runtime::complete`               | HTTP crate (secret/bind)  |
 | Cancel, wait, token-resume, inspect          | `handle` + `inject::Event`                 | domain types              |
 | Ready-queue / permits / spawn                | `scheduler` + `spawn`                      | `Policy`                  |
 | Test graph construction                      | `WorkflowTest`                             | private scheduler fields  |

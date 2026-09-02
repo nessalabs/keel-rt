@@ -671,6 +671,150 @@ fn complete_after_sqlite_kill_new_runtime_unblocks_wait() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Unfenced: two Runtimes on one Waiting sqlite file may both complete.
+#[test]
+fn two_runtimes_same_file_both_may_complete() {
+    let path = tmp();
+    let token = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let token = rt.block_on(async {
+            let runtime = Runtime::builder().store(store.clone()).build();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("hold", "wait")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            let id = handle.execution_id().clone();
+            wait_node(&store, &id, "hold", |s| {
+                matches!(s, NodeState::Waiting { .. })
+            })
+            .await;
+            let token = store
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&NodeId::new("hold"))
+                .unwrap()
+                .resume_token
+                .clone()
+                .expect("token");
+            std::mem::forget(handle);
+            drop(runtime);
+            token
+        });
+        drop(rt);
+        drop(store);
+        token
+    };
+    let store_a = SqliteStore::open(&path).unwrap();
+    let store_b = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let ra = Runtime::builder().store(store_a).build();
+        let rb = Runtime::builder().store(store_b).build();
+        let outcome = Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"g")));
+        let (a, b) = tokio::join!(
+            ra.complete(token.clone(), outcome.clone()),
+            rb.complete(token, outcome)
+        );
+        let oks = u8::from(a.is_ok()) + u8::from(b.is_ok());
+        assert!(
+            oks >= 1,
+            "at least one complete must apply; both may (unfenced) a={a:?} b={b:?}"
+        );
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Engine-down complete timing (store path, no HTTP / no secret).
+#[test]
+fn complete_after_sqlite_kill_reports_ms() {
+    let path = tmp();
+    let (id, token) = {
+        let store = SqliteStore::open(&path).unwrap();
+        let rt = current_rt();
+        let out = rt.block_on(async {
+            let runtime = Runtime::builder()
+                .store(store.clone())
+                .register_fn("next", |_c: ExecutionContext| async {
+                    NodeOutcome::Succeeded(Bytes::from_static(b"next"))
+                })
+                .build();
+            let handle = runtime
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("hold", "wait")
+                        .node("next", "next")
+                        .edge("hold", "next")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            let id = handle.execution_id().clone();
+            wait_node(&store, &id, "hold", |s| {
+                matches!(s, NodeState::Waiting { .. })
+            })
+            .await;
+            let token = store
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .node(&NodeId::new("hold"))
+                .unwrap()
+                .resume_token
+                .clone()
+                .expect("token");
+            std::mem::forget(handle);
+            drop(runtime);
+            (id, token)
+        });
+        drop(rt);
+        drop(store);
+        out
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let runtime = Runtime::builder()
+            .store(store.clone())
+            .register_fn("next", |_c: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"next"))
+            })
+            .build();
+        let started = std::time::Instant::now();
+        runtime
+            .complete(
+                token,
+                Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate"))),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(BOUND, async {
+            loop {
+                if let Some(snap) = store.get(&id).await.unwrap() {
+                    if snap.state == ExecutionState::Succeeded {
+                        return;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("complete must drive successor");
+        eprintln!(
+            "sqlite_complete_after_crash elapsed_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn resume_twice_live_is_already_active() {
     let path = tmp();

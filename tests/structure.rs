@@ -394,6 +394,11 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "complete_from_store_after_engine_down_unblocks_wait",
         "complete_after_sqlite_kill_new_runtime_unblocks_wait",
         "complete_unknown_token_errors",
+        "complete_token_from_a_does_not_apply_to_b",
+        "complete_store_persist_err_is_store",
+        "two_runtimes_same_file_both_may_complete",
+        "complete_256_wait_nodes_then_hang_bound_cancels",
+        "resume_tokens_are_not_sequential_ints",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }

@@ -71,7 +71,8 @@ A definition may `.node("hold", "wait")` without registering an executor.
 Another task or process calls `rt.complete(token, Resume::Complete(...))`.
 If that Runtime already owns the live drive, complete injects. If the engine
 is down, a new Runtime on the same store applies, persists, and drives.
-`keel-rt-http` exposes `POST /complete` for another binary. **Drop cancels.**
+`keel-rt-http` exposes `POST /complete` for another binary. The adapter
+requires a shared secret and binds `127.0.0.1` by default. **Drop cancels.**
 
 `start` returns a handle when you need `wait_stable` + token `resume` or
 inspect. `wait()` is terminal only; Waiting is not done.
