@@ -46,7 +46,7 @@ row is `test:` (existing proof) or `gap-closed-by:` (new named test). **Zero MIS
 | At-least-once executor invoke | second invoke on retry is intentional | `test: retry_is_at_least_once_two_execute_invocations` |
 | Fail-fast × AllSucceeded | default | `test: all_succeeded_reducer_with_failed_pred_terminates` `test: diamond_fail_execution_still_fail_fasts` |
 | Fail-fast × AllDone | reducer never ready; execution still terminates | `gap-closed-by: fail_execution_all_done_reducer_never_runs_but_terminates` |
-| FailSubtree × AllSucceeded | opt-in | `test: diamond_fail_subtree_all_succeeded_completes` `test: fanin_all_succeeded_reducer_cancelled` |
+| FailSubtree × AllSucceeded | opt-in | `test: diamond_fail_subtree_all_succeeded_completes` `test: fanin_all_succeeded_reducer_cancelled` `test: fail_subtree_parked_sibling_not_in_subtree_stays_parked` |
 | FailSubtree × AllDone | opt-in; mixed terminals | `test: fanin_all_done_reducer_runs` `test: mixed_timed_out_failed_succeeded_fanin_all_done` |
 | Fan-in mixed / straggler / hourglass | exist; hourglass+fail was untested | `test: mixed_timed_out_failed_succeeded_fanin_all_done` `test: straggler_join` `test: hourglass` `gap-closed-by: hourglass_neck_fail_cancels_sinks_and_terminates` |
 | Empty / cycle / unknown executor / unknown join node | DefinitionError | `test: empty_graph_rejected` `test: cycle_is_rejected` `test: start_unknown_executor_errors_and_nothing_runs` `gap-closed-by: join_unknown_node_is_disconnected` |
@@ -167,6 +167,7 @@ exactly-once must make the executor idempotent.
 | Nested FailSubtree | uncle/writer run; down Cancelled | `nested_fail_subtree_uncle_writer_runs` | subtree only |
 | Hourglass neck fail, FailExecution | sources Succeeded; sinks Cancelled never started; execution Failed | `hourglass` (success); **gap-closed-by:** `hourglass_neck_fail_cancels_sinks_and_terminates` | fail-fast |
 | TimedOut + FailSubtree | descendants Cancelled, siblings live | `timeout_fail_subtree_siblings_live` | FailSubtree |
+| FailSubtree + parked sibling not in subtree | sibling stays `Ready { T }`; default FailExecution still cancels everyone | `fail_subtree_parked_sibling_not_in_subtree_stays_parked` | subtree only |
 | User cancel under FailSubtree | whole graph Cancelled | `user_cancel_overrides_fail_subtree` | cancel wins |
 
 ## HITL / resume
@@ -237,6 +238,17 @@ exactly-once must make the executor idempotent.
 | `ctx.sleep` uses public Clock | FakeClock sleep, not wall | `ctx_sleep_uses_public_clock` | Clock port |
 | Clock not advancing | retry stays attempt 1 across yields | `paused_clock_retry_does_not_busy_spin` | park on Notify |
 | FakeClock lost-wake | sleep still completes | `sleep_does_not_lose_advance_notify` | subscribe-before-check |
+| Crash while parked on T | restore same `runnable_at`; advance FakeClock to fire | `start_timeout_retry_crash_during_backoff_resume_advance_succeeds` `crash_resume_full_file_keeps_deadline` | snapshot T |
+| Due T on resume | dispatch once, not twice | `persisted_deadline_already_due_on_resume_runs_once_not_twice` `sqlite_deadline_persist_does_not_drop_or_double_fire` | RetryDue + park |
+| Cancel during parked T | Cancelled; live_sleeps == 0 | `cancel_during_parked_deadline_is_cancelled_sleeper_dropped` `cancel_while_drive_waits_on_future_t_drops_waiter` | RAII Drop |
+| Cancel vs due T same instant | Cancel wins; no retry dispatch | `cancel_when_deadline_already_due_does_not_dispatch` `due_deadline_prefers_queued_cancel` `due_t_hung_wait_until_inbox_cancel_does_not_dispatch` `due_deadline_does_not_call_wait_until` | drive try_recv inbox first |
+| Hung `wait_until` / `Timestamp::MAX` | hang bound / cancel still terminates | `hung_wait_until_hang_bound_still_cancels` `timestamp_max_deadline_cancel_returns_without_thread_sleep` | CancelBoundGuard + inbox |
+| 256 parked, one advance | each node once | `wide_256_parked_advance_once_each_fires_once` `crash_resume_256_parked_advance_once_each_once` | Timer drain |
+| last_persisted on park resume | no extra persist | `resume_parked_does_not_open_extra_persist` | seed from snapshot |
+| persist dirty T→T' | column updates; JSON body reused | `dirty_persist_ready_t_to_t_prime_updates_only_runnable_at` | `upsert_dirty_nodes` UPDATE |
+| FailSubtree + parked sibling | sibling keeps `Ready { T }` | `fail_subtree_parked_sibling_keeps_deadline` `fail_subtree_parked_sibling_not_in_subtree_stays_parked` | successors only |
+| StartNode on due T | `ApplyError::Illegal`; RetryDue first | `start_node_on_due_t_is_illegal_without_retry_due` | Ready{None} only |
+| Snapshot Display of Ready{T} | `Ready(42)` | `snapshot_display_names_every_execution_and_node_state` | `NodeState` Display |
 
 ## Ids / snapshots / Display
 
@@ -246,7 +258,8 @@ exactly-once must make the executor idempotent.
 | `SCHEMA_VERSION` on live snapshot | `1` | `live_snapshot_carries_schema_version_1` | constant |
 | MemoryStore after Failed / Cancelled / Completed | stored snapshot matches terminal | **gap-closed-by:** `memory_store_persists_failed_cancelled_completed_terminals` | persist |
 | Display every `Event` | each variant names itself | `event_display_covers_every_variant` | Display |
-| Display every `NodeState` / `ExecutionState` | each variant names itself | `node_state_and_execution_state_display_covers_every_variant` / `snapshot_display_names_every_execution_and_node_state` | Display |
+| Display every `NodeState` / `ExecutionState` | each variant names itself; parked Ready prints `Ready(T)` | `node_state_and_execution_state_display_covers_every_variant` / `snapshot_display_names_every_execution_and_node_state` | Display |
+| Inspect parked Ready{T} after persist | `last_error` round-trips (MemoryStore and sqlite); T is the column | `memory_store_parked_ready_round_trips_last_error` / `parked_ready_t_uses_column_omits_nested_json_keeps_last_error` | persist |
 
 ## ADR 0001 / persist backpressure
 

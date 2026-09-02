@@ -40,8 +40,8 @@ pub(crate) enum Event {
 ///
 /// Ownership: [`crate::runtime::handle::ExecutionHandle`] holds a sender clone
 /// (Drop sends `Cancel` if not consumed, then always `Shutdown`). The
-/// scheduler task holds the receiver (`ChannelPark`) and another sender
-/// (cancel-bound timer). Each execute task holds a sender for `NodeFinished`.
+/// Runtime drive loop holds the receiver and another sender (cancel-bound
+/// timer). Each execute task holds a sender for `NodeFinished`.
 /// Last sender drop closes the channel; `recv` then yields `Shutdown`.
 pub(crate) type EventTx = mpsc::UnboundedSender<Event>;
 pub(crate) type EventRx = mpsc::UnboundedReceiver<Event>;

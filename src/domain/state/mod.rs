@@ -13,9 +13,20 @@ use thiserror::Error;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeState {
     Pending,
-    Ready { runnable_at: Option<Timestamp> },
-    Running { attempt: u32 },
-    Waiting { token: ResumeToken, attempt: u32 },
+    /// Dispatchable now (`runnable_at: None`) or parked until **T**
+    /// (`Some(T)`). T is a [`Timestamp`] (u64 millis) — the snapshot
+    /// deadline for retry backoff. Waiting is an executor yield, not a timer.
+    Ready {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runnable_at: Option<Timestamp>,
+    },
+    Running {
+        attempt: u32,
+    },
+    Waiting {
+        token: ResumeToken,
+        attempt: u32,
+    },
     Succeeded,
     Failed,
     Cancelled,
@@ -30,6 +41,11 @@ impl NodeState {
         )
     }
 
+    /// True for `Ready { None }` or `Ready { Some(at) }` when `at <= now`.
+    ///
+    /// This is not “call [`ApplyCmd::StartNode`]”. `StartNode` still requires
+    /// `Ready { runnable_at: None }`. A due `Some(T)` must go
+    /// [`ApplyCmd::RetryDue`] first (Runtime `Event::Timer` path).
     pub fn is_ready_now(&self, now: Timestamp) -> bool {
         match self {
             Self::Ready { runnable_at: None } => true,
@@ -176,11 +192,27 @@ pub enum ApplyError {
 #[derive(Clone, Debug)]
 pub enum ApplyCmd {
     Start,
-    StartNode { node_id: NodeId },
-    FinishNode { node_id: NodeId, attempt: u32, outcome: Result<NodeOutcome, String> },
-    Resume { token: ResumeToken, resume: Resume },
+    /// Dispatch a `Ready { runnable_at: None }` node. Illegal on `Some(T)`
+    /// even when `is_ready_now` is true — apply [`Self::RetryDue`] first.
+    StartNode {
+        node_id: NodeId,
+    },
+    FinishNode {
+        node_id: NodeId,
+        attempt: u32,
+        outcome: Result<NodeOutcome, String>,
+    },
+    Resume {
+        token: ResumeToken,
+        resume: Resume,
+    },
     Cancel,
-    RetryDue { node_id: NodeId },
+    /// Clear a due `Ready { runnable_at: Some(T) }` (`at <= now`) to
+    /// `Ready { None }` so [`Self::StartNode`] can dispatch. No-op if T is
+    /// still in the future, the node is not parked, or the execution is cancelled.
+    RetryDue {
+        node_id: NodeId,
+    },
     ForceCancelRunning,
 }
 
@@ -277,6 +309,8 @@ impl Execution {
         self.nodes.get(slot.0)
     }
 
+    /// See [`NodeState::is_ready_now`]. Due `Ready { Some(T) }` is true here
+    /// but [`ApplyCmd::StartNode`] is still illegal until [`ApplyCmd::RetryDue`].
     pub fn is_ready_now(&self, id: &NodeId, now: Timestamp) -> bool {
         self.node(id)
             .map(|n| n.state.is_ready_now(now))
@@ -323,11 +357,16 @@ impl Execution {
 
     pub(crate) fn node_snapshot_at(&self, slot: NodeSlot) -> NodeSnapshot {
         let n = &self.nodes[slot.0];
+        let resume_token = match &n.state {
+            NodeState::Waiting { token, .. } => Some(token.clone()),
+            NodeState::Running { .. } => n.resume_token.clone(),
+            _ => None,
+        };
         NodeSnapshot {
             state: n.state.clone(),
             output: n.output.clone(),
             attempt: n.attempt,
-            resume_token: n.resume_token.clone(),
+            resume_token,
             last_error: n.last_error.clone(),
         }
     }
@@ -390,7 +429,8 @@ impl Execution {
         self.nodes[slot.0].resume_token.clone()
     }
 
-    /// Next retry deadline. Maintained when a node enters `Ready { runnable_at: Some }`.
+    /// Next snapshot deadline T (`Ready { runnable_at: Some(T) }`). The
+    /// Runtime drive loop waits until this [`Timestamp`]. Waiting is not consulted.
     pub fn next_deadline(&self) -> Option<(Timestamp, NodeId)> {
         self.next_deadline
             .map(|(ts, slot)| (ts, self.definition.id_at(slot).clone()))
@@ -538,8 +578,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -554,8 +600,14 @@ mod tests {
             ex.node(&NodeId::new("c")).unwrap().state,
             NodeState::Pending
         ));
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "b".into(),
@@ -584,8 +636,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex
             .apply(
                 ApplyCmd::FinishNode {
@@ -637,10 +695,22 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex
             .apply(
                 ApplyCmd::FinishNode {
@@ -668,8 +738,14 @@ mod tests {
         let now = Timestamp(1000);
         let p = RetryPolicy::new(3, Duration::from_millis(50));
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -688,9 +764,164 @@ mod tests {
             "retry delay must be Ready {{ runnable_at }}, not Waiting"
         );
         assert_eq!(ex.state, ExecutionState::Running);
+        assert!(
+            ex.snapshot()
+                .node(&NodeId::new("a"))
+                .unwrap()
+                .resume_token
+                .is_none(),
+            "retry park must not persist the stale attempt token"
+        );
         let (at, id) = ex.next_deadline().expect("deadline on aggregate");
         assert_eq!(at, Timestamp(1050));
         assert_eq!(id.as_str(), "a");
+    }
+
+    #[test]
+    fn start_node_on_due_t_is_illegal_without_retry_due() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+        let mut ex = linear();
+        let p = RetryPolicy::new(3, Duration::from_millis(50));
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("x")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let due = Timestamp(1050);
+        assert!(
+            ex.is_ready_now(&NodeId::new("a"), due),
+            "due T is is_ready_now; StartNode still requires Ready {{ None }}"
+        );
+        let err = ex
+            .apply(
+                ApplyCmd::StartNode {
+                    node_id: "a".into(),
+                },
+                &p,
+                due,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, ApplyError::Illegal(_)),
+            "StartNode on Ready {{ Some(T) }} must be Illegal, got {err:?}"
+        );
+        ex.apply(
+            ApplyCmd::RetryDue {
+                node_id: "a".into(),
+            },
+            &p,
+            due,
+        )
+        .unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        );
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            due,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Running { attempt: 2 }
+        ));
+    }
+
+    #[test]
+    fn fail_subtree_parked_sibling_keeps_deadline() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("park", "e")
+            .node("fail", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let now = Timestamp(0);
+        let retry = RetryPolicy::new(3, Duration::from_millis(50));
+        let accept = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &accept, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "park".into(),
+            },
+            &accept,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "fail".into(),
+            },
+            &accept,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "park".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &retry,
+            now,
+        )
+        .unwrap();
+        let t = match &ex.node(&NodeId::new("park")).unwrap().state {
+            NodeState::Ready {
+                runnable_at: Some(at),
+            } => *at,
+            other => panic!("{other:?}"),
+        };
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "fail".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("boom")),
+            },
+            &accept,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("park")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(t)
+            },
+            "FailSubtree walks successors only; parked sibling keeps T"
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("fail")).unwrap().state,
+            NodeState::Failed
+        );
+        let (at, id) = ex.next_deadline().expect("sibling deadline remains");
+        assert_eq!(at, t);
+        assert_eq!(id.as_str(), "park");
+        assert!(
+            !ex.state().is_terminal(),
+            "parked sibling keeps the execution live"
+        );
     }
 
     #[test]
@@ -707,8 +938,14 @@ mod tests {
         let now = Timestamp(0);
         let p = BadPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -731,8 +968,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex
             .node(&NodeId::new("a"))
             .unwrap()
@@ -785,8 +1028,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex
             .node(&NodeId::new("a"))
             .unwrap()
@@ -820,6 +1069,149 @@ mod tests {
     }
 
     #[test]
+    fn fail_subtree_parked_sibling_not_in_subtree_stays_parked() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+
+        fn two_sources(on_failure: OnFailure) -> Execution {
+            Execution::new(
+                WorkflowDefinition::builder("wf")
+                    .on_failure(on_failure)
+                    .node("park", "e")
+                    .node("boom", "e")
+                    .build()
+                    .unwrap(),
+            )
+        }
+        fn park_then_boom(ex: &mut Execution) -> Timestamp {
+            let now = Timestamp(0);
+            let retry = RetryPolicy::new(3, Duration::from_millis(50));
+            let accept = AcceptPolicy;
+            ex.apply(ApplyCmd::Start, &accept, now).unwrap();
+            for id in ["park", "boom"] {
+                ex.apply(ApplyCmd::StartNode { node_id: id.into() }, &accept, now)
+                    .unwrap();
+            }
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: "park".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::TimedOut),
+                },
+                &retry,
+                now,
+            )
+            .unwrap();
+            let t = match &ex.snapshot().node(&NodeId::new("park")).unwrap().state {
+                NodeState::Ready {
+                    runnable_at: Some(at),
+                } => *at,
+                other => panic!("park must be Ready{{T}}, got {other:?}"),
+            };
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: "boom".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::failed("boom")),
+                },
+                &accept,
+                now,
+            )
+            .unwrap();
+            t
+        }
+
+        let mut subtree = two_sources(OnFailure::FailSubtree);
+        let t = park_then_boom(&mut subtree);
+        assert_eq!(
+            subtree.snapshot().node(&NodeId::new("park")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(t)
+            },
+            "FailSubtree must not cancel a parked sibling outside the subtree"
+        );
+        assert!(matches!(
+            subtree.snapshot().node(&NodeId::new("boom")).unwrap().state,
+            NodeState::Failed
+        ));
+        assert_eq!(subtree.state, ExecutionState::Running);
+
+        let mut fail_fast = two_sources(OnFailure::FailExecution);
+        park_then_boom(&mut fail_fast);
+        assert!(
+            matches!(
+                fail_fast
+                    .snapshot()
+                    .node(&NodeId::new("park"))
+                    .unwrap()
+                    .state,
+                NodeState::Cancelled
+            ),
+            "default FailExecution still clears everyone, including a parked sibling"
+        );
+        assert_eq!(fail_fast.state, ExecutionState::Failed);
+    }
+
+    #[test]
+    fn retarget_ready_deadline_only_on_ready_bumps_revision() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = RetryPolicy::new(3, Duration::from_millis(50));
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let err = ex
+            .retarget_ready_deadline(&NodeId::new("a"), Some(Timestamp(9_000)))
+            .unwrap_err();
+        assert!(matches!(err, ApplyError::Illegal(_)));
+        assert_eq!(
+            ex.retarget_ready_deadline(&NodeId::new("missing"), Some(Timestamp(1)))
+                .unwrap_err(),
+            ApplyError::UnknownNode(NodeId::new("missing"))
+        );
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let rev = ex.revision();
+        ex.retarget_ready_deadline(&NodeId::new("a"), Some(Timestamp(9_000)))
+            .unwrap();
+        assert_eq!(ex.revision(), rev + 1);
+        assert_eq!(
+            ex.snapshot().node(&NodeId::new("a")).unwrap().state,
+            NodeState::Ready {
+                runnable_at: Some(Timestamp(9_000))
+            }
+        );
+        assert!(
+            ex.dirty_nodes().iter().any(|(id, n)| {
+                id.as_str() == "a"
+                    && matches!(
+                        n.state,
+                        NodeState::Ready {
+                            runnable_at: Some(t)
+                        } if t == Timestamp(9_000)
+                    )
+            }),
+            "retarget must mark the parked slot dirty for persist()"
+        );
+    }
+
+    #[test]
     fn fail_subtree_diamond_completes_not_failed() {
         let def = WorkflowDefinition::builder("wf")
             .on_failure(OnFailure::FailSubtree)
@@ -837,8 +1229,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -849,10 +1247,22 @@ mod tests {
             now,
         )
         .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "c".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "c".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex
             .apply(
                 ApplyCmd::FinishNode {
@@ -904,8 +1314,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -920,8 +1336,14 @@ mod tests {
             ex.node(&NodeId::new("j")).unwrap().state,
             NodeState::Pending
         ));
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "b".into(),
@@ -937,7 +1359,9 @@ mod tests {
             NodeState::Ready { .. }
         ));
         assert_eq!(ex.inputs_for(&NodeId::new("j")).len(), 1);
-        assert!(!ex.inputs_for(&NodeId::new("j")).contains_key(&NodeId::new("a")));
+        assert!(!ex
+            .inputs_for(&NodeId::new("j"))
+            .contains_key(&NodeId::new("a")));
     }
 
     #[test]
@@ -952,11 +1376,23 @@ mod tests {
         assert!(ex.attempt(&NodeId::new("ghost")).is_none());
         assert!(ex.resume_token(&NodeId::new("ghost")).is_none());
         let pending = ex
-            .apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
+            .apply(
+                ApplyCmd::StartNode {
+                    node_id: "b".into(),
+                },
+                &p,
+                now,
+            )
             .unwrap_err();
         assert!(matches!(pending, ApplyError::Illegal(_)));
         let unknown = ex
-            .apply(ApplyCmd::StartNode { node_id: "ghost".into() }, &p, now)
+            .apply(
+                ApplyCmd::StartNode {
+                    node_id: "ghost".into(),
+                },
+                &p,
+                now,
+            )
             .unwrap_err();
         assert!(matches!(unknown, ApplyError::UnknownNode(_)));
         ex.apply(ApplyCmd::Cancel, &p, now).unwrap();
@@ -975,8 +1411,14 @@ mod tests {
         let p = RetryPolicy::new(3, std::time::Duration::from_millis(10));
         let now = Timestamp(0);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -996,7 +1438,13 @@ mod tests {
         ex.apply(ApplyCmd::Cancel, &p, now).unwrap();
         let rev = ex.revision();
         let effect = ex
-            .apply(ApplyCmd::RetryDue { node_id: "a".into() }, &p, Timestamp(10))
+            .apply(
+                ApplyCmd::RetryDue {
+                    node_id: "a".into(),
+                },
+                &p,
+                Timestamp(10),
+            )
             .unwrap();
         assert!(!effect.changed);
         assert_eq!(ex.revision(), rev);
@@ -1027,8 +1475,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex.apply(ApplyCmd::ForceCancelRunning, &p, now).unwrap();
         let a = ex.definition.slot(&NodeId::new("a")).unwrap();
         assert_eq!(effect.to_abort, vec![a]);
@@ -1054,10 +1508,22 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -1101,10 +1567,22 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -1139,8 +1617,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -1171,8 +1655,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -1195,8 +1685,14 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, ApplyError::ConflictingComplete);
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "b".into(),
@@ -1218,7 +1714,10 @@ mod tests {
             now,
         )
         .unwrap();
-        assert_eq!(ex.revision, rev, "equivalent complete after Succeeded is a no-op");
+        assert_eq!(
+            ex.revision, rev,
+            "equivalent complete after Succeeded is a no-op"
+        );
         let err = ex
             .apply(
                 ApplyCmd::Resume {
@@ -1249,8 +1748,14 @@ mod tests {
         let now = Timestamp(0);
         let p = AcceptPolicy;
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -1284,8 +1789,14 @@ mod tests {
         let now = Timestamp(0);
         let p = RetryPolicy::new(3, Duration::ZERO);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let effect = ex
             .apply(
                 ApplyCmd::FinishNode {

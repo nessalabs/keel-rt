@@ -26,9 +26,12 @@ pub enum SnapshotError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSnapshot {
     pub state: NodeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Bytes>,
     pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_token: Option<ResumeToken>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<NodeError>,
 }
 
@@ -97,7 +100,7 @@ impl fmt::Display for ExecutionSnapshot {
             self.nodes.len()
         )?;
         for (id, n) in self.iter_nodes() {
-            write!(f, "\n  {id} {}", format_node(&n.state))?;
+            write!(f, "\n  {id} {}", n.state)?;
         }
         Ok(())
     }
@@ -146,23 +149,11 @@ fn format_state(s: ExecutionState) -> &'static str {
     }
 }
 
-fn format_node(s: &NodeState) -> String {
-    match s {
-        NodeState::Pending => "Pending".into(),
-        NodeState::Ready { .. } => "Ready".into(),
-        NodeState::Running { attempt } => format!("Running({attempt})"),
-        NodeState::Waiting { .. } => "Waiting".into(),
-        NodeState::Succeeded => "Succeeded".into(),
-        NodeState::Failed => "Failed".into(),
-        NodeState::Cancelled => "Cancelled".into(),
-        NodeState::TimedOut => "TimedOut".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::ids::NodeId;
+    use crate::domain::time::Timestamp;
 
     fn empty_node() -> NodeSnapshot {
         NodeSnapshot {
@@ -175,8 +166,28 @@ mod tests {
     }
 
     #[test]
+    fn node_snapshot_omits_null_optionals_and_reads_legacy_nulls() {
+        let compact = serde_json::to_string(&empty_node()).unwrap();
+        assert!(
+            !compact.contains("resume_token") && !compact.contains("last_error"),
+            "{compact}"
+        );
+        let legacy = r#"{"state":"Pending","output":null,"attempt":0,"resume_token":null,"last_error":null}"#;
+        let got: NodeSnapshot = serde_json::from_str(legacy).unwrap();
+        assert_eq!(got, empty_node());
+        let ready_now = NodeSnapshot {
+            state: NodeState::Ready { runnable_at: None },
+            ..empty_node()
+        };
+        let body = serde_json::to_string(&ready_now).unwrap();
+        assert!(!body.contains("runnable_at"), "{body}");
+    }
+
+    #[test]
     fn iter_nodes_follows_definition_order() {
-        let order: Vec<NodeId> = (0..20).map(|i| NodeId::new(format!("page-{i:02}"))).collect();
+        let order: Vec<NodeId> = (0..20)
+            .map(|i| NodeId::new(format!("page-{i:02}")))
+            .collect();
         let mut nodes = HashMap::new();
         for id in &order {
             nodes.insert(id.clone(), empty_node());
@@ -267,16 +278,31 @@ mod tests {
             .to_string()
         }
         assert!(snap(ExecutionState::Created, NodeState::Pending).contains("Created"));
-        assert!(snap(ExecutionState::Running, NodeState::Ready { runnable_at: None }).contains("Ready"));
-        assert!(snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Waiting"));
-        assert!(snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Running(1)"));
+        assert!(snap(
+            ExecutionState::Running,
+            NodeState::Ready { runnable_at: None }
+        )
+        .contains("Ready"));
+        assert!(
+            snap(
+                ExecutionState::Running,
+                NodeState::Ready {
+                    runnable_at: Some(Timestamp::from_millis(42)),
+                }
+            )
+            .contains("Ready(42)"),
+            "inspect-as-string must show the parked deadline"
+        );
+        assert!(
+            snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Waiting")
+        );
+        assert!(
+            snap(ExecutionState::Waiting, NodeState::Running { attempt: 1 }).contains("Running(1)")
+        );
         let token = ResumeToken::issue(ExecutionId::new(), NodeId::new("n"), 1);
         assert!(snap(
             ExecutionState::Cancelled,
-            NodeState::Waiting {
-                token,
-                attempt: 1
-            }
+            NodeState::Waiting { token, attempt: 1 }
         )
         .contains("Cancelled"));
         assert!(snap(ExecutionState::Completed, NodeState::Failed).contains("Completed"));

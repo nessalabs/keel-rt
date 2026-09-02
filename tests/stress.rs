@@ -17,11 +17,11 @@
 //! ```
 
 use bytes::Bytes;
-use keel_rt::{AcceptPolicy, ApplyCmd, Execution};
-use keel_rt::testing::{ScriptedExecutor, WorkflowTest};
+use keel_rt::testing::{FakeClock, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    ExecutionContext, ExecutionState, FunctionExecutor, NodeId, NodeOutcome, NodeState,
-    Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
+    AcceptPolicy, ApplyCmd, Execution, ExecutionContext, ExecutionState, FunctionExecutor,
+    MemoryStore, NodeId, NodeOutcome, NodeState, RetryPolicy, Runtime, StateStore, Timestamp,
+    WorkflowDefinition, DEFAULT_CANCEL_BOUND,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -122,7 +122,13 @@ fn apply_only_drive(def: WorkflowDefinition) {
     ready.extend(effect.newly_runnable_ids(&ex));
     while let Some(id) = ready.pop_front() {
         effect = ex
-            .apply(ApplyCmd::StartNode { node_id: id.clone() }, &p, now)
+            .apply(
+                ApplyCmd::StartNode {
+                    node_id: id.clone(),
+                },
+                &p,
+                now,
+            )
             .unwrap();
         ready.extend(effect.newly_runnable_ids(&ex));
         effect = ex
@@ -162,7 +168,11 @@ async fn wide_fan_out_256() {
     eprintln!("stress wide_fan_out nodes={} elapsed={elapsed:?}", n + 2);
 
     assert_eq!(run.execution_state().await, ExecutionState::Succeeded);
-    assert_eq!(run.inputs("join").await.len(), n, "join sees every fan-out output");
+    assert_eq!(
+        run.inputs("join").await.len(),
+        n,
+        "join sees every fan-out output"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -270,9 +280,12 @@ async fn cancel_under_load_64() {
 
     let cancel_at = Instant::now();
     run.cancel().await;
-    tokio::time::timeout(DEFAULT_CANCEL_BOUND + Duration::from_millis(200), run.wait_stable())
-        .await
-        .expect("cancel under load did not finish within cancel bound");
+    tokio::time::timeout(
+        DEFAULT_CANCEL_BOUND + Duration::from_millis(200),
+        run.wait_stable(),
+    )
+    .await
+    .expect("cancel under load did not finish within cancel bound");
     let cancel_elapsed = cancel_at.elapsed();
     let elapsed = started.elapsed();
     eprintln!(
@@ -316,5 +329,201 @@ async fn concurrency_1_wide_64() {
     eprintln!("stress concurrency_1_wide nodes={n} peak_running={peak} elapsed={elapsed:?}");
 
     assert_eq!(run.execution_state().await, ExecutionState::Succeeded);
-    assert!(peak <= 1, "concurrency=1 must never run two nodes, peak={peak}");
+    assert!(
+        peak <= 1,
+        "concurrency=1 must never run two nodes, peak={peak}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timer_median_benches() {
+    let delay = Duration::from_millis(1);
+    let mut parked = Vec::new();
+    for _ in 0..MEDIAN_ITERS {
+        parked.push(time_wide_parked(256, delay).await);
+    }
+    let mut mixed = Vec::new();
+    for _ in 0..MEDIAN_ITERS {
+        mixed.push(time_wide_mixed(256, delay).await);
+    }
+    let mut park_vs = Vec::new();
+    for _ in 0..MEDIAN_ITERS {
+        park_vs.push(time_park_unpark_overhead().await);
+    }
+    let mut no_t = Vec::new();
+    for _ in 0..MEDIAN_ITERS {
+        no_t.push(time_run(WorkflowTest::new().node("a", succeed("a"))).await);
+    }
+    eprintln!(
+        "timer_median wide_256_parked={} wide_256_mixed={} park_unpark={} no_t_start_wait={} (n={MEDIAN_ITERS})",
+        format_ms(median_dur(parked)),
+        format_ms(median_dur(mixed)),
+        format_ms(median_dur(park_vs)),
+        format_ms(median_dur(no_t)),
+    );
+}
+
+async fn time_wide_parked(n: usize, delay: Duration) -> Duration {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let mut b = WorkflowDefinition::builder("bench-t");
+    for i in 0..n {
+        b = b.node(format!("w{i}"), "e");
+    }
+    let mut ex = Execution::new(b.build().unwrap());
+    let p = RetryPolicy::new(2, delay);
+    let now = Timestamp(0);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    for i in 0..n {
+        let id = format!("w{i}");
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: id.clone().into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: id.into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::TimedOut),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+    }
+    store.persist(&ex).await.unwrap();
+    let id = ex.id().clone();
+    let started = Instant::now();
+    let handle = Runtime::builder()
+        .store(store)
+        .clock(clock.clone())
+        .concurrency(32)
+        .policy(p)
+        .register_fn("e", |_c: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build()
+        .resume(&id)
+        .await
+        .unwrap();
+    clock.advance(delay);
+    assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    started.elapsed()
+}
+
+async fn time_wide_mixed(n: usize, delay: Duration) -> Duration {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let mut b = WorkflowDefinition::builder("bench-mix");
+    for i in 0..n {
+        b = b.node(format!("w{i}"), "e");
+    }
+    let mut ex = Execution::new(b.build().unwrap());
+    let p = RetryPolicy::new(2, delay);
+    let now = Timestamp(0);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    for i in 0..n {
+        let id = format!("w{i}");
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: id.clone().into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        if i % 2 == 0 {
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: id.into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+                },
+                &AcceptPolicy,
+                now,
+            )
+            .unwrap();
+        } else {
+            ex.apply(
+                ApplyCmd::FinishNode {
+                    node_id: id.into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::TimedOut),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
+        }
+    }
+    store.persist(&ex).await.unwrap();
+    let id = ex.id().clone();
+    let started = Instant::now();
+    let handle = Runtime::builder()
+        .store(store)
+        .clock(clock.clone())
+        .concurrency(32)
+        .policy(p)
+        .register_fn("e", |_c: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build()
+        .resume(&id)
+        .await
+        .unwrap();
+    clock.advance(delay);
+    assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    started.elapsed()
+}
+
+async fn time_park_unpark_overhead() -> Duration {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let def = WorkflowDefinition::builder("one")
+        .node("a", "a")
+        .build()
+        .unwrap();
+    let mut ex = Execution::new(def);
+    let p = RetryPolicy::new(2, Duration::from_millis(1));
+    let now = Timestamp(0);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "a".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    ex.apply(
+        ApplyCmd::FinishNode {
+            node_id: "a".into(),
+            attempt: 1,
+            outcome: Ok(NodeOutcome::TimedOut),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    store.persist(&ex).await.unwrap();
+    let id = ex.id().clone();
+    let started = Instant::now();
+    let handle = Runtime::builder()
+        .store(store)
+        .clock(clock.clone())
+        .policy(p)
+        .register_fn("a", |_c: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+        .build()
+        .resume(&id)
+        .await
+        .unwrap();
+    clock.advance(Duration::from_millis(1));
+    assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    started.elapsed()
 }

@@ -4,6 +4,52 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Phase 5 snapshot deadlines (2026-09-01)
+
+T is `Ready { runnable_at: Some(T) }` on the snapshot. FakeClock park; no
+sqlite timer table. Same machine, debug, `current_thread`, n=7 unless noted.
+Paired against `/tmp/keel-main` at `da1e6fa` after the 0.1% hunt + persist cut.
+
+### MemoryStore hot path (no timers) vs `main` `da1e6fa`
+
+| bench | main `da1e6fa` | phase-5/timers | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 | 4.420 ms | 4.563 ms | +3.2% |
+| deep_chain_128 | 1.965 ms | 2.054 ms | +4.5% |
+| diamond_10k | 156.538 ms | 165.753 ms | +5.9% |
+| apply_only | 14.877 ms | 15.013 ms | +0.9% |
+
+All four inside the 10% band. **No revert.**
+
+### sqlite persist Ready { T } vs Ready now (256-wide, FULL, n=5)
+
+| | PR tip `9c07d07` (this VM) | after (`runnable_at` column + last_error) | on-disk node-json |
+|---|---:|---:|---:|
+| Ready { T } | 3.448 ms / 22 016 B | **3.64 ms / 18 176 B** | Ready-now + short last_error |
+| Ready now | 2.907 ms / 8 704 B | 2.88 ms / 8 704 B | 8 704 B |
+| T vs now | +19% time, 2.5× JSON | **no nested T; +last_error (~37 B/row)** | |
+
+`9c07d07` leftover was parked JSON (`attempt`, `last_error` "timed out", nested
+`Some(T)` at 22 016 B). The adapter stores T as `nodes.runnable_at INTEGER` and
+writes the compact Ready-now body plus a short `last_error` (18 176 B; not the
+nested-T shape). Kernel snapshot type is still `Ready { runnable_at }`. First
+persist INSERTs only; dirty `persist()` updates skip rewriting body when it
+already matches and only T moves
+(`dirty_persist_ready_t_to_t_prime_updates_only_runnable_at`). No timer table.
+MemoryStore hot path unchanged (sqlite-only).
+
+Documented prior cut (omit nulls + stale token) was 4.091 → 3.527 ms (−14%)
+with the 2.5× JSON still in place. This cut removes that JSON gap.
+
+### With timers (this branch)
+
+| bench | before opt | after | notes |
+|---|---:|---:|---|
+| 256-wide all parked 1ms then fire | 3.323 ms | **3.119 ms** | resume + advance + wait |
+| 256-wide mixed immediate + parked | 1.878 ms | **1.776 ms** | |
+| park/unpark one node | 0.044 ms | **0.041 ms** | vs no-T start/wait **0.053 ms** |
+| sqlite 256 parked crash-resume + advance | 370 ms | **180 ms** | test time (`crash_resume_256_parked…`) |
+
 ## Phase 3 events re-measure (2026-08-31)
 
 `Event` + `EventSink` (no EventLog). persist_then_emit is store Ok then sink.

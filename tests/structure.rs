@@ -84,21 +84,15 @@ fn domain_imports_nothing_outward() {
             "{r} must not import tokio"
         );
         assert!(!s.contains("std::net"), "{r} must not import std::net");
-        assert!(
-            !s.contains("crate::runtime"),
-            "{r} must not import runtime"
-        );
-        assert!(
-            !s.contains("crate::testing"),
-            "{r} must not import testing"
-        );
+        assert!(!s.contains("crate::runtime"), "{r} must not import runtime");
+        assert!(!s.contains("crate::testing"), "{r} must not import testing");
     }
 }
 
 #[test]
 fn kernel_src_has_no_storage_engine() {
-    let cargo = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .unwrap();
+    let cargo =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
     let deps = cargo.split("[dev-dependencies]").next().unwrap_or(&cargo);
     for word in ["rusqlite", "postgres", "tokio_postgres", "sqlx"] {
         assert!(
@@ -222,7 +216,9 @@ fn pr_template_and_agents_require_architecture_and_behavior() {
     assert!(tmpl.contains("## Architecture (before)"));
     assert!(tmpl.contains("## Architecture (after)"));
     assert!(tmpl.contains("## User behavior (when X, used to Y, now Z)"));
-    for verb in ["start", "wait", "cancel", "resume", "fail", "retry", "inspect"] {
+    for verb in [
+        "start", "wait", "cancel", "resume", "fail", "retry", "inspect",
+    ] {
         assert!(tmpl.contains(verb), "template missing {verb}");
     }
 
@@ -293,6 +289,10 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "test job must run the events pack"
     );
     assert!(
+        ci.contains("--test timers"),
+        "test job must run the Phase 5 timers pack"
+    );
+    assert!(
         ci.contains("scripts/pr_body_gate.py"),
         "pr-body job must run the description gate"
     );
@@ -328,6 +328,18 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "equal_revision_persist_does_not_grow_event_rows",
         "checkpoint_busy_after_terminal_commit_does_not_duplicate_events",
         "randomized_crash_inject_sqlite",
+        "crash_resume_full_file_keeps_deadline",
+        "persisted_deadline_already_due_on_resume_runs_once_not_twice",
+        "cancel_during_parked_deadline_is_cancelled_sleeper_dropped",
+        "hung_wait_until_hang_bound_still_cancels",
+        "timestamp_max_deadline_cancel_returns_without_thread_sleep",
+        "cancel_while_drive_waits_on_future_t_drops_waiter",
+        "due_t_hung_wait_until_inbox_cancel_does_not_dispatch",
+        "dirty_persist_ready_t_to_t_prime_updates_only_runnable_at",
+        "fail_subtree_parked_sibling_keeps_deadline",
+        "fail_subtree_parked_sibling_not_in_subtree_stays_parked",
+        "start_node_on_due_t_is_illegal_without_retry_due",
+        "parked_ready_t_uses_column_omits_nested_json_keeps_last_error",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
@@ -440,5 +452,106 @@ fn pr_body_gate_script_enforces_mermaid_behavior_and_main_base() {
     assert!(
         readme.contains("GitHub is not the kernel"),
         "README must say GitHub is not the kernel"
+    );
+}
+
+/// Phase 5: HITL resume is Complete/Reinvoke. RetryFailed is not a kernel command.
+#[test]
+fn resume_enum_has_no_retry_failed() {
+    let src = fs::read_to_string(src_root().join("domain/outcome.rs")).unwrap();
+    let start = src.find("pub enum Resume {").expect("Resume enum");
+    let rest = &src[start..];
+    let end = rest.find("\n}").expect("Resume enum close");
+    let body = &rest[..end];
+    assert!(body.contains("Complete"));
+    assert!(body.contains("Reinvoke"));
+    assert!(
+        !body.contains("RetryFailed"),
+        "Do not implement Recover::RetryFailed"
+    );
+}
+
+/// Apply is a tick: given `Clock::now()` (or `now: Timestamp`), a node
+/// with `runnable_at: Some(T)` is dispatchable iff `now >= T`. Domain and
+/// scheduler must not wait. Waiting for T is the Runtime drive loop
+/// (`next_drive_event` selects inbox vs `Clock::wait_until(T)`). That is
+/// the one allowed kernel waiter — Drop of the handle cancels the shell
+/// future (RAII). `ctx.sleep` stays on ExecutionContext for executor
+/// bodies (`executor.rs`); it is not used for timeout/backoff.
+#[test]
+fn apply_path_does_not_sleep() {
+    assert!(
+        !src_root().join("runtime/park.rs").exists(),
+        "park.rs was the sleeper; wait lives in runtime.rs drive"
+    );
+    for p in rust_files(&src_root().join("domain")) {
+        let s = fs::read_to_string(&p).unwrap();
+        let r = rel(&p);
+        assert!(
+            !contains_word(&s, "sleep"),
+            "{r} must not name sleep; apply is given now"
+        );
+        assert!(
+            !s.contains("Clock::sleep"),
+            "{r} must not call Clock::sleep"
+        );
+        assert!(
+            !s.contains("tokio::time"),
+            "{r} must not import tokio::time"
+        );
+    }
+    let sched = fs::read_to_string(src_root().join("runtime/scheduler.rs")).unwrap();
+    assert!(
+        !contains_word(&sched, "sleep"),
+        "scheduler.rs must not sleep; Runtime drive waits, apply ticks"
+    );
+    assert!(
+        !sched.contains("Clock::sleep"),
+        "scheduler.rs must not call Clock::sleep"
+    );
+    assert!(
+        !sched.contains("tokio::time"),
+        "scheduler.rs must not use tokio::time (cancel-bound wall sleep is Runtime)"
+    );
+
+    let rt = fs::read_to_string(src_root().join("runtime/runtime.rs")).unwrap();
+    assert!(
+        rt.contains("clock.wait_until(when)"),
+        "Runtime drive is the allowed waiter: inbox vs Clock::wait_until(T)"
+    );
+    assert!(
+        rt.contains("async fn next_drive_event"),
+        "wait loop is next_drive_event in runtime.rs, not the scheduler"
+    );
+    assert!(
+        rt.contains("struct CancelBoundGuard") && rt.contains("cancel_bound_guard.arm"),
+        "hang bound must be wired on Runtime drive after park.rs deletion"
+    );
+}
+
+/// FakeClock is test harness (`src/testing`, `tests/`). Domain and runtime
+/// depend on the Clock trait only. A use in scheduler.rs fails this test.
+#[test]
+fn kernel_has_no_fake_clock() {
+    for dir in ["domain", "runtime"] {
+        for p in rust_files(&src_root().join(dir)) {
+            let s = fs::read_to_string(&p).unwrap();
+            assert!(
+                !contains_word(&s, "FakeClock"),
+                "{} names FakeClock; kernel uses Clock, harness owns FakeClock",
+                rel(&p)
+            );
+        }
+    }
+}
+
+#[test]
+fn coverage_script_runs_timers_pack() {
+    let sh =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/coverage.sh"))
+            .unwrap();
+    assert!(
+        sh.contains("--test timers"),
+        "coverage.sh must instrument timers.rs"
     );
 }

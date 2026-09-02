@@ -20,6 +20,15 @@ Resume is still the snapshot; sqlite may write event rows in that txn
 and never uses them to resume. At-least-once re-invoke may emit the
 same node event twice.
 
+Phase 5: a node is **not runnable until T**. T is a `Timestamp` (u64 millis)
+on `Ready { runnable_at: Some(T) }`. `RetryPolicy` delay parks as Ready{T}.
+`timeout_after` keeps the node **Running** (executor Delay); crash restores
+Running as Ready-now and re-invokes; the new invoke re-arms Delay. Kernel T
+is only the retry park. Waiting stays HITL. Domain/runtime name `Clock`
+only — `FakeClock` is a test type. Wait is Runtime `next_drive_event`
+(inbox vs `Clock::wait_until`). sqlite has no timer table
+(`nodes.runnable_at` INTEGER).
+
 The runtime is a **bundle** (scheduler + optional store/sink + handle). The
 scheduler does not know resource types. Drivers only wake. This is a
 current-thread analog — FIFO ready queue, no work-stealing.
@@ -214,8 +223,14 @@ you pass to `Runtime::start`.
   Resume via `ExecutionHandle`: `Complete(outcome)` or `Reinvoke`. Tokens are
   bound to `(execution, node, attempt)`. Duplicate equivalent Complete is Ok
   noop; conflicting Complete is an error; resume after cancel is an error.
-- **Retry delay is Ready { runnable_at }, not Waiting.** Waiting is only from
-  Running after an executor yield.
+- **Retry delay is Ready { runnable_at }, not Waiting.** T is a `Timestamp` on
+  the snapshot. Waiting is only from Running after an executor yield. Crash
+  during backoff restores T. A parked retry that is due is `RetryDue` →
+  `Ready { runnable_at: None }` → `StartNode`; it does not become TimedOut.
+  TimedOut is already on the snapshot when policy **Accepts** a timeout.
+  `timeout_after` is executor Delay while Running — crash re-invokes and the
+  new invoke re-arms Delay; that is not snapshot T. Drop of `ExecutionHandle`
+  cancels the Runtime drive waiter (`Clock::wait_until`).
 - **Cancel.** `CancellationToken` to running executors. Pending/Ready/Waiting
   become Cancelled. Dropping `ExecutionHandle` **cancels** (JoinSet semantics,
   not detach). Hung executors that ignore cancel are aborted after
@@ -307,7 +322,27 @@ ScriptedExecutor::new("n").timeout_after(Duration::from_millis(50));
 `FaultySink::panic_on_nth(1)` panics on emit; the scheduler stays alive.
 
 `FakeClock::advance(Duration)` fires retry delays. Waiting tests do not need a
-timer. Park is channel + clock; tests do not need epoll.
+clock tick. Crash-resume of a parked **retry**:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use keel_rt::testing::{FakeClock, ScriptedExecutor};
+use keel_rt::{RetryPolicy, Runtime, WorkflowDefinition};
+
+let clock = Arc::new(FakeClock::new());
+let delay = Duration::from_millis(50);
+let h = rt.start(def)?;
+// crash while parked on retry T (`Ready { runnable_at: Some(T) }`)
+// timeout_after is Running Delay — crash re-invokes; the new invoke re-arms Delay
+let h = rt.resume(&id).await?;
+clock.advance(delay);
+// RetryDue → Ready { runnable_at: None } → StartNode; not TimedOut
+```
+
+The Runtime drive selects the apply inbox against `Clock::wait_until(T)`.
+Tests do not need epoll.
+
 
 ## Swap StateStore
 

@@ -29,7 +29,9 @@ let fast = SqliteStore::open_fast("/tmp/keel-fast.db")?; // NORMAL
 
 - One `BEGIN IMMEDIATE` … `COMMIT` per `persist`/`put` call.
 - First persist writes every node row. Later persists upsert dirty slots
-  only; unchanged Pending rows are not deleted.
+  only; unchanged Pending rows are not deleted. Parked Ready{T} stores T
+  in `nodes.runnable_at`; compact JSON keeps a short `last_error` so
+  inspect after persist matches live inspect.
 - `wal_checkpoint(TRUNCATE)` is best-effort after COMMIT of a **terminal**
   snapshot, never inside the transaction. Checkpoint `Err` does not fail
   persist. Equal-revision persist does not insert event rows.

@@ -16,7 +16,11 @@
 //! [`RuntimeBuilder::register_fn`] → [`Runtime::run`] / [`Runtime::start`].
 //! After process death, [`Runtime::resume`] loads the snapshot (at-least-once).
 //! Announce via [`Event`] + [`EventSink`] (no EventLog). Persist then emit.
-//! Use [`ExecutionState::is_successful_finish`] (not `== Succeeded`) so
+//! Snapshot deadline T is `Ready { runnable_at: Some(Timestamp) }`. The Runtime
+//! drive waits via [`Clock::wait_until`]; `FakeClock` is test harness only.
+//! `timeout_after` keeps the node Running (executor Delay), not snapshot T.
+//! Waiting is an executor yield, not a timer. Use [`ExecutionState::is_successful_finish`]
+//! (not `== Succeeded`) so
 //! FailSubtree [`Completed`](ExecutionState::Completed) counts as ok.
 //!
 //! This crate does not pick an allocator and has no `jemalloc` feature.
@@ -36,22 +40,19 @@ pub use domain::ids::{
 pub use domain::outcome::{NodeError, NodeOutcome, Resume};
 pub use domain::policy::{AcceptPolicy, NeverWaitPolicy, Policy, PolicyDecision, RetryPolicy};
 pub use domain::snapshot::{ExecutionSnapshot, NodeSnapshot, SnapshotError, SCHEMA_VERSION};
-pub use domain::state::{
-    ApplyCmd, ApplyEffect, ApplyError, Execution, ExecutionState, NodeState,
-};
+pub use domain::state::{ApplyCmd, ApplyEffect, ApplyError, Execution, ExecutionState, NodeState};
 pub use domain::time::Timestamp;
 pub use runtime::executor::{ExecutionContext, Executor, FunctionExecutor};
 pub use runtime::handle::ExecutionHandle;
-pub use runtime::sink::{EventSink, FnSink, SinkError};
 pub use runtime::runtime::{
-    ResumeError, Runtime, RuntimeBuilder, StartError, UnregisteredExecutors,
-    DEFAULT_CANCEL_BOUND,
+    ResumeError, Runtime, RuntimeBuilder, StartError, UnregisteredExecutors, DEFAULT_CANCEL_BOUND,
 };
+pub use runtime::sink::{EventSink, FnSink, SinkError};
 pub use runtime::store::{MemoryStore, NoopStore, StateStore, StoreError};
 pub use runtime::time::Clock;
 
 #[cfg(any(test, feature = "test-util"))]
 pub use testing::{
-    FakeClock, FailingStore, FaultySink, FlakyThen, NetFault, ScriptedAction, ScriptedExecutor,
+    FailingStore, FakeClock, FaultySink, FlakyThen, NetFault, ScriptedAction, ScriptedExecutor,
     SequenceStore, TestRun, WorkflowTest,
 };

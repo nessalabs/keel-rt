@@ -71,7 +71,11 @@ impl Execution {
                 effect.changed = true;
             }
             ApplyCmd::ForceCancelRunning => {
-                if !self.nodes.iter().any(|n| matches!(n.state, NodeState::Running { .. })) {
+                if !self
+                    .nodes
+                    .iter()
+                    .any(|n| matches!(n.state, NodeState::Running { .. }))
+                {
                     return Ok(effect);
                 }
                 self.force_cancel_running(now, &mut effect);
@@ -133,9 +137,7 @@ impl Execution {
         match &self.nodes[slot.0].state {
             NodeState::Ready { runnable_at } if runnable_at.is_none() => {}
             other => {
-                return Err(ApplyError::Illegal(format!(
-                    "dispatch {id} from {other:?}"
-                )));
+                return Err(ApplyError::Illegal(format!("dispatch {id} from {other:?}")));
             }
         }
         let attempt = {
@@ -214,7 +216,13 @@ impl Execution {
                 NodeOutcome::Succeeded(_) | NodeOutcome::Waiting { .. }
             )
         {
-            self.fail_node(slot, id, NodeError::new("illegal policy Retry after Succeeded/Waiting"), now, effect);
+            self.fail_node(
+                slot,
+                id,
+                NodeError::new("illegal policy Retry after Succeeded/Waiting"),
+                now,
+                effect,
+            );
             self.fail_fast(now, effect);
             return Ok(());
         }
@@ -233,6 +241,10 @@ impl Execution {
                         _ => Some(NodeError::new("timed out")),
                     };
                     n.last_outcome = Some(outcome);
+                    // Prior attempt token is dead. Waiting is the only state
+                    // that resume Complete/Reinvoke consults. Dropping it here
+                    // keeps Ready { T } node JSON off the stale token blob.
+                    n.resume_token = None;
                 }
                 self.set_state(slot, NodeState::Ready { runnable_at: at });
                 if let Some(at) = at {
@@ -285,13 +297,7 @@ impl Execution {
                         attempt,
                     },
                 );
-                self.emit_node(
-                    effect,
-                    now,
-                    id.clone(),
-                    attempt,
-                    NodeKind::Waiting(token),
-                );
+                self.emit_node(effect, now, id.clone(), attempt, NodeKind::Waiting(token));
             }
             NodeOutcome::Failed(err) => {
                 self.fail_node(slot, id, err.clone(), now, effect);
@@ -407,9 +413,7 @@ impl Execution {
             let succ = self.definition.succ_slots(succeeded)[i];
             debug_assert!(self.remain[succ.0] > 0);
             self.remain[succ.0] -= 1;
-            if self.remain[succ.0] == 0
-                && matches!(self.nodes[succ.0].state, NodeState::Pending)
-            {
+            if self.remain[succ.0] == 0 && matches!(self.nodes[succ.0].state, NodeState::Pending) {
                 self.mark_ready(succ, effect);
             }
         }
@@ -516,6 +520,36 @@ impl Execution {
             self.cancelled = true;
         }
         self.next_deadline = None;
+    }
+
+    /// Test-only: move a parked Ready deadline so the next
+    /// [`crate::StateStore::persist`] can `UPDATE runnable_at` without
+    /// rewriting body. Production apply never changes T alone.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn retarget_ready_deadline(
+        &mut self,
+        node_id: &NodeId,
+        runnable_at: Option<Timestamp>,
+    ) -> Result<(), ApplyError> {
+        let slot = self
+            .definition
+            .slot(node_id)
+            .ok_or_else(|| ApplyError::UnknownNode(node_id.clone()))?;
+        match self.nodes[slot.0].state {
+            NodeState::Ready { .. } => {}
+            _ => {
+                return Err(ApplyError::Illegal(
+                    "retarget_ready_deadline only on Ready".into(),
+                ));
+            }
+        }
+        self.set_state(slot, NodeState::Ready { runnable_at });
+        match runnable_at {
+            Some(at) => self.note_deadline(slot, at),
+            None => self.clear_deadline_if(slot),
+        }
+        self.revision += 1;
+        Ok(())
     }
 
     fn note_deadline(&mut self, slot: NodeSlot, at: Timestamp) {

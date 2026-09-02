@@ -1,16 +1,21 @@
 use crate::runtime::time::{Clock, Timestamp};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::Notify;
 
 /// Paused clock / advance — Tokio `test-util` analog for retry delays.
 /// Waiting tests do not need a timer; only retry-delay tests call [`FakeClock::advance`].
+///
+/// [`Self::live_sleeps`] counts in-flight [`Clock::sleep`](crate::Clock::sleep)
+/// futures (Runtime `wait_until` + executor Delay). Drop of the handle
+/// must bring this to 0.
 #[derive(Debug)]
 pub struct FakeClock {
     now: Mutex<Timestamp>,
     paused: AtomicBool,
     tick: Notify,
+    live_sleeps: AtomicUsize,
 }
 
 impl FakeClock {
@@ -19,7 +24,15 @@ impl FakeClock {
             now: Mutex::new(Timestamp(0)),
             paused: AtomicBool::new(true),
             tick: Notify::new(),
+            live_sleeps: AtomicUsize::new(0),
         }
+    }
+
+    /// In-flight [`Clock::sleep`](crate::Clock::sleep) futures. Runtime
+    /// `wait_until` and `timeout_after` / Delay each hold one until the
+    /// sleeper is dropped.
+    pub fn live_sleeps(&self) -> usize {
+        self.live_sleeps.load(Ordering::SeqCst)
     }
 
     pub fn pause(&self) {
@@ -60,6 +73,14 @@ impl Clock for FakeClock {
         if duration.is_zero() {
             return;
         }
+        self.live_sleeps.fetch_add(1, Ordering::SeqCst);
+        struct LiveSleep<'a>(&'a AtomicUsize);
+        impl Drop for LiveSleep<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _live = LiveSleep(&self.live_sleeps);
         if !self.paused.load(Ordering::SeqCst) {
             tokio::time::sleep(duration).await;
             self.advance(duration);
@@ -103,6 +124,11 @@ mod tests {
                 .unwrap_or_else(|_| panic!("lost FakeClock wakeup on iter {i}"))
                 .expect("sleeper join");
             advancer.await.expect("advancer join");
+            assert_eq!(
+                clock.live_sleeps(),
+                0,
+                "iter {i}: sleeper Drop must release live_sleeps"
+            );
         }
     }
 }

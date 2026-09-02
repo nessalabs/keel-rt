@@ -24,8 +24,8 @@ the channel type.
 | Holder | What it owns | Drop |
 |---|---|---|
 | `ExecutionHandle` | sender clone | If not consumed by `wait`: send `Cancel`. Always send `Shutdown`. |
-| Scheduler (`ChannelPark`) | **receiver** | End of `run` / panic: `SpawnSet` Drop aborts execute tasks; cancel-bound sleep is aborted. `recv` on a closed channel is `Shutdown`. |
-| Scheduler | sender clone | Cancel-bound timer. Aborted in `Scheduler::Drop`. |
+| Runtime drive | **receiver** | End of `drive` / panic: `SpawnSet` Drop aborts execute tasks; cancel-bound wall sleep is aborted. `recv` on a closed channel is `Shutdown`. |
+| Runtime drive | sender clone | Cancel-bound timer. Aborted when the drive exits. |
 | Execute task | sender clone | Sends `NodeFinished`, then the clone drops. |
 | `Runtime` | none of the inbox | Drop does **not** cancel in-flight executions. The **handle** owns cancel/JoinSet. |
 

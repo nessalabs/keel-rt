@@ -34,6 +34,7 @@ TESTS=(
   --test graph
   --test resilience
   --test resume
+  --test timers
   --test scenarios
   --test stress
   --test stress_uneven

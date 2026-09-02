@@ -18,10 +18,9 @@ src/domain/          rules. No tokio, no runtime, no std::net.
   time.rs            Timestamp value object
 
 src/runtime/         bundle. May import domain. Never imported by domain.
-  runtime.rs         Runtime / RuntimeBuilder / StartError / ResumeError
-  scheduler.rs       event loop: apply → dispatch → persist → emit. No policy rules.
+  runtime.rs         Runtime / RuntimeBuilder / drive wait (inbox vs Clock::wait_until)
+  scheduler.rs       apply → dispatch → persist → emit. Given now; does not wait.
   spawn.rs           one tokio::spawn per execute; completions are Events
-  park.rs            wait for Event or retry deadline (Clock)
   inject.rs          Event + unbounded mpsc (see docs/adr/0001)
   handle.rs          ExecutionHandle; Drop cancels; not Clone
   executor.rs        Executor port, FunctionExecutor, ExecutionContext
@@ -66,7 +65,6 @@ flowchart TB
     Rrt[runtime]
     Rsched[scheduler]
     Rspawn[spawn]
-    Rpark[park]
     Rinj[inject]
     Rhandle[handle]
     Rexec[executor]
@@ -96,7 +94,7 @@ flowchart TB
 
 ### (b) Public run-loop types
 
-Ports are traits. `Scheduler` / `Park` / `inject::Event` are crate-private and
+Ports are traits. `Scheduler` / `inject::Event` are crate-private and
 stay off this diagram.
 
 ```mermaid
@@ -158,10 +156,18 @@ classDiagram
     +emit(Event)
     +try_emit(Event) Result~SinkError~
   }
+  class NodeState {
+    <<enum>>
+    Pending
+    Ready runnable_at
+    Running Waiting
+    Succeeded Failed Cancelled TimedOut
+  }
   class Clock {
     <<trait>>
     +now() Timestamp
     +sleep(Duration)
+    +wait_until(Timestamp)
   }
   class Event {
     <<enum>>
@@ -216,7 +222,7 @@ classDiagram
 - No `utils` / `common` / `helpers` / `shared`.
 - No Runtime-wide FailSubtree or AllDone switch.
 - No test-only constructor that builds an illegal `WorkflowDefinition`.
-- Waiting is a node state. Retry delay is `Ready { runnable_at }`.
+- Waiting is a node state. Retry delay is `Ready { runnable_at }` (`Timestamp` T on the snapshot).
 - Snapshot is execution state. Definition is data (hash on the snapshot).
 
 File store lives in sibling `crates/keel-rt-sqlite`. It depends on `keel-rt`.
@@ -229,7 +235,7 @@ edit `scheduler.rs`.
 |----------------------------------------------|--------------------------------------------|---------------------------|
 | AND-join / AllDone readiness                 | `definition` + `apply` remain-pred         | scheduler                 |
 | Fail-fast / FailSubtree                      | `definition` (opt-in) + `apply`            | `RuntimeBuilder`          |
-| Retry / reject Waiting                       | a `Policy` impl                            | readiness / park          |
+| Retry / reject Waiting                       | a `Policy` impl                            | readiness / Runtime drive |
 | User work / sleep                            | `Executor` / `ExecutionContext`            | `apply`                   |
 | Persist / dirty slots                        | `StateStore` / `MemoryStore`               | scheduler policy          |
 | File-backed store                            | `crates/keel-rt-sqlite`                    | `scheduler.rs` / kernel `Cargo.toml` |
@@ -260,11 +266,21 @@ edit `scheduler.rs`.
   tasks ≤ that number.
 - **Apply inbox:** unbounded mpsc (ADR 0001). Producers are execute tasks +
   handle ops; they must not block on apply. Persist is inline, not a queue.
-- **Retry:** `RetryPolicy::max_attempts` is the only retry bound. Delay is a
-  deadline on `Ready`, not a wait state.
-- **Cancel hang:** `cancel_bound` is **wall** time (`tokio::time::sleep`), not
-  `Clock`. FakeClock does not stretch it. The sleeper is an `AbortHandle` on
-  the scheduler and is aborted in `Drop` (no wake into a dead execution).
+- **Retry:** `RetryPolicy::max_attempts` is the only retry bound. Delay is
+  **T** (`Timestamp` millis) on `Ready { runnable_at: Some(T) }`, not a wait
+  state and not a sqlite timer row. Resume restores T. Apply is given `now`:
+  a due park is not `StartNode`-able until `RetryDue` clears T (`is_ready_now`
+  is true when `at <= now`; `StartNode` still requires `Ready { None }`).
+  If `now < T` the Runtime drive waits (`Clock::wait_until`). If `now >= T`,
+  `RetryDue` then dispatch. `TimedOut` is already on the snapshot when policy
+  **Accepts** a timeout at `FinishNode` — the deadline does not re-decide.
+  `timeout_after` / executor Delay is **Running**, not snapshot T. Tests inject
+  `Clock` at the Runtime builder (`FakeClock` is harness-only). Drop of the
+  handle cancels the drive waiter (RAII).
+- **Cancel hang:** `cancel_bound` is **wall** time (`tokio::time::sleep` in
+  the Runtime drive), not `Clock`. A paused test clock does not stretch it.
+  The sleeper is an `AbortHandle` on the drive loop and is aborted when the
+  drive exits (no wake into a dead execution).
   `SpawnSet` Drop aborts leftover execute tasks (JoinSet, not detach).
 - **Permits:** held only while a node is `Running`. Waiting releases. Inspect
   via [`ExecutionSnapshot::running_count`] / [`waiting_count`].
