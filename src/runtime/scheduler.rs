@@ -65,7 +65,10 @@ impl Scheduler {
             .map(|i| registry.get(definition.executor_at(NodeSlot(i))))
             .collect();
         let exec = Execution::new(definition);
-        let last_heartbeat = clock.now();
+        // Do not call clock.now() here: start() is sync on the caller.
+        // A panicking Clock must kill the drive, not start()
+        // (`panicking_clock_inspect_is_stopped_and_wait_is_cancelled`).
+        let last_heartbeat = Timestamp(0);
         let _ = state_tx.send(exec.state());
         Self {
             spawn: SpawnSet::new(tx.clone(), n),
@@ -106,7 +109,9 @@ impl Scheduler {
         let n = exec.definition().len();
         let last_persisted = exec.revision();
         let epoch = exec.fence_epoch().map(LeaseEpoch);
-        let last_heartbeat = clock.now();
+        // Resume already claimed; first heartbeat is due immediately if the
+        // store clock is ahead of Timestamp(0). Avoid now() in the constructor.
+        let last_heartbeat = Timestamp(0);
         let executors: Vec<Option<Arc<dyn Executor>>> = (0..n)
             .map(|i| registry.get(exec.definition().executor_at(NodeSlot(i))))
             .collect();
