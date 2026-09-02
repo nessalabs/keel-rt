@@ -23,19 +23,20 @@ All four inside the 10% band. **No revert.**
 
 ### sqlite persist Ready { T } vs Ready now (256-wide, FULL, n=5)
 
-| | PR tip `9c07d07` (this VM) | after (`runnable_at` column) | on-disk node-json |
+| | PR tip `9c07d07` (this VM) | after (`runnable_at` column + last_error) | on-disk node-json |
 |---|---:|---:|---:|
-| Ready { T } | 3.448 ms / 22 016 B | **3.01 ms / 8 704 B** | **1.0× Ready-now** |
-| Ready now | 2.907 ms / 8 704 B | 3.00 ms / 8 704 B | 8 704 B |
-| T vs now | +19% time, 2.5× JSON | **~0% JSON; time within noise** | |
+| Ready { T } | 3.448 ms / 22 016 B | **3.64 ms / 18 176 B** | Ready-now + short last_error |
+| Ready now | 2.907 ms / 8 704 B | 2.88 ms / 8 704 B | 8 704 B |
+| T vs now | +19% time, 2.5× JSON | **no nested T; +last_error (~37 B/row)** | |
 
 `9c07d07` leftover was parked JSON (`attempt`, `last_error` "timed out", nested
-`Some(T)`). The adapter stores T as `nodes.runnable_at INTEGER` and writes the
-compact Ready-now body plus a short `last_error` (no nested T). Kernel snapshot
-type is still `Ready { runnable_at }`. First persist INSERTs only; dirty
-`persist()` updates skip rewriting body when it already matches and only T
-moves (`dirty_persist_ready_t_to_t_prime_updates_only_runnable_at`). No timer
-table. MemoryStore hot path unchanged (sqlite-only).
+`Some(T)` at 22 016 B). The adapter stores T as `nodes.runnable_at INTEGER` and
+writes the compact Ready-now body plus a short `last_error` (18 176 B; not the
+nested-T shape). Kernel snapshot type is still `Ready { runnable_at }`. First
+persist INSERTs only; dirty `persist()` updates skip rewriting body when it
+already matches and only T moves
+(`dirty_persist_ready_t_to_t_prime_updates_only_runnable_at`). No timer table.
+MemoryStore hot path unchanged (sqlite-only).
 
 Documented prior cut (omit nulls + stale token) was 4.091 → 3.527 ms (−14%)
 with the 2.5× JSON still in place. This cut removes that JSON gap.
