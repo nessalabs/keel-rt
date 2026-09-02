@@ -214,10 +214,11 @@ pub enum ApplyCmd {
         node_id: NodeId,
     },
     ForceCancelRunning,
-    /// Failed/TimedOut → Ready-now (next dispatch is attempt + 1).
-    /// Cancelled → Pending (Ready when preds Succeeded). Succeeded and
-    /// Waiting stay. Only from [`ExecutionState::Failed`] or
-    /// [`ExecutionState::Completed`].
+    /// Failed/TimedOut → Pending (keep `attempt`). Remain recounted;
+    /// `remain == 0` → Ready-now (next dispatch is attempt + 1).
+    /// Cancelled → Pending (attempt reset; Ready when preds Succeeded).
+    /// Succeeded and Waiting stay. Only from [`ExecutionState::Failed`]
+    /// or [`ExecutionState::Completed`].
     RetryFailed,
 }
 
@@ -2029,6 +2030,112 @@ mod tests {
             ex.node(&NodeId::new("a")).unwrap().state,
             NodeState::Ready { runnable_at: None }
         );
+        assert_eq!(ex.state, ExecutionState::Running);
+    }
+
+    fn fail_subtree_all_done_join_failed() -> Execution {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("p1", "e")
+            .node("p2", "e")
+            .node("join", "j")
+            .edge("p1", "join")
+            .edge("p2", "join")
+            .join("join", Join::AllDone)
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def);
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "p1".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "p2".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "p1".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("page")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "p2".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Succeeded(Bytes::from_static(b"p2"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "join".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "join".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("join")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert_eq!(ex.state, ExecutionState::Completed);
+        ex
+    }
+
+    #[test]
+    fn retry_failed_all_done_failed_join_remain_waits_for_retried_pred() {
+        let mut ex = fail_subtree_all_done_join_failed();
+        assert_eq!(ex.attempt(&NodeId::new("p1")), Some(1));
+        assert_eq!(ex.attempt(&NodeId::new("join")), Some(1));
+        let effect = ex
+            .apply(ApplyCmd::RetryFailed, &AcceptPolicy, Timestamp(0))
+            .unwrap();
+        assert_eq!(
+            ex.node(&NodeId::new("p1")).unwrap().state,
+            NodeState::Ready { runnable_at: None }
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("p2")).unwrap().state,
+            NodeState::Succeeded
+        );
+        assert_eq!(
+            ex.node(&NodeId::new("join")).unwrap().state,
+            NodeState::Pending,
+            "failed AllDone join must wait; p1 is no longer terminal"
+        );
+        let join = ex.definition.slot(&NodeId::new("join")).unwrap();
+        assert_eq!(
+            ex.remain[join.0], 1,
+            "join remain after RetryFailed before p1 succeeds"
+        );
+        assert_eq!(ex.attempt(&NodeId::new("p1")), Some(1), "keep attempt");
+        assert_eq!(ex.attempt(&NodeId::new("join")), Some(1), "keep attempt");
+        let ready: Vec<_> = effect.newly_runnable_ids(&ex).collect();
+        assert_eq!(ready, vec![NodeId::new("p1")]);
         assert_eq!(ex.state, ExecutionState::Running);
     }
 }

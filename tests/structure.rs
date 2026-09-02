@@ -342,6 +342,8 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "parked_ready_t_uses_column_omits_nested_json_keeps_last_error",
         "resume_stays_failed_resume_with_retry_failed_reruns_b_only",
         "resume_with_retry_failed_fail_subtree_all_done_retries_failed_page",
+        "resume_with_retry_failed_failed_all_done_join_waits_for_retried_pred",
+        "resume_with_retry_failed_on_cancelled_is_not_failed",
         "retry_failed_persist_crash_mid_retry_is_at_least_once",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");

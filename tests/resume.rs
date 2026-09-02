@@ -845,6 +845,86 @@ async fn resume_with_retry_failed_fail_subtree_all_done_retries_failed_page() {
     );
 }
 
+/// FailSubtree + AllDone: p1 Failed, p2 Succeeded, join itself Failed
+/// (Completed). RetryFailed must not Ready the join before remain is
+/// recounted — p1 is no longer terminal, so the join waits. On the bug,
+/// join run count hits 1 immediately alongside hanging p1.
+#[tokio::test(flavor = "current_thread")]
+async fn resume_with_retry_failed_failed_all_done_join_waits_for_retried_pred() {
+    let store = MemoryStore::new();
+    let def = WorkflowDefinition::builder("wf")
+        .on_failure(OnFailure::FailSubtree)
+        .node("p1", "p1")
+        .node("p2", "p2")
+        .node("join", "j")
+        .edge("p1", "join")
+        .edge("p2", "join")
+        .join("join", Join::AllDone)
+        .build()
+        .unwrap();
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register_fn("p1", |_ctx: ExecutionContext| async {
+            NodeOutcome::failed("page")
+        })
+        .register_fn("p2", |_ctx: ExecutionContext| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"p2"))
+        })
+        .register_fn("j", |_ctx: ExecutionContext| async {
+            NodeOutcome::failed("join")
+        })
+        .build();
+    let handle = rt.start(def).unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Completed);
+
+    let p1 = ScriptedExecutor::new("p1").hang(false);
+    let p2_runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let c2 = p2_runs.clone();
+    let join = ScriptedExecutor::new("j").succeed(Bytes::from_static(b"joined"));
+    let rt = Runtime::builder()
+        .store(store)
+        .register(p1.clone())
+        .register_fn("p2", move |_ctx: ExecutionContext| {
+            c2.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::Succeeded(Bytes::from_static(b"p2")) }
+        })
+        .register(join.clone())
+        .build();
+    let h = within(rt.resume_with(&id, Recover::RetryFailed))
+        .await
+        .unwrap();
+    within(p1.wait_until_hanging()).await;
+    assert_eq!(
+        join.attempts().len(),
+        0,
+        "join must not run while p1 is in flight"
+    );
+    let snap = h.inspect().await;
+    assert!(
+        matches!(
+            snap.node(&NodeId::new("join")).unwrap().state,
+            NodeState::Pending
+        ),
+        "AllDone join stays Pending until the retried pred is terminal again, got {:?}",
+        snap.node(&NodeId::new("join")).unwrap().state
+    );
+    p1.release();
+    assert_eq!(within(h.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(p2_runs.load(Ordering::SeqCst), 0, "p2 must not re-run");
+    assert_eq!(
+        join.attempts().len(),
+        1,
+        "join runs once after p1 Succeeded"
+    );
+    let inputs = join.last_inputs().expect("join ran");
+    assert_eq!(
+        inputs.get(&NodeId::new("p1")).map(|b| b.as_ref()),
+        Some(b"released".as_slice()),
+        "join must see p1's new Bytes"
+    );
+}
+
 /// Time-sensitive product: after Failed, `start` is a new id and every node runs.
 #[tokio::test(flavor = "current_thread")]
 async fn start_after_failed_is_new_id_and_reruns_all_nodes() {
@@ -987,5 +1067,32 @@ async fn resume_with_retry_failed_on_waiting_is_not_failed() {
         Err(ResumeError::NotFailed) => {}
         Ok(_) => panic!("Waiting is HITL"),
         Err(e) => panic!("Waiting is HITL, got {e}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_with_retry_failed_on_cancelled_is_not_failed() {
+    let store = MemoryStore::new();
+    let hang = ScriptedExecutor::new("a").hang(false);
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register(hang.clone())
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("a", "a")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    within(hang.wait_until_hanging()).await;
+    handle.cancel().await;
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+    match rt.resume_with(&id, Recover::RetryFailed).await {
+        Err(ResumeError::NotFailed) => {}
+        Ok(_) => panic!("user-Cancelled is not RetryFailed"),
+        Err(e) => panic!("user-Cancelled is NotFailed, got {e}"),
     }
 }

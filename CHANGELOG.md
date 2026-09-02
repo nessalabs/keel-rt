@@ -3,10 +3,13 @@
 ## Phase 4 RetryFailed (`phase-4/retry-failed`)
 
 [`Runtime::resume`] is still Continue: Failed stay Failed. [`Runtime::resume_with`]
-`Recover::RetryFailed` re-invokes Failed/TimedOut nodes (Ready-now; next
-dispatch is attempt + 1), turns fail-fast/subtree Cancelled into Pending
-(Ready when preds Succeeded), and leaves Succeeded Bytes and Waiting tokens
-alone. Execution must be Failed or Completed-with-failures; Succeeded /
+`Recover::RetryFailed` turns Failed/TimedOut into Pending (keep `attempt`;
+do not reset like Cancelled), recounts remain, then Ready-now only when
+`remain == 0` (next dispatch is attempt + 1). Leaves whose preds are still
+Succeeded become Ready. An AllDone join that itself Failed waits until
+retried preds are terminal again. Fail-fast/subtree Cancelled become
+Pending (Ready when preds Succeeded). Succeeded Bytes and Waiting tokens
+stay. Execution must be Failed or Completed-with-failures; Succeeded /
 Waiting / Cancelled → [`ResumeError::NotFailed`]. Persist the recovered
 snapshot before dispatch; CAS still applies. New attempts use the
 definition `OnFailure` (fail-fast default unchanged). HITL is still

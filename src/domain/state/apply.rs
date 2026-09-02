@@ -594,18 +594,19 @@ impl Execution {
         }
     }
 
-    /// Failed/TimedOut become Ready-now (dispatch increments attempt).
-    /// Cancelled become Pending; Ready when every AllSucceeded pred
-    /// Succeeded (or AllDone preds are terminal). Succeeded keep Bytes.
-    /// Waiting stays Waiting.
+    /// Failed/TimedOut become Pending (keep `attempt`; do not reset like
+    /// Cancelled). Remain is recounted after that loop. `remain == 0` →
+    /// Ready-now / `newly_runnable`. Leaves whose preds are still Succeeded
+    /// become Ready. An AllDone join that itself Failed waits: the retried
+    /// pred is no longer terminal. Do not enqueue Failed nodes in the first
+    /// loop. Succeeded keep Bytes. Waiting stays Waiting.
     fn apply_retry_failed(&mut self, effect: &mut ApplyEffect) {
         let n = self.nodes.len();
         for i in 0..n {
             match self.nodes[i].state {
                 NodeState::Failed | NodeState::TimedOut => {
-                    self.nodes[i].state = NodeState::Ready { runnable_at: None };
+                    self.nodes[i].state = NodeState::Pending;
                     self.mark_dirty(NodeSlot(i));
-                    effect.newly_runnable.push(NodeSlot(i));
                 }
                 NodeState::Cancelled => {
                     let n = &mut self.nodes[i];
