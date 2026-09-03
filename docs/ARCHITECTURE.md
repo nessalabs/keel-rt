@@ -84,12 +84,21 @@ flowchart TB
     Dtime[time]
   end
 
+  subgraph siblings["sibling crates (depend on keel-rt, not reverse)"]
+    sqlite[keel-rt-sqlite]
+    http[keel-rt-http]
+    sched[keel-rt-schedule]
+  end
+
   ROOT --> testing
   ROOT --> runtime
   ROOT --> domain
   testing --> runtime
   testing --> domain
   runtime --> domain
+  sqlite --> crate
+  http --> crate
+  sched --> crate
 ```
 
 ### (b) Public run-loop types

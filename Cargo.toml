@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/keel-rt-sqlite", "crates/keel-rt-http"]
+members = [".", "crates/keel-rt-sqlite", "crates/keel-rt-http", "crates/keel-rt-schedule"]
 exclude = ["benches/jemalloc_compare"]
 resolver = "2"
 

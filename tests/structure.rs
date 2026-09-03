@@ -101,6 +101,8 @@ fn kernel_src_has_no_storage_engine() {
         "tokio_postgres",
         "sqlx",
         "keel-rt-http",
+        "keel-rt-schedule",
+        "croner",
         "axum",
         "hyper",
         "reqwest",
@@ -153,6 +155,8 @@ fn src_has_no_product_resource_identifiers() {
         "warp",
         "Sql",
         "crawl",
+        "cron",
+        "crontab",
     ] {
         for p in rust_files(&src_root()) {
             let s = fs::read_to_string(&p).unwrap();

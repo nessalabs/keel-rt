@@ -1,5 +1,13 @@
 # Changelog
 
+## Schedule ticker (`sdk/schedule`)
+
+Sibling crate [`keel-rt-schedule`]: 5-field cron + IANA timezone, driven
+by `Clock::wait_until`. Each fire is `Runtime::start` (new `ExecutionId`).
+Catch-up after a paused ticker is one start, then next from now. Overlap
+still starts. Kernel `src/` has no cron types. The kernel does not depend
+on this crate. Not a sqlite timer table. Not HTTP. Not HITL.
+
 ## Wait / gate (`sdk/wait-gate`)
 
 Builtin executor id `wait` ([`Wait`]) is auto-registered on
