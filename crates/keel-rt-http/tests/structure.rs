@@ -158,9 +158,28 @@ fn public_surface_is_complete_resume_token() {
         lib.contains("Succeeded { output: Bytes }"),
         "Succeeded must own output; not a unit variant"
     );
+    let inspect_node = lib
+        .split("pub struct InspectNode")
+        .nth(1)
+        .expect("InspectNode")
+        .split("pub enum InspectNodeState")
+        .next()
+        .expect("InspectNode body");
     assert!(
-        !lib.contains("pub output: Option"),
+        !inspect_node.contains("output"),
         "InspectNode must not have a ghost output field"
+    );
+    let inspect_enum = lib
+        .split("pub enum InspectNodeState")
+        .nth(1)
+        .expect("InspectNodeState")
+        .split("impl InspectNodeState")
+        .next()
+        .expect("enum body");
+    assert!(
+        inspect_enum.contains("Succeeded { output: Bytes }")
+            && !inspect_enum.contains("output: Option"),
+        "output belongs on Succeeded only, not Option on every variant"
     );
     assert!(
         client.contains("Unregistered { executors"),
