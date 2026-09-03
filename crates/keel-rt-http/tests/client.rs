@@ -1340,7 +1340,12 @@ async fn client_wire_is_complete_body_and_secret_header() {
         !headers.contains('?') && !raw.contains(&format!("?{SECRET_HEADER}")),
         "secret must not be a query string: {raw}"
     );
-    let parsed: CompleteBody = serde_json::from_str(body.trim_end_matches('\0')).unwrap();
+    let body = body.trim_end_matches('\0');
+    assert!(
+        body.contains("Zw==") && !body.contains("[103]"),
+        "complete Succeeded must be base64, not a u8 array: {body}"
+    );
+    let parsed: CompleteBody = serde_json::from_str(body).unwrap();
     assert_eq!(parsed.token, token);
     assert!(matches!(
         parsed.resume,
@@ -3871,6 +3876,123 @@ async fn client_live_cancel_after_ttl_steal_is_claimed_elsewhere() {
         ExecutionState::Waiting
     );
     drop(hb);
+    server.abort();
+}
+
+/// 0.1%: JSON `[u8]` for 400 KiB is a >1 MiB body (413) even though MAX_BODY
+/// is 1 MiB. Complete must send the same compact field as approve / inspect.
+#[tokio::test(flavor = "current_thread")]
+async fn client_complete_400kib_is_200_not_json_array_413() {
+    let rt = runtime_echo_hold();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    let payload = Bytes::from(vec![0xabu8; 400 * 1024]);
+    let json = serde_json::to_vec(&CompleteBody {
+        token: token.clone(),
+        resume: Resume::Complete(NodeOutcome::Succeeded(payload.clone())),
+    })
+    .expect("json");
+    assert!(
+        json.len() < MAX_BODY,
+        "400 KiB complete must be compact, not a u8 array: {} B",
+        json.len()
+    );
+    let text = String::from_utf8_lossy(&json);
+    assert!(
+        !text.contains("[171,") && !text.contains("[171,"),
+        "complete Succeeded must not be a number array"
+    );
+    client
+        .complete(
+            token,
+            Resume::Complete(NodeOutcome::Succeeded(payload.clone())),
+        )
+        .await
+        .expect("400 KiB complete must not 413 as a number array");
+    let done = tokio::time::timeout(BOUND, async {
+        loop {
+            let v = client.inspect(&id).await.expect("i");
+            if v.state.is_terminal() {
+                return v;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("done");
+    assert_eq!(
+        done.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: payload.clone(),
+        })
+    );
+    assert_eq!(
+        done.node(&NodeId::new("next")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded { output: payload })
+    );
+    server.abort();
+}
+
+/// Compact inspect encoding is not a response cap. GET has no body limit;
+/// MAX_BODY raw Succeeded is ~1.33 MiB base64 JSON and must 413.
+#[tokio::test(flavor = "current_thread")]
+async fn client_inspect_over_max_body_is_413() {
+    let fat = Bytes::from(vec![0x5au8; MAX_BODY]);
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("fat", {
+                let fat = fat.clone();
+                move |_ctx: ExecutionContext| {
+                    let fat = fat.clone();
+                    async move { NodeOutcome::Succeeded(fat) }
+                }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("fat", "fat")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    let err = tokio::time::timeout(BOUND, async {
+        loop {
+            match client.inspect(&id).await {
+                Ok(v) if v.state.is_terminal() => {
+                    panic!("inspect of MAX_BODY Succeeded must 413, got {v:?}")
+                }
+                Ok(_) | Err(KeelClientError::UnknownExecution) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(KeelClientError::PayloadTooLarge) => {
+                    return KeelClientError::PayloadTooLarge;
+                }
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("413");
+    assert!(matches!(err, KeelClientError::PayloadTooLarge), "{err:?}");
     server.abort();
 }
 

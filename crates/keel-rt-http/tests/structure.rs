@@ -417,6 +417,8 @@ fn required_client_tests_exist() {
         "fn client_start_cycle_is_400_bad_request_not_unregistered",
         "fn client_executors_without_secret_is_401",
         "fn client_approve_400kib_is_200_not_json_array_413",
+        "fn client_complete_400kib_is_200_not_json_array_413",
+        "fn client_inspect_over_max_body_is_413",
         "fn client_inspect_research_hold_write_outputs_are_per_node",
         "fn two_clients_approve_and_complete_one_token_downstream_runs_once",
         "fn client_approve_then_complete_same_token_is_noop",
@@ -480,8 +482,12 @@ fn required_client_tests_exist() {
     assert!(
         lib.contains("fn inspect_view_json_non_succeeded_has_no_output_or_error")
             && lib.contains("fn inspect_view_json_1mib_succeeded_is_compact_base64")
-            && lib.contains("mod wire_bytes"),
-        "inspect output must be base64 one field; non-Succeeded must not leak"
+            && lib.contains("fn complete_body_json_succeeded_is_base64_not_array")
+            && lib.contains("mod wire_bytes")
+            && lib.contains("mod wire_resume")
+            && lib.contains("#[serde(with = \"wire_resume\")]")
+            && lib.contains("if json.len() > MAX_BODY"),
+        "inspect/complete/approve Succeeded bytes are one base64 wire; inspect over MAX_BODY is 413"
     );
     let complete =
         fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/complete.rs").unwrap();

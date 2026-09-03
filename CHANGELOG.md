@@ -11,10 +11,14 @@ sends only `durable_bytes`. Unregistered `executor_id` is **400**
 [`KeelClientError::Unregistered`]. `GET /executors` lists
 [`Runtime::executor_ids`] (including builtin `wait`).
 `InspectNodeState::Succeeded { output }` carries result bytes as **one
-base64 field** (not a `[u8]` JSON array). Waiting still owns the only
-token. `POST /approve` / `POST /reject` are thin aliases over the
-complete apply path (empty approve body is **400**). CI:
-`sdk_loop_approve_then_cancel_is_409`,
+base64 field** (not a `[u8]` JSON array). `POST /complete` uses that
+same field — kernel Resume serde stays `[u8]` in-process; the HTTP
+adapter maps it (`client_complete_400kib_is_200_not_json_array_413`).
+Inspect of a huge Succeeded is **413** at `MAX_BODY`
+(`client_inspect_over_max_body_is_413`); compact encoding is not a cap.
+Waiting still owns the only token. `POST /approve` / `POST /reject` are
+thin aliases over the complete apply path (empty approve body is
+**400**). CI: `sdk_loop_approve_then_cancel_is_409`,
 `client_start_unregistered_is_400_nothing_runs`.
 
 ## Cancel one execution (`sdk/cancel`)

@@ -116,7 +116,10 @@ Same secret. The server wraps [`Runtime::start`] / [`Runtime::inspect`]
 / [`Runtime::complete`] / [`Runtime::cancel`]. No HTTP types in kernel
 `src/`. `InspectView` JSON carries the wait token once
 (`InspectNodeState::Waiting { token }`, not a cloned kernel `NodeState`).
-Succeeded owns output bytes; Running / Waiting / Failed do not.
+Succeeded owns output bytes as one base64 field — the same compact
+wire as `POST /complete` Succeeded and `POST /approve` `output`
+(kernel Resume `[u8]` serde stays in-process). Running / Waiting /
+Failed do not. Inspect JSON over `MAX_BODY` is **413**.
 `POST /complete` and `POST /cancel/:id` ClaimedElsewhere is
 **423 Locked** `{"error":"claimed_elsewhere"}` (not 400, not 409).
 

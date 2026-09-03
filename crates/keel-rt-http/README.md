@@ -12,8 +12,9 @@ A **shared secret is required** on every route. Send
 or wrong secret is **401**. Query-string secrets are ignored.
 
 Default bind is **`127.0.0.1`** (`DEFAULT_BIND` / `serve` / `serve_ephemeral`).
-`0.0.0.0` only via explicit `serve_on`. Body larger than **1 MiB**
-(`MAX_BODY`) is **413** and does not call start or complete.
+`0.0.0.0` only via explicit `serve_on`. Request JSON larger than **1 MiB**
+(`MAX_BODY`) is **413** and does not call start or complete. Inspect JSON
+larger than **1 MiB** is the same **413** — compact base64 is not a cap.
 
 The **engine process** registers executors (`register_fn`) before it
 serves. [`KeelClient::start`] sends only the definition
@@ -31,7 +32,9 @@ token once, in [`InspectNodeState::Waiting`]) — not an `ExecutionHandle`.
 Running-node tokens are omitted from the DTO type (not a cloned kernel
 `NodeState`). Result bytes live only on
 [`InspectNodeState::Succeeded { output }`] as one base64 field
-(not a JSON number array).
+(not a JSON number array). `POST /complete` Succeeded bytes use that
+same field (`wire_resume` maps kernel `[u8]` Resume serde). Approve
+`output` is the same encoding.
 `InspectView::resume_token` reads `InspectNodeState::Waiting { token }`.
 Unknown execution is **404**. Terminal
 and Cancelled are **200** with state; `complete` of a cancelled token is

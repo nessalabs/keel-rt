@@ -19,7 +19,7 @@ pub use client::{Decision, KeelClient, KeelClientError, HANG_BOUND};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -41,8 +41,10 @@ use thiserror::Error;
 /// Default listen address: loopback, ephemeral port. Never `0.0.0.0`.
 pub const DEFAULT_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
-/// JSON larger than this is not accepted. Oversized body does not call start
-/// or complete. Cancel is id-only: that route rejects any body (`413`).
+/// JSON larger than this is not accepted on the request, and inspect JSON
+/// larger than this is **413**. Compact encoding is not a cap: a huge
+/// Succeeded still 413s. Oversized request body does not call start or
+/// complete. Cancel is id-only: that route rejects any body (`413`).
 pub const MAX_BODY: usize = 1024 * 1024;
 
 /// `POST /complete` when another Runtime holds the execution
@@ -88,10 +90,71 @@ impl fmt::Debug for CompleteSecret {
     }
 }
 
-/// `POST /complete` body.
+/// HTTP wire for [`Resume`]. Kernel serde stays `[u8]` arrays in-process;
+/// this adapter maps Succeeded bytes through [`wire_bytes`] (one base64 field).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum WireResume {
+    Complete(WireOutcome),
+    Reinvoke,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum WireOutcome {
+    Succeeded(#[serde(with = "wire_bytes")] Bytes),
+    Failed(keel_rt::NodeError),
+    Waiting { token: ResumeToken },
+    TimedOut,
+}
+
+impl From<&Resume> for WireResume {
+    fn from(resume: &Resume) -> Self {
+        match resume {
+            Resume::Complete(o) => Self::Complete(match o {
+                keel_rt::NodeOutcome::Succeeded(b) => WireOutcome::Succeeded(b.clone()),
+                keel_rt::NodeOutcome::Failed(e) => WireOutcome::Failed(e.clone()),
+                keel_rt::NodeOutcome::Waiting { token } => WireOutcome::Waiting {
+                    token: token.clone(),
+                },
+                keel_rt::NodeOutcome::TimedOut => WireOutcome::TimedOut,
+            }),
+            Resume::Reinvoke => Self::Reinvoke,
+        }
+    }
+}
+
+impl From<WireResume> for Resume {
+    fn from(wire: WireResume) -> Self {
+        match wire {
+            WireResume::Complete(o) => Resume::Complete(match o {
+                WireOutcome::Succeeded(b) => keel_rt::NodeOutcome::Succeeded(b),
+                WireOutcome::Failed(e) => keel_rt::NodeOutcome::Failed(e),
+                WireOutcome::Waiting { token } => keel_rt::NodeOutcome::Waiting { token },
+                WireOutcome::TimedOut => keel_rt::NodeOutcome::TimedOut,
+            }),
+            WireResume::Reinvoke => Resume::Reinvoke,
+        }
+    }
+}
+
+mod wire_resume {
+    use super::{Resume, WireResume};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(resume: &Resume, serializer: S) -> Result<S::Ok, S::Error> {
+        WireResume::from(resume).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Resume, D::Error> {
+        WireResume::deserialize(deserializer).map(Resume::from)
+    }
+}
+
+/// `POST /complete` body. [`Resume`] on the value; Succeeded bytes on the
+/// wire are the same base64 field as inspect / approve.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompleteBody {
     pub token: ResumeToken,
+    #[serde(with = "wire_resume")]
     pub resume: Resume,
 }
 
@@ -464,15 +527,27 @@ async fn inspect_handler(
     State(app): State<App>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<InspectView>, StatusCode> {
-    authorize(&app, &headers)?;
-    let id = ExecutionId::parse(&id).map_err(|_| StatusCode::NOT_FOUND)?;
+) -> axum::response::Response {
+    if authorize(&app, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let id = match ExecutionId::parse(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
     match app.runtime.inspect(&id).await {
         Some(snap) => {
             drop_held_if_terminal(&app.started, &id, snap.state.is_terminal());
-            Ok(Json(InspectView::from_snapshot(&snap)))
+            let json = match serde_json::to_vec(&InspectView::from_snapshot(&snap)) {
+                Ok(j) => j,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            if json.len() > MAX_BODY {
+                return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+            }
+            ([(CONTENT_TYPE, "application/json")], json).into_response()
         }
-        None => Err(StatusCode::NOT_FOUND),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -671,6 +746,42 @@ mod tests {
         let v = serde_json::to_value(&body).unwrap();
         let back: CompleteBody = serde_json::from_value(v).unwrap();
         assert!(matches!(back.resume, Resume::Reinvoke));
+    }
+
+    #[test]
+    fn complete_body_json_succeeded_is_base64_not_array() {
+        let token = ResumeToken::issue(
+            keel_rt::ExecutionId::parse("exec-1").unwrap(),
+            keel_rt::NodeId::new("hold"),
+            1,
+        );
+        let body = CompleteBody {
+            token,
+            resume: Resume::Complete(keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(
+                b"g",
+            ))),
+        };
+        let v = serde_json::to_value(&body).unwrap();
+        let succeeded = &v["resume"]["Complete"]["Succeeded"];
+        assert!(
+            succeeded.is_string(),
+            "complete Succeeded must be the same base64 field as inspect/approve: {v}"
+        );
+        assert_eq!(succeeded, "Zw==");
+        assert!(
+            !succeeded.is_array(),
+            "kernel Resume [u8] array must not be the HTTP complete wire: {v}"
+        );
+        let kernel = serde_json::to_value(&body.resume).unwrap();
+        assert!(
+            kernel["Complete"]["Succeeded"].is_array(),
+            "in-process Resume serde stays a [u8] array: {kernel}"
+        );
+        let back: CompleteBody = serde_json::from_value(v).unwrap();
+        assert!(matches!(
+            back.resume,
+            Resume::Complete(keel_rt::NodeOutcome::Succeeded(ref b)) if b.as_ref() == b"g"
+        ));
     }
 
     #[test]

@@ -228,6 +228,7 @@ impl KeelClient {
     }
 
     /// `GET /inspect/:id` — same secret as complete. Hang-bound applies.
+    /// Inspect JSON over [`crate::MAX_BODY`] is [`KeelClientError::PayloadTooLarge`].
     pub async fn inspect(
         &self,
         execution_id: &ExecutionId,
@@ -253,6 +254,7 @@ impl KeelClient {
             }
             401 => Err(KeelClientError::Unauthorized),
             404 => Err(KeelClientError::UnknownExecution),
+            413 => Err(KeelClientError::PayloadTooLarge),
             other => Err(KeelClientError::Unexpected(other)),
         }
     }
