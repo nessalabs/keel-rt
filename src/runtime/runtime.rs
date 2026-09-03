@@ -6,7 +6,7 @@ use crate::domain::snapshot::SnapshotError;
 use crate::domain::state::{ApplyCmd, ApplyError, Execution, ExecutionState};
 use crate::domain::time::Timestamp;
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
-use crate::runtime::handle::{ActiveGuard, ActiveSet, ExecutionHandle};
+use crate::runtime::handle::{ActiveGuard, ActiveSet, ExecutionHandle, LeaseGate};
 use crate::runtime::inject::{self, Event, EventRx, EventTx};
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::sink::{EventSink, NoopSink};
@@ -254,6 +254,8 @@ pub struct Runtime {
     owned: Arc<Mutex<Vec<ExecutionHandle>>>,
     /// Store lease owner. Two Runtimes never share this.
     owner: OwnerId,
+    /// Shared with handles so resume and complete use one claim path.
+    lease: Arc<LeaseGate>,
 }
 
 impl Runtime {
@@ -307,6 +309,7 @@ impl Runtime {
             dropped: Arc::new(AtomicBool::new(false)),
             consumed: false,
             _active: active,
+            lease: self.lease.clone(),
         })
     }
 
@@ -422,6 +425,7 @@ impl Runtime {
             dropped: Arc::new(AtomicBool::new(false)),
             consumed: false,
             _active: active,
+            lease: self.lease.clone(),
         })
     }
 
@@ -435,11 +439,7 @@ impl Runtime {
     }
 
     fn live_tx(&self, id: &ExecutionId) -> Option<EventTx> {
-        self.active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(id)
-            .cloned()
+        self.lease.live_tx(id)
     }
 
     /// Complete or reinvoke a Waiting node. Live drive: inject (no second
@@ -450,26 +450,15 @@ impl Runtime {
     pub async fn complete(&self, token: ResumeToken, resume: Resume) -> Result<(), CompleteError> {
         let id = token.execution_id();
         if let Some(tx) = self.live_tx(id) {
-            match self.store.claim(id, &self.owner, self.clock.now()).await {
-                Ok(_) => {
+            match self.lease.claim_or_forget(id).await {
+                Ok(()) => {
                     return self
                         .map_complete_apply(inject::inject_resume(&tx, token, resume).await);
                 }
-                Err(ClaimError::ClaimedElsewhere) => {
-                    self.forget_live(id);
-                    return Err(CompleteError::ClaimedElsewhere);
-                }
-                Err(ClaimError::Store(s)) => return Err(CompleteError::Store(s)),
+                Err(e) => return Err(e.into()),
             }
         }
         self.complete_from_store(token, resume).await
-    }
-
-    fn forget_live(&self, id: &ExecutionId) {
-        self.active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(id);
     }
 
     fn map_complete_apply(&self, r: Result<(), ApplyError>) -> Result<(), CompleteError> {
@@ -664,17 +653,22 @@ impl RuntimeBuilder {
     }
 
     pub fn build(self) -> Runtime {
+        let store = self.store.unwrap_or_else(|| Arc::new(MemoryStore::new()));
+        let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
+        let owner = OwnerId::new();
+        let active = Arc::new(Mutex::new(ActiveSet::new()));
         Runtime {
-            store: self.store.unwrap_or_else(|| Arc::new(MemoryStore::new())),
+            store: store.clone(),
             policy: self.policy.unwrap_or_else(|| Arc::new(AcceptPolicy)),
             sink: self.sink.unwrap_or_else(|| Arc::new(NoopSink)),
             registry: self.registry,
-            clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
+            clock: clock.clone(),
             concurrency: self.concurrency,
             cancel_bound: self.cancel_bound,
-            active: Arc::new(Mutex::new(ActiveSet::new())),
+            active: active.clone(),
             owned: Arc::new(Mutex::new(Vec::new())),
-            owner: OwnerId::new(),
+            owner: owner.clone(),
+            lease: LeaseGate::new(store, owner, clock, active),
         }
     }
 }

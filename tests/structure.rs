@@ -401,6 +401,7 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "stale_epoch_persist_is_rejected",
         "shared_memory_store_second_runtime_resume_is_claimed_elsewhere",
         "live_complete_after_ttl_steal_is_claimed_elsewhere",
+        "handle_resume_after_ttl_steal_is_claimed_elsewhere",
         "complete_256_wait_nodes_then_hang_bound_cancels",
         "resume_tokens_are_not_sequential_ints",
     ] {

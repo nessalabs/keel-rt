@@ -246,6 +246,84 @@ async fn live_complete_after_ttl_steal_is_claimed_elsewhere() {
     drop(handle);
 }
 
+/// After TTL steal, A's ExecutionHandle::resume must not inject Complete.
+#[tokio::test(flavor = "current_thread")]
+async fn handle_resume_after_ttl_steal_is_claimed_elsewhere() {
+    let store = NoRefreshHeartbeat {
+        inner: MemoryStore::new(),
+    };
+    let clock = Arc::new(FakeClock::new());
+    let next_runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let next = next_runs.clone();
+    let rt_a = Runtime::builder()
+        .store(store.clone())
+        .clock(clock.clone())
+        .register_fn("next", move |_ctx: ExecutionContext| {
+            next.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+        })
+        .build();
+    let handle = rt_a.start(wait_then_next()).unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait_stable()).await, ExecutionState::Waiting);
+    let token = handle
+        .inspect()
+        .await
+        .node(&NodeId::new("hold"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .expect("token");
+    clock.advance(DEFAULT_LEASE_TTL);
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let rt_b = Runtime::builder()
+        .store(store.clone())
+        .clock(clock.clone())
+        .register_fn("next", succeed("next"))
+        .build();
+    let hb = rt_b
+        .resume(&id)
+        .await
+        .expect("B claims after TTL while A handle is still live");
+    match handle
+        .resume(
+            token.clone(),
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate"))),
+        )
+        .await
+    {
+        Err(keel_rt::ApplyError::Illegal(s)) if s.contains("claimed elsewhere") => {}
+        Err(keel_rt::ApplyError::Illegal(s)) if s.contains("persist failed") => {
+            panic!("handle resume must refuse before inject, got persist failed")
+        }
+        Ok(()) => panic!("handle resume after steal must not be Ok"),
+        Err(e) => panic!("expected ClaimedElsewhere equivalent, got {e}"),
+    }
+    assert_eq!(
+        next_runs.load(Ordering::SeqCst),
+        0,
+        "A must not dispatch downstream after steal"
+    );
+    let snap = store.get(&id).await.unwrap().unwrap();
+    assert_eq!(snap.state, ExecutionState::Waiting);
+    assert!(matches!(
+        snap.node(&NodeId::new("hold")).unwrap().state,
+        NodeState::Waiting { .. }
+    ));
+    rt_b.complete(
+        token,
+        Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate"))),
+    )
+    .await
+    .expect("owner B completes");
+    assert_eq!(within(hb.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(next_runs.load(Ordering::SeqCst), 0);
+    let snap = store.get(&id).await.unwrap().unwrap();
+    assert_eq!(snap.state, ExecutionState::Succeeded);
+    drop(handle);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn resume_after_wait_returns_terminal_without_re_running() {
     let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
