@@ -180,6 +180,16 @@ fn public_surface_is_complete_resume_token() {
         "inspect and complete must share one send path"
     );
     assert!(
+        client.contains("fn uri(")
+            && client.contains("fn path_url(")
+            && !client.contains("complete_url:"),
+        "start/inspect/complete must share one URI builder; no complete-only URL field"
+    );
+    assert!(
+        client.contains("Out-of-process start, inspect, and complete"),
+        "client module docs must name start, not inspect+complete only"
+    );
+    assert!(
         lib.contains("StatusCode::LOCKED") && lib.contains("claimed_elsewhere"),
         "complete must return 423 Locked with claimed_elsewhere body"
     );
@@ -192,11 +202,65 @@ fn public_surface_is_complete_resume_token() {
         "InspectView must not be an ExecutionHandle (no cancel / Drop-cancel)"
     );
     assert!(!client.contains("CompleteClient"));
-    assert!(!client.contains("pub async fn approve"));
-    assert!(!client.contains("pub async fn reject"));
-    assert!(!client.contains("pub async fn start"));
+    assert!(client.contains("pub async fn start"));
+    assert!(lib.contains("pub struct StartBody"));
+    assert!(
+        lib.contains("pub on_failure: OnFailure")
+            && lib.contains("pub join: Join")
+            && lib.contains("durable_bytes")
+            && lib.contains("from_durable_bytes"),
+        "StartBody must be kernel durable JSON, not a second graph language"
+    );
+    assert!(
+        lib.contains("fn hold_if_live")
+            && lib.contains("fn drop_held_if_terminal")
+            && lib.contains("fn reap_held_terminals")
+            && lib.contains("fn drop_held_if_terminal_keeps_waiting")
+            && lib.contains("fn hold_if_live_skips_terminal_snapshot")
+            && lib.contains("fn reap_held_terminals_clears_n_finished_keeps_park"),
+        "HTTP hold is snapshot is_terminal only; reap on next start; live parks stay held"
+    );
+    let prod = lib.split("#[cfg(test)]").next().expect("prod");
+    assert!(
+        !prod.contains("wait_stable") && !prod.contains(".wait("),
+        "HTTP must not infer live vs terminal via wait / wait_stable"
+    );
+    assert!(lib.contains("fn start_body_is_durable_bytes_not_snapshot"));
+    assert!(
+        !lib.contains("fn start_body_is_narrow_not_snapshot"),
+        "narrow-not-snapshot must not lock omitted on_failure/join"
+    );
+    assert!(
+        lib.contains("serde_json::from_slice(&def.durable_bytes())"),
+        "From<&WorkflowDefinition> must be durable_bytes, not id/nodes/edges only"
+    );
+    assert!(lib.contains("pub struct StartView"));
+    assert!(lib.contains(".route(\"/start\""));
+    let start_fn = client
+        .split("pub async fn start(")
+        .nth(1)
+        .expect("start")
+        .split("    pub async fn ")
+        .next()
+        .expect("start body");
+    assert!(
+        start_fn.contains(".send(") && !start_fn.contains("CLAIMED_ELSEWHERE"),
+        "start must reuse send and must not invent a steal"
+    );
+    assert!(client.contains("pub async fn approve"));
+    assert!(client.contains("pub async fn reject"));
+    assert!(
+        !lib.contains(".route(\"/approve\"") && !lib.contains(".route(\"/reject\""),
+        "approve/reject must reuse POST /complete, not alias routes"
+    );
     assert!(!client.contains("pub async fn schedule"));
     assert!(!client.contains("pub async fn claim"));
+    assert!(
+        !client.contains("START_HANG_BOUND")
+            && !client.contains("START_SECRET_HEADER")
+            && !client.contains("start rejected"),
+        "start must not add verb-specific hang/secret/Display names"
+    );
 }
 
 #[test]
@@ -236,6 +300,36 @@ fn required_client_tests_exist() {
         "fn client_inspect_wire_sends_both_secret_headers",
         "fn client_inspect_succeeds_against_bearer_only_server",
         "fn client_inspect_401_error_text_does_not_say_complete",
+        "fn client_start_inspect_complete_unblocks_wait",
+        "fn client_start_then_inspect_is_waiting_not_cancelled",
+        "fn client_two_starts_are_distinct_ids",
+        "fn client_start_without_secret_is_401",
+        "fn client_start_wrong_secret_is_401",
+        "fn client_start_unregistered_is_400_nothing_runs",
+        "fn client_start_empty_definition_is_400",
+        "fn client_start_oversized_body_is_413",
+        "fn client_hung_start_is_hung_not_forever",
+        "fn client_start_does_not_follow_redirect_off_loopback",
+        "fn client_start_wire_sends_both_secret_headers",
+        "fn client_start_succeeds_against_bearer_only_server",
+        "fn client_start_inspect_approve_unblocks_wait",
+        "fn client_start_inspect_reject_fails_execution",
+        "fn client_start_fail_subtree_keeps_running_sibling",
+        "fn client_fail_subtree_reject_returns_and_server_drop_cancels_sibling",
+        "fn client_start_reinvoke_old_token_does_not_approve",
+        "fn client_approve_then_reject_does_not_fail_succeeded",
+        "fn client_reject_then_approve_does_not_revive",
+        "fn two_approves_one_token_downstream_runs_once",
+        "fn client_approve_after_http_start_server_drop_is_409",
+        "fn client_approve_after_fail_fast_other_node_is_409",
+        "fn client_duplicate_approve_is_noop",
+        "fn client_approve_after_terminal_handle_drop_is_200_noop",
+        "fn client_inspect_during_approve_does_not_double_apply",
+        "fn client_drop_http_server_after_start_cancels_wait",
+        "fn client_start_terminal_survives_server_drop",
+        "fn client_n_instant_http_starts_are_reaped_on_next_start",
+        "fn http_start_second_runtime_new_id_is_not_steal",
+        "fn client_approve_issued_token_for_running_node_leaves_wait_parked",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
     }
@@ -276,9 +370,14 @@ fn architecture_mermaid_names_keel_client() {
     for name in [
         "KeelClient",
         "POST /complete",
+        "POST /start",
         "GET /inspect",
         "Runtime::complete",
         "Runtime::inspect",
+        "Runtime::start",
+        "StartBody",
+        "StartNode",
+        "StartView",
         "InspectView",
         "InspectNodeState",
         "Decision",
@@ -316,6 +415,10 @@ fn baseline_has_numbered_inspect_release_row() {
         "BASELINE must number KeelClient::inspect"
     );
     assert!(
+        base.contains("## Start then approve") && base.contains("KeelClient::start"),
+        "BASELINE must number KeelClient::start"
+    );
+    assert!(
         base.contains("release after"),
         "BASELINE must number release before/after"
     );
@@ -336,5 +439,9 @@ fn profile_harness_exists() {
     assert!(
         s.contains("fn inspect_view_json_is_not_full_snapshot"),
         "profile.rs must lock InspectView JSON vs fat snapshot"
+    );
+    assert!(
+        s.contains("fn profile_start_approve_release"),
+        "profile.rs must measure start+approve"
     );
 }

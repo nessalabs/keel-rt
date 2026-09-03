@@ -1,5 +1,55 @@
 # Changelog
 
+## Start then approve / reject (`sdk/start-approve`)
+
+[`KeelClient::start`] is `POST /start` with kernel durable JSON
+([`WorkflowDefinition::durable_bytes`] / [`from_durable_bytes`]):
+`id`, `on_failure`, nodes `{id, executor_id, join}`, edges — not a
+snapshot dump and not a second graph language. FailSubtree / AllDone
+survive the wire (`client_start_fail_subtree_keeps_running_sibling`).
+The server calls [`Runtime::start`] and **holds the handle iff the
+snapshot is not terminal** (`hold_if_live` / `drop_held_if_terminal`).
+No `wait` / `wait_stable` in the adapter — those are a second status
+machine. The next start reaps held terminals via snapshot
+`is_terminal()` only (`reap_held_terminals`); N instant-success
+starts do not stay in the vec
+(`reap_held_terminals_clears_n_finished_keeps_park`,
+`client_n_instant_http_starts_are_reaped_on_next_start`).
+FailSubtree reject returns while the sibling is still Running
+and later server-drop still cancels it
+(`client_fail_subtree_reject_returns_and_server_drop_cancels_sibling`).
+Dropping the server Drop-cancels parks
+(`client_drop_http_server_after_start_cancels_wait`) and does not
+Cancel a terminal already dropped
+(`client_start_terminal_survives_server_drop`). Duplicate approve
+after Drop of a **terminal** handle is 200 noop (same bytes; no
+second downstream). Drop-cancel of a **live park** stays 409
+(`client_approve_after_terminal_handle_drop_is_200_noop`,
+`client_approve_after_http_start_server_drop_is_409`,
+`complete_after_drop_of_terminal_handle_is_duplicate_noop`).
+The client returns the new [`ExecutionId`]. Each call is a new run
+(`client_two_starts_are_distinct_ids`); a second Runtime's new id is
+not a steal (`http_start_second_runtime_new_id_is_not_steal`).
+HTTP start + inspect + complete on sqlite (two Runtimes, one file)
+lives in `keel-rt-sqlite` — this crate does not import SqliteStore
+(`http_sqlite_start_inspect_complete_two_runtimes_new_id_is_not_steal`).
+Unregistered / empty definition is **400**; oversized **413**; missing
+secret **401** (verb-neutral Display; no `START_*` names). Same
+[`SECRET_HEADER`] / [`HANG_BOUND`] / `send` / `uri` as inspect and
+complete. [`CompleteSecret`] stays named for historical
+`x-keel-complete`; it is the secret on every route.
+
+[`KeelClient::approve`] / [`KeelClient::reject`] POST the existing
+`/complete` body: `Decision::Complete(bytes)` and `Decision::Fail`
+(`NodeOutcome::failed("failed")` → execution Failed). There is no
+`Decision` reject variant (PR #9). No `/approve` or `/reject` routes.
+Proof: `client_start_inspect_approve_unblocks_wait`,
+`client_start_inspect_reject_fails_execution` (cite
+`client_decision_fail_fails_execution`). Approve of an issued
+Running-node token leaves the wait parked
+(`client_approve_issued_token_for_running_node_leaves_wait_parked`).
+Kernel `src/` unchanged.
+
 ## Inspect then complete (`sdk/inspect`)
 
 [`KeelClient::inspect`] is `GET /inspect/:id` with the same secret as

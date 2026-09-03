@@ -1,7 +1,10 @@
-//! Out-of-process inspect + complete. POSTs the same JSON [`CompleteBody`]
-//! the server already accepts. Not a second token type.
+//! Out-of-process start, inspect, and complete. POSTs the same JSON
+//! [`CompleteBody`] the server already accepts. Not a second token type.
 
-use crate::{CompleteBody, CompleteSecret, InspectView, CLAIMED_ELSEWHERE, SECRET_HEADER};
+use crate::{
+    CompleteBody, CompleteSecret, InspectView, StartBody, StartView, CLAIMED_ELSEWHERE,
+    SECRET_HEADER,
+};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
@@ -14,7 +17,7 @@ use std::fmt;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Bound for one inspect or complete request. A hung server is
+/// Bound for one start, inspect, or complete request. A hung server is
 /// [`KeelClientError::Hung`], not a forever wait. Tokio time.
 pub const HANG_BOUND: Duration = Duration::from_secs(5);
 
@@ -36,8 +39,9 @@ impl From<Decision> for Resume {
     }
 }
 
-/// Errors from [`KeelClient::inspect`] and [`KeelClient::complete`].
-/// Status map matches the server. Display is verb-neutral for shared codes.
+/// Errors from [`KeelClient::start`], [`KeelClient::inspect`], and
+/// [`KeelClient::complete`]. Status map matches the server. Display is
+/// verb-neutral for shared codes.
 #[derive(Debug, Error)]
 pub enum KeelClientError {
     #[error("request rejected: missing or wrong secret")]
@@ -62,8 +66,8 @@ pub enum KeelClientError {
     Transport(String),
 }
 
-/// Out-of-process SDK client. This crate implements [`Self::inspect`] and
-/// [`Self::complete`]. No start / schedule HTTP.
+/// Out-of-process SDK client. This crate implements [`Self::start`],
+/// [`Self::inspect`], and [`Self::complete`]. No schedule HTTP.
 ///
 /// Sends [`SECRET_HEADER`] and `Authorization: Bearer` when constructed
 /// with a secret. Duplicate complete is Ok (server 200 noop).
@@ -72,13 +76,12 @@ pub enum KeelClientError {
 pub struct KeelClient {
     http: Client<HttpConnector, Full<Bytes>>,
     base: String,
-    complete_url: Uri,
     secret: Option<CompleteSecret>,
     hang_bound: Duration,
 }
 
 impl KeelClient {
-    /// `base_url` is the server root (e.g. `http://127.0.0.1:port`), not `/complete`.
+    /// `base_url` is the server root (e.g. `http://127.0.0.1:port`), not a route.
     pub fn new(base_url: impl AsRef<str>, secret: CompleteSecret) -> Result<Self, KeelClientError> {
         Self::build(base_url.as_ref(), Some(secret))
     }
@@ -89,17 +92,19 @@ impl KeelClient {
     }
 
     fn build(base_url: &str, secret: Option<CompleteSecret>) -> Result<Self, KeelClientError> {
-        let base = base_url.trim_end_matches('/').to_string();
-        let complete_url = complete_url(&base)
-            .parse::<Uri>()
-            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         Ok(Self {
             http: Client::builder(TokioExecutor::new()).build_http(),
-            base,
-            complete_url,
+            base: base_url.trim_end_matches('/').to_string(),
             secret,
             hang_bound: HANG_BOUND,
         })
+    }
+
+    /// One URL builder for start / inspect / complete. No complete-only field.
+    fn uri(&self, path: &str) -> Result<Uri, KeelClientError> {
+        path_url(&self.base, path)
+            .parse::<Uri>()
+            .map_err(|e| KeelClientError::Transport(e.to_string()))
     }
 
     /// Override [`HANG_BOUND`] for this client.
@@ -137,17 +142,53 @@ impl KeelClient {
         }
     }
 
+    /// `POST /start` — same secret and hang-bound as inspect / complete.
+    /// Returns the new [`ExecutionId`]. Each call is a new run.
+    pub async fn start(
+        &self,
+        definition: impl Into<StartBody>,
+    ) -> Result<ExecutionId, KeelClientError> {
+        let json = serde_json::to_vec(&definition.into())
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        let resp = self
+            .send(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(self.uri("start")?)
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(CONTENT_LENGTH, json.len()),
+                Bytes::from(json),
+            )
+            .await?;
+        match resp.status().as_u16() {
+            200 => {
+                let bytes = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
+                    .to_bytes();
+                let view: StartView = serde_json::from_slice(&bytes)
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+                Ok(view.execution_id)
+            }
+            401 => Err(KeelClientError::Unauthorized),
+            413 => Err(KeelClientError::PayloadTooLarge),
+            400 => Err(KeelClientError::BadRequest),
+            other => Err(KeelClientError::Unexpected(other)),
+        }
+    }
+
     /// `GET /inspect/:id` — same secret as complete. Hang-bound applies.
     pub async fn inspect(
         &self,
         execution_id: &ExecutionId,
     ) -> Result<InspectView, KeelClientError> {
-        let url = format!("{}/inspect/{}", self.base, execution_id.as_str())
-            .parse::<Uri>()
-            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         let resp = self
             .send(
-                Request::builder().method(Method::GET).uri(url),
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(self.uri(&format!("inspect/{}", execution_id.as_str()))?),
                 Bytes::new(),
             )
             .await?;
@@ -185,7 +226,7 @@ impl KeelClient {
             .send(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(self.complete_url.clone())
+                    .uri(self.uri("complete")?)
                     .header(CONTENT_TYPE, "application/json")
                     .header(CONTENT_LENGTH, json.len()),
                 Bytes::from(json),
@@ -202,20 +243,42 @@ impl KeelClient {
             other => Err(KeelClientError::Unexpected(other)),
         }
     }
+
+    /// `Decision::Complete(bytes)` through [`Self::complete`]. Same
+    /// `POST /complete` — not a second endpoint.
+    pub async fn approve(
+        &self,
+        token: ResumeToken,
+        output: impl Into<Bytes>,
+    ) -> Result<(), KeelClientError> {
+        self.complete(token, Decision::Complete(output.into()))
+            .await
+    }
+
+    /// `Decision::Fail` through [`Self::complete`] — `NodeOutcome::failed("failed")`,
+    /// execution [`keel_rt::ExecutionState::Failed`]. There is no `Decision`
+    /// reject variant (PR #9 mapping).
+    pub async fn reject(&self, token: ResumeToken) -> Result<(), KeelClientError> {
+        self.complete(token, Decision::Fail).await
+    }
 }
 
 impl fmt::Debug for KeelClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KeelClient")
-            .field("complete_url", &self.complete_url)
+            .field("base", &self.base)
             .field("secret", &self.secret)
             .field("hang_bound", &self.hang_bound)
             .finish()
     }
 }
 
-fn complete_url(base: &str) -> String {
-    format!("{}/complete", base.trim_end_matches('/'))
+fn path_url(base: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 #[cfg(test)]
@@ -234,17 +297,26 @@ mod tests {
             Resume::Complete(NodeOutcome::failed("failed"))
         );
         assert_eq!(Resume::from(Decision::Reinvoke), Resume::Reinvoke);
+        assert_eq!(
+            Resume::from(Decision::Fail),
+            Resume::Complete(NodeOutcome::failed("failed")),
+            "reject is Decision::Fail; no second fail contract"
+        );
     }
 
     #[test]
-    fn complete_url_trims_trailing_slash() {
+    fn path_url_trims_trailing_slash() {
         assert_eq!(
-            complete_url("http://127.0.0.1:9"),
+            path_url("http://127.0.0.1:9", "complete"),
             "http://127.0.0.1:9/complete"
         );
         assert_eq!(
-            complete_url("http://127.0.0.1:9/"),
-            "http://127.0.0.1:9/complete"
+            path_url("http://127.0.0.1:9/", "/start"),
+            "http://127.0.0.1:9/start"
+        );
+        assert_eq!(
+            path_url("http://127.0.0.1:9/", "inspect/exec-1"),
+            "http://127.0.0.1:9/inspect/exec-1"
         );
     }
 

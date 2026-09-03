@@ -261,6 +261,70 @@ async fn profile_inspect_complete_release() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn profile_start_approve_release() {
+    let rt = runtime();
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let body = keel_rt_http::StartBody::from(&wait_then_next());
+    eprintln!(
+        "profile json StartBody={}B",
+        serde_json::to_vec(&body).unwrap().len()
+    );
+
+    let mut http_start = Vec::new();
+    for _ in 0..MEDIAN_ITERS {
+        let t = Instant::now();
+        let id = client.start(wait_then_next()).await.unwrap();
+        http_start.push(t.elapsed());
+        let _ = id;
+    }
+    let mut inproc_start = Vec::new();
+    for _ in 0..MEDIAN_ITERS {
+        let t = Instant::now();
+        let handle = rt.start(wait_then_next()).unwrap();
+        inproc_start.push(t.elapsed());
+        handle.cancel().await;
+    }
+    eprintln!(
+        "profile start HTTP median={} in-process Runtime::start median={} (n={MEDIAN_ITERS})",
+        ms(median_dur(http_start)),
+        ms(median_dur(inproc_start)),
+    );
+
+    let mut round = Vec::new();
+    for _ in 0..MEDIAN_ITERS {
+        let t = Instant::now();
+        let id = client.start(wait_then_next()).await.unwrap();
+        let token = loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(tok) = v.resume_token(&NodeId::new("hold")) {
+                    break tok.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        };
+        client
+            .approve(token, Bytes::from_static(b"gate"))
+            .await
+            .unwrap();
+        loop {
+            let v = client.inspect(&id).await.unwrap();
+            if v.state.is_terminal() {
+                assert_eq!(v.state, ExecutionState::Succeeded);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        round.push(t.elapsed());
+    }
+    eprintln!(
+        "profile start+inspect+approve HTTP median={} (n={MEDIAN_ITERS})",
+        ms(median_dur(round)),
+    );
+    server.abort();
+}
+
 #[test]
 fn inspect_view_json_is_not_full_snapshot() {
     let token = keel_rt::ResumeToken::issue(

@@ -126,6 +126,17 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
     ] {
         assert!(resume.contains(name), "resume.rs missing {name}");
     }
+    let http =
+        fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/http.rs").unwrap();
+    assert!(
+        http.contains("fn http_sqlite_start_inspect_complete_two_runtimes_new_id_is_not_steal"),
+        "http.rs must lock HTTP start+inspect+complete on sqlite (two Runtimes)"
+    );
+    let cargo = fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/Cargo.toml").unwrap();
+    assert!(
+        cargo.contains("keel-rt-http"),
+        "sqlite tests-only dep on keel-rt-http; HTTP src must not name SqliteStore"
+    );
     assert!(
         lib.contains("fn dirty_persist_ready_t_to_t_prime_updates_only_runnable_at"),
         "lib.rs must prove persist() dirty T→T' updates only the column"

@@ -1,9 +1,12 @@
-//! Thin HTTP adapter. Another process POSTs a token + [`Resume`]; this
-//! process calls [`Runtime::complete`]. No forms, no identity.
+//! Thin HTTP adapter. Another process starts a run, inspects for a wait
+//! token, then POSTs that token + [`Resume`]. This process calls
+//! [`Runtime::start`] / [`Runtime::inspect`] / [`Runtime::complete`].
+//! No forms, no identity.
 //!
 //! A shared secret is required. Default bind is `127.0.0.1` only.
-//! [`KeelClient::inspect`] + [`KeelClient::complete`] is the out-of-process
-//! wait round-trip. Kernel `keel-rt` does not depend on this crate.
+//! [`KeelClient::start`] + [`KeelClient::inspect`] + [`KeelClient::complete`]
+//! is the out-of-process wait round-trip. Kernel `keel-rt` does not depend
+//! on this crate.
 
 mod client;
 
@@ -17,20 +20,22 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use keel_rt::{
-    CompleteError, ExecutionId, ExecutionSnapshot, ExecutionState, NodeId, NodeState, Resume,
-    ResumeToken, Runtime,
+    CompleteError, ExecutionHandle, ExecutionId, ExecutionSnapshot, ExecutionState, ExecutorId,
+    Join, NodeId, NodeState, OnFailure, Resume, ResumeToken, Runtime, StartError,
+    WorkflowDefinition, WorkflowId,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Default listen address: loopback, ephemeral port. Never `0.0.0.0`.
 pub const DEFAULT_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
-/// JSON larger than this is not accepted. Oversized body does not call `complete`.
-pub const MAX_COMPLETE_BODY: usize = 1024 * 1024;
+/// JSON larger than this is not accepted. Oversized body does not call start
+/// or complete.
+pub const MAX_BODY: usize = 1024 * 1024;
 
 /// `POST /complete` when another Runtime holds the execution
 /// (`CompleteError::ClaimedElsewhere`). **423 Locked**. Not 400 (malformed
@@ -38,10 +43,14 @@ pub const MAX_COMPLETE_BODY: usize = 1024 * 1024;
 pub const CLAIMED_ELSEWHERE: u16 = 423;
 
 /// Shared-secret header (alternative to `Authorization: Bearer …`).
-/// Same header on inspect and complete. Wire name is historical.
+/// Same header on start, inspect, and complete. Wire name is historical.
 pub const SECRET_HEADER: &str = "x-keel-complete";
 
-/// Shared secret for `POST /complete`. Not identity. Empty is rejected.
+/// Shared secret for **every** adapter route (start, inspect, complete).
+///
+/// The type is still `CompleteSecret` because the wire header is historical
+/// [`SECRET_HEADER`] (`x-keel-complete`). Renaming the type would fork it
+/// from that header. It is not a complete-only credential. Empty is rejected.
 #[derive(Clone)]
 pub struct CompleteSecret(Arc<str>);
 
@@ -76,6 +85,58 @@ impl fmt::Debug for CompleteSecret {
 pub struct CompleteBody {
     pub token: ResumeToken,
     pub resume: Resume,
+}
+
+/// `POST /start` body. This **is** kernel durable JSON
+/// ([`WorkflowDefinition::durable_bytes`] / [`WorkflowDefinition::from_durable_bytes`]),
+/// not a second graph language and not a snapshot dump.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartBody {
+    pub id: WorkflowId,
+    pub on_failure: OnFailure,
+    pub nodes: Vec<StartNode>,
+    pub edges: Vec<StartEdge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartNode {
+    pub id: NodeId,
+    pub executor_id: ExecutorId,
+    pub join: Join,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartEdge {
+    pub from: NodeId,
+    pub to: NodeId,
+}
+
+/// `POST /start` response. [`Runtime::start`] returns a handle; HTTP returns
+/// the new [`ExecutionId`] (the handle stays on the server so Drop does not
+/// cancel).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartView {
+    pub execution_id: ExecutionId,
+}
+
+impl From<&WorkflowDefinition> for StartBody {
+    fn from(def: &WorkflowDefinition) -> Self {
+        serde_json::from_slice(&def.durable_bytes()).expect("durable_bytes is StartBody JSON")
+    }
+}
+
+impl From<WorkflowDefinition> for StartBody {
+    fn from(def: WorkflowDefinition) -> Self {
+        Self::from(&def)
+    }
+}
+
+impl StartBody {
+    fn into_definition(self) -> Result<WorkflowDefinition, keel_rt::DefinitionError> {
+        WorkflowDefinition::from_durable_bytes(
+            &serde_json::to_vec(&self).expect("StartBody is durable JSON"),
+        )
+    }
 }
 
 /// Read-only view of an execution for `GET /inspect/:id`.
@@ -161,15 +222,23 @@ impl InspectView {
 struct App {
     runtime: Arc<Runtime>,
     secret: CompleteSecret,
+    /// [`Runtime::start`] returns a handle; Drop cancels. Hold them here.
+    started: Arc<Mutex<Vec<ExecutionHandle>>>,
 }
 
-/// Router a caller can nest or serve. Paths: `POST /complete`, `GET /inspect/:id`.
+/// Router a caller can nest or serve. Paths: `POST /start`, `GET /inspect/:id`,
+/// `POST /complete`.
 pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
     Router::new()
+        .route("/start", post(start_handler))
         .route("/complete", post(complete_handler))
         .route("/inspect/:id", get(inspect_handler))
-        .layer(DefaultBodyLimit::max(MAX_COMPLETE_BODY))
-        .with_state(App { runtime, secret })
+        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .with_state(App {
+            runtime,
+            secret,
+            started: Arc::new(Mutex::new(Vec::new())),
+        })
 }
 
 fn provided_secret(headers: &HeaderMap) -> Option<&[u8]> {
@@ -192,10 +261,80 @@ fn secrets_equal(expected: &str, got: &[u8]) -> bool {
         == 0
 }
 
+/// Hold iff the snapshot is not terminal. Dropping a terminal handle
+/// sends Cancel, which is a no-op on an already-finished run. Do not
+/// park on the handle: consuming wait marks the handle used (server-drop
+/// would not cancel a live park); the stable-wait helper also returns
+/// on Waiting (reaping a park drops the cancel token). Kernel snapshot
+/// `state.is_terminal()` is the only signal.
+fn hold_if_live(started: &Mutex<Vec<ExecutionHandle>>, handle: ExecutionHandle, terminal: bool) {
+    if terminal {
+        return;
+    }
+    started
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(handle);
+}
+
+fn drop_held_if_terminal(started: &Mutex<Vec<ExecutionHandle>>, id: &ExecutionId, terminal: bool) {
+    if !terminal {
+        return;
+    }
+    started
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|h| h.execution_id() != id);
+}
+
+/// Snapshot-only: drop held handles whose execution is already terminal.
+/// Called on the next start so N finished runs do not sit until process drop.
+async fn reap_held_terminals(runtime: &Runtime, started: &Mutex<Vec<ExecutionHandle>>) {
+    let ids: Vec<ExecutionId> = {
+        started
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|h| h.execution_id().clone())
+            .collect()
+    };
+    for id in ids {
+        let terminal = runtime
+            .inspect(&id)
+            .await
+            .is_some_and(|s| s.state.is_terminal());
+        drop_held_if_terminal(started, &id, terminal);
+    }
+}
+
 fn authorize(app: &App, headers: &HeaderMap) -> Result<(), StatusCode> {
     match provided_secret(headers) {
         Some(got) if secrets_equal(app.secret.as_str(), got) => Ok(()),
         _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+async fn start_handler(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<StartBody>,
+) -> axum::response::Response {
+    if authorize(&app, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let def = match body.into_definition() {
+        Ok(def) => def,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match app.runtime.start(def) {
+        Ok(handle) => {
+            let execution_id = handle.execution_id().clone();
+            reap_held_terminals(&app.runtime, &app.started).await;
+            let terminal = handle.inspect().await.state.is_terminal();
+            hold_if_live(&app.started, handle, terminal);
+            Json(StartView { execution_id }).into_response()
+        }
+        Err(StartError::UnregisteredExecutors(_)) => StatusCode::BAD_REQUEST.into_response(),
     }
 }
 
@@ -207,7 +346,10 @@ async fn inspect_handler(
     authorize(&app, &headers)?;
     let id = ExecutionId::parse(&id).map_err(|_| StatusCode::NOT_FOUND)?;
     match app.runtime.inspect(&id).await {
-        Some(snap) => Ok(Json(InspectView::from_snapshot(&snap))),
+        Some(snap) => {
+            drop_held_if_terminal(&app.started, &id, snap.state.is_terminal());
+            Ok(Json(InspectView::from_snapshot(&snap)))
+        }
         None => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -225,8 +367,17 @@ async fn complete_handler(
     if authorize(&app, &headers).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let id = body.token.execution_id().clone();
     match app.runtime.complete(body.token, body.resume).await {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => {
+            let terminal = app
+                .runtime
+                .inspect(&id)
+                .await
+                .is_some_and(|s| s.state.is_terminal());
+            drop_held_if_terminal(&app.started, &id, terminal);
+            StatusCode::OK.into_response()
+        }
         Err(CompleteError::UnknownToken) => StatusCode::NOT_FOUND.into_response(),
         Err(CompleteError::Cancelled) => StatusCode::CONFLICT.into_response(),
         Err(CompleteError::ClaimedElsewhere) => (
@@ -269,6 +420,36 @@ pub async fn serve_ephemeral(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_body_is_durable_bytes_not_snapshot() {
+        let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
+            .node("hold", "wait")
+            .node("next", "next")
+            .join("next", Join::AllDone)
+            .edge("hold", "next")
+            .build()
+            .unwrap();
+        let body = StartBody::from(&def);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["id"], "wf");
+        assert_eq!(json["on_failure"], "FailSubtree");
+        assert_eq!(json["nodes"][1]["join"], "AllDone");
+        assert!(json.get("nodes").unwrap().as_array().unwrap()[0]
+            .get("state")
+            .is_none());
+        assert!(json.get("resume_token").is_none());
+        let durable: serde_json::Value = serde_json::from_slice(&def.durable_bytes()).unwrap();
+        assert_eq!(json, durable, "StartBody must be kernel durable JSON");
+        let back = body.into_definition().unwrap();
+        assert_eq!(back.content_hash(), def.content_hash());
+        assert_eq!(back.on_failure(), OnFailure::FailSubtree);
+        assert_eq!(
+            back.join_of(&keel_rt::NodeId::new("next")),
+            Some(Join::AllDone)
+        );
+    }
 
     #[test]
     fn body_round_trips() {
@@ -553,5 +734,147 @@ mod tests {
         let back: InspectView = serde_json::from_value(json).unwrap();
         assert_eq!(back.resume_token(&hold), Some(&token));
         assert!(back.resume_token(&keel_rt::NodeId::new("slow")).is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drop_held_if_terminal_keeps_waiting() {
+        let rt = Runtime::builder().build();
+        let started = Mutex::new(Vec::new());
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        assert_eq!(handle.wait_stable().await, ExecutionState::Waiting);
+        let snap = handle.inspect().await;
+        assert!(!snap.state.is_terminal());
+        let token = snap
+            .node(&keel_rt::NodeId::new("hold"))
+            .and_then(|n| n.resume_token.clone())
+            .unwrap();
+        hold_if_live(&started, handle, snap.state.is_terminal());
+        drop_held_if_terminal(&started, &id, snap.state.is_terminal());
+        assert_eq!(started.lock().unwrap().len(), 1, "Waiting stays held");
+        rt.complete(
+            token,
+            Resume::Complete(keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(
+                b"ok",
+            ))),
+        )
+        .await
+        .unwrap();
+        let done = rt.inspect(&id).await.unwrap();
+        drop_held_if_terminal(&started, &id, done.state.is_terminal());
+        assert_eq!(
+            started.lock().unwrap().len(),
+            0,
+            "terminal snapshot drops the handle; Running/Waiting must not"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hold_if_live_skips_terminal_snapshot() {
+        let rt = Runtime::builder()
+            .register_fn("next", |_ctx: keel_rt::ExecutionContext| async {
+                keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(b"ok"))
+            })
+            .build();
+        let started = Mutex::new(Vec::new());
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("next", "next")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        let mut snap = handle.inspect().await;
+        for _ in 0..64 {
+            if snap.state.is_terminal() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            snap = handle.inspect().await;
+        }
+        assert!(snap.state.is_terminal(), "instant node must finish");
+        hold_if_live(&started, handle, snap.state.is_terminal());
+        assert_eq!(started.lock().unwrap().len(), 0);
+        assert_eq!(
+            rt.inspect(&id).await.unwrap().state,
+            ExecutionState::Succeeded
+        );
+    }
+
+    /// N finished handles forced into the vec (start raced before terminal)
+    /// plus one park. Snapshot-only reap leaves only the park.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reap_held_terminals_clears_n_finished_keeps_park() {
+        const N: usize = 8;
+        let rt = Runtime::builder()
+            .register_fn("next", |_ctx: keel_rt::ExecutionContext| async {
+                keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(b"ok"))
+            })
+            .build();
+        let started = Mutex::new(Vec::new());
+        let mut finished = Vec::new();
+        for _ in 0..N {
+            let handle = rt
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("next", "next")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            finished.push(handle.execution_id().clone());
+            started
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(handle);
+        }
+        for id in &finished {
+            let mut snap = rt.inspect(id).await.unwrap();
+            for _ in 0..256 {
+                if snap.state.is_terminal() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+                snap = rt.inspect(id).await.unwrap();
+            }
+            assert!(snap.state.is_terminal(), "instant node must finish");
+        }
+        let park = rt
+            .start(
+                WorkflowDefinition::builder("park")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let park_id = park.execution_id().clone();
+        assert_eq!(park.wait_stable().await, ExecutionState::Waiting);
+        started.lock().unwrap_or_else(|p| p.into_inner()).push(park);
+        reap_held_terminals(&rt, &started).await;
+        {
+            let held = started.lock().unwrap();
+            assert_eq!(held.len(), 1, "N terminals reaped; live park stays");
+            assert_eq!(held[0].execution_id(), &park_id);
+        }
+        for id in &finished {
+            assert_eq!(
+                rt.inspect(id).await.unwrap().state,
+                ExecutionState::Succeeded,
+                "reap Drop of a terminal handle must not Cancel"
+            );
+        }
+        assert_eq!(
+            rt.inspect(&park_id).await.unwrap().state,
+            ExecutionState::Waiting
+        );
     }
 }

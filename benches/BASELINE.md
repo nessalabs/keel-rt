@@ -1,5 +1,24 @@
 # Kernel microbench baseline (this run)
 
+## Start then approve (`sdk/start-approve`, 2026-09-03)
+
+Sibling `keel-rt-http`. `FakeClock`, MemoryStore, loopback, shared secret.
+`cargo test -p keel-rt-http --release --test profile -- --nocapture --test-threads=1`.
+Hang-bound is the existing `tokio::time::timeout` (`HANG_BOUND`). Kernel
+`src/` unchanged this PR — MemoryStore no-timer column stays the inspect
+SHA (all four ≤10% vs wait-gate). HTTP start is `Runtime::start` plus
+JSON; the server holds the handle so Drop does not cancel.
+
+| # | path | N | release | notes |
+|---|---|---:|---|---|
+| 1 | `KeelClient::start` | 1 | **0.038 ms** median | n=7; loopback `StartBody` 138 B |
+| 2 | `Runtime::start` | 1 | **0.003 ms** median | in-process; HTTP ~13× (loopback) |
+| 3 | start + inspect + approve (HTTP) | 1 | **0.110 ms** median | n=7; approve is `POST /complete` |
+| 4 | inspect then complete (HTTP) | 1 | **0.192 ms** median | same machine as inspect row |
+
+No second start engine. Do not add `START_HANG_BOUND`. 10k starts not
+measured (each call holds a live handle).
+
 Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug), Tokio `current_thread`,
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
