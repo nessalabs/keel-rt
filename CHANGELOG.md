@@ -1,5 +1,13 @@
 # Changelog
 
+## SDK loop example (`sdk/loop`)
+
+`cargo run -p keel-rt-http --example sdk_loop` is the two-process path
+in one binary: engine `register_fn` (`research`, `write`; builtin
+`wait`), client `start` / `inspect` / `approve` / `cancel`. The client
+sends only `durable_bytes`. Unregistered `executor_id` is **400**.
+Inspect omits outputs. CI: `sdk_loop_approve_then_cancel_is_409`.
+
 ## Cancel one execution (`sdk/cancel`)
 
 [`KeelClient::cancel(execution_id)`] is `POST /cancel/:id` with the same

@@ -508,3 +508,25 @@ fn profile_harness_exists() {
         "profile.rs must measure HTTP cancel vs Runtime::cancel"
     );
 }
+
+#[test]
+fn sdk_loop_example_and_test_exist() {
+    let ex = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/sdk_loop.rs");
+    let example = fs::read_to_string(&ex).expect("examples/sdk_loop.rs");
+    assert!(
+        example.contains("register_fn(\"research\"")
+            && example.contains("register_fn(\"write\"")
+            && example.contains("KeelClient::new")
+            && example.contains(".approve(")
+            && example.contains(".cancel(")
+            && example.contains("not-on-this-engine"),
+        "example must register on the engine and start/approve/cancel on the client"
+    );
+    let tests =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sdk_loop.rs"))
+            .expect("tests/sdk_loop.rs");
+    assert!(
+        tests.contains("fn sdk_loop_approve_then_cancel_is_409"),
+        "CI must keep the sdk loop"
+    );
+}

@@ -15,10 +15,19 @@ Default bind is **`127.0.0.1`** (`DEFAULT_BIND` / `serve` / `serve_ephemeral`).
 `0.0.0.0` only via explicit `serve_on`. Body larger than **1 MiB**
 (`MAX_BODY`) is **413** and does not call start or complete.
 
+The **engine process** registers executors (`register_fn`) before it
+serves. [`KeelClient::start`] sends only the definition
+(`WorkflowDefinition::durable_bytes`). It cannot register a function.
+A node whose `executor_id` is not on that Runtime is **400**
+(`client_start_unregistered_is_400_nothing_runs`). Builtin `wait` is
+already on `Runtime::builder`. Runnable loop:
+`cargo run -p keel-rt-http --example sdk_loop`.
+
 [`KeelClient::inspect`] returns [`InspectView`] (id, state, nodes + **wait**
 token once, in [`InspectNodeState::Waiting`]) — not an `ExecutionHandle`.
 Running-node tokens are omitted from the DTO type (not a cloned kernel
-`NodeState`). `InspectView::resume_token` reads `InspectNodeState::Waiting { token }`.
+`NodeState`). Outputs are omitted — inspect is not a result dump.
+`InspectView::resume_token` reads `InspectNodeState::Waiting { token }`.
 Unknown execution is **404**. Terminal
 and Cancelled are **200** with state; `complete` of a cancelled token is
 still **409**. Two Runtimes: inspect is read-only; complete on a
@@ -62,6 +71,7 @@ let token = view.resume_token(&NodeId::new("hold")).cloned().unwrap();
 client.approve(token, bytes).await?;
 // or reject(token) → Decision::Fail → NodeOutcome::failed("failed")
 // or complete(token, Resume / Decision)
+client.cancel(&id).await?; // one execution; later approve is 409
 ```
 
 Serve `keel_rt_http::router(Arc<Runtime>, secret)` or `serve` / `serve_on` /
