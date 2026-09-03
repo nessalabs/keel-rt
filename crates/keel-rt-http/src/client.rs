@@ -246,6 +246,24 @@ impl KeelClient {
             other => Err(KeelClientError::Unexpected(other)),
         }
     }
+
+    /// `Decision::Complete(bytes)` through [`Self::complete`]. Same
+    /// `POST /complete` — not a second endpoint.
+    pub async fn approve(
+        &self,
+        token: ResumeToken,
+        output: impl Into<Bytes>,
+    ) -> Result<(), KeelClientError> {
+        self.complete(token, Decision::Complete(output.into()))
+            .await
+    }
+
+    /// `Decision::Fail` through [`Self::complete`] — `NodeOutcome::failed("failed")`,
+    /// execution [`keel_rt::ExecutionState::Failed`]. There is no `Decision`
+    /// reject variant (PR #9 mapping).
+    pub async fn reject(&self, token: ResumeToken) -> Result<(), KeelClientError> {
+        self.complete(token, Decision::Fail).await
+    }
 }
 
 impl fmt::Debug for KeelClient {
@@ -278,6 +296,11 @@ mod tests {
             Resume::Complete(NodeOutcome::failed("failed"))
         );
         assert_eq!(Resume::from(Decision::Reinvoke), Resume::Reinvoke);
+        assert_eq!(
+            Resume::from(Decision::Fail),
+            Resume::Complete(NodeOutcome::failed("failed")),
+            "reject is Decision::Fail; no second fail contract"
+        );
     }
 
     #[test]

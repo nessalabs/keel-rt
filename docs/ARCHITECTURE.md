@@ -101,9 +101,12 @@ flowchart TB
   sched --> crate
 ```
 
-`keel-rt-http` `KeelClient` GETs `InspectView` from `GET /inspect/:id`
-then POSTs `CompleteBody` to `POST /complete`. Same secret as complete.
-The server wraps [`Runtime::inspect`] / [`Runtime::complete`]. No HTTP
+`keel-rt-http` `KeelClient` POSTs `StartBody` to `POST /start`
+(`Runtime::start`, returns `ExecutionId`), GETs `InspectView` from
+`GET /inspect/:id`, then POSTs `CompleteBody` to `POST /complete`.
+`approve` / `reject` are `Decision::Complete` / `Decision::Fail` through
+the same complete path — not extra routes. Same secret. The server wraps
+[`Runtime::start`] / [`Runtime::inspect`] / [`Runtime::complete`]. No HTTP
 types in kernel `src/`. `InspectView` JSON carries the wait token once
 (`InspectNodeState::Waiting { token }`, not a cloned kernel `NodeState`).
 `POST /complete` ClaimedElsewhere is
@@ -113,11 +116,14 @@ types in kernel `src/`. `InspectView` JSON carries the wait token once
 flowchart LR
   other[other process]
   client[KeelClient]
+  httpStart["keel-rt-http POST /start"]
   httpGet["keel-rt-http GET /inspect"]
   httpPost["keel-rt-http POST /complete"]
+  rts["Runtime::start"]
   rti["Runtime::inspect"]
   rtc["Runtime::complete"]
   other --> client
+  client --> httpStart --> rts
   client --> httpGet --> rti
   client --> httpPost --> rtc
 ```
@@ -128,8 +134,19 @@ classDiagram
     +new(base_url, CompleteSecret)
     +without_secret(base_url)
     +hang_bound(Duration)
+    +start(StartBody) ExecutionId
     +inspect(execution_id) InspectView
     +complete(token, Resume)
+    +approve(token, Bytes)
+    +reject(token)
+  }
+  class StartBody {
+    workflow_id
+    nodes
+    edges
+  }
+  class StartView {
+    execution_id
   }
   class InspectView {
     execution_id
@@ -161,6 +178,8 @@ classDiagram
     Reinvoke
   }
   Decision --> Resume : Into
+  KeelClient --> StartBody : POST /start
+  KeelClient --> StartView
   KeelClient --> InspectView : GET JSON
   InspectView --> InspectNode
   InspectNode --> InspectNodeState
@@ -349,7 +368,7 @@ edit `scheduler.rs`.
 | Snapshot resume / CAS                        | `restore.rs` + `Runtime::resume`           | event replay              |
 | RetryFailed recover                          | `apply` + `Runtime::resume_with`           | `handle.resume` (token)   |
 | Wait / gate complete                         | `Wait` + `Runtime::complete`               | HTTP crate (secret/bind)  |
-| Out-of-process inspect + complete            | `keel-rt-http` `KeelClient` / `InspectView` | start / resume / complete |
+| Out-of-process start + inspect + complete    | `keel-rt-http` `KeelClient` / `StartBody` / `InspectView` | resume / schedule HTTP |
 | Runtime inspect by id                        | `Runtime::inspect` (live or store)         | HTTP / HITL types         |
 | Cancel, wait, token-resume, inspect          | `handle` + `inject::Event`                 | domain types              |
 | Ready-queue / permits / spawn                | `scheduler` + `spawn`                      | `Policy`                  |

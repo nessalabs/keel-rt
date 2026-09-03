@@ -207,6 +207,12 @@ fn public_surface_is_complete_resume_token() {
         start_fn.contains(".send(") && !start_fn.contains("CLAIMED_ELSEWHERE"),
         "start must reuse send and must not invent a steal"
     );
+    assert!(client.contains("pub async fn approve"));
+    assert!(client.contains("pub async fn reject"));
+    assert!(
+        !lib.contains(".route(\"/approve\"") && !lib.contains(".route(\"/reject\""),
+        "approve/reject must reuse POST /complete, not alias routes"
+    );
     assert!(!client.contains("pub async fn schedule"));
     assert!(!client.contains("pub async fn claim"));
     assert!(
@@ -266,6 +272,9 @@ fn required_client_tests_exist() {
         "fn client_start_does_not_follow_redirect_off_loopback",
         "fn client_start_wire_sends_both_secret_headers",
         "fn client_start_succeeds_against_bearer_only_server",
+        "fn client_start_inspect_approve_unblocks_wait",
+        "fn client_start_inspect_reject_fails_execution",
+        "fn client_approve_issued_token_for_running_node_leaves_wait_parked",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
     }
@@ -350,6 +359,10 @@ fn baseline_has_numbered_inspect_release_row() {
         "BASELINE must number KeelClient::inspect"
     );
     assert!(
+        base.contains("## Start then approve") && base.contains("KeelClient::start"),
+        "BASELINE must number KeelClient::start"
+    );
+    assert!(
         base.contains("release after"),
         "BASELINE must number release before/after"
     );
@@ -370,5 +383,9 @@ fn profile_harness_exists() {
     assert!(
         s.contains("fn inspect_view_json_is_not_full_snapshot"),
         "profile.rs must lock InspectView JSON vs fat snapshot"
+    );
+    assert!(
+        s.contains("fn profile_start_approve_release"),
+        "profile.rs must measure start+approve"
     );
 }
