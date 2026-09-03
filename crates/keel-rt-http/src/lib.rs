@@ -21,7 +21,8 @@ use axum::Json;
 use axum::Router;
 use keel_rt::{
     CompleteError, ExecutionHandle, ExecutionId, ExecutionSnapshot, ExecutionState, ExecutorId,
-    NodeId, NodeState, Resume, ResumeToken, Runtime, StartError, WorkflowDefinition, WorkflowId,
+    Join, NodeId, NodeState, OnFailure, Resume, ResumeToken, Runtime, StartError,
+    WorkflowDefinition, WorkflowId,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -82,11 +83,13 @@ pub struct CompleteBody {
     pub resume: Resume,
 }
 
-/// Narrow start request. Not a [`WorkflowDefinition`] dump (no join /
-/// on_failure / hash). Server builds the kernel definition with defaults.
+/// `POST /start` body. This **is** kernel durable JSON
+/// ([`WorkflowDefinition::durable_bytes`] / [`WorkflowDefinition::from_durable_bytes`]),
+/// not a second graph language and not a snapshot dump.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartBody {
-    pub workflow_id: WorkflowId,
+    pub id: WorkflowId,
+    pub on_failure: OnFailure,
     pub nodes: Vec<StartNode>,
     pub edges: Vec<StartEdge>,
 }
@@ -95,6 +98,7 @@ pub struct StartBody {
 pub struct StartNode {
     pub id: NodeId,
     pub executor_id: ExecutorId,
+    pub join: Join,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,25 +117,7 @@ pub struct StartView {
 
 impl From<&WorkflowDefinition> for StartBody {
     fn from(def: &WorkflowDefinition) -> Self {
-        Self {
-            workflow_id: def.id().clone(),
-            nodes: def
-                .nodes()
-                .iter()
-                .map(|n| StartNode {
-                    id: n.id.clone(),
-                    executor_id: n.executor_id.clone(),
-                })
-                .collect(),
-            edges: def
-                .edges()
-                .iter()
-                .map(|e| StartEdge {
-                    from: e.from.clone(),
-                    to: e.to.clone(),
-                })
-                .collect(),
-        }
+        serde_json::from_slice(&def.durable_bytes()).expect("durable_bytes is StartBody JSON")
     }
 }
 
@@ -143,14 +129,9 @@ impl From<WorkflowDefinition> for StartBody {
 
 impl StartBody {
     fn into_definition(self) -> Result<WorkflowDefinition, keel_rt::DefinitionError> {
-        let mut b = WorkflowDefinition::builder(self.workflow_id);
-        for n in self.nodes {
-            b = b.node(n.id, n.executor_id);
-        }
-        for e in self.edges {
-            b = b.edge(e.from, e.to);
-        }
-        b.build()
+        WorkflowDefinition::from_durable_bytes(
+            &serde_json::to_vec(&self).expect("StartBody is durable JSON"),
+        )
     }
 }
 
@@ -276,6 +257,28 @@ fn secrets_equal(expected: &str, got: &[u8]) -> bool {
         == 0
 }
 
+/// Drop-cancel only applies while we still hold the handle. Consume
+/// terminals with [`ExecutionHandle::wait`] so the vec does not grow
+/// without bound. Live parks stay held until the server drops.
+async fn reap_started(started: &Mutex<Vec<ExecutionHandle>>) {
+    let batch = {
+        let mut g = started.lock().unwrap_or_else(|p| p.into_inner());
+        std::mem::take(&mut *g)
+    };
+    let mut kept = Vec::with_capacity(batch.len());
+    for handle in batch {
+        if handle.inspect().await.state.is_terminal() {
+            let _ = handle.wait().await;
+        } else {
+            kept.push(handle);
+        }
+    }
+    started
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .extend(kept);
+}
+
 fn authorize(app: &App, headers: &HeaderMap) -> Result<(), StatusCode> {
     match provided_secret(headers) {
         Some(got) if secrets_equal(app.secret.as_str(), got) => Ok(()),
@@ -298,6 +301,7 @@ async fn start_handler(
     match app.runtime.start(def) {
         Ok(handle) => {
             let execution_id = handle.execution_id().clone();
+            reap_started(&app.started).await;
             app.started
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -335,7 +339,10 @@ async fn complete_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match app.runtime.complete(body.token, body.resume).await {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => {
+            reap_started(&app.started).await;
+            StatusCode::OK.into_response()
+        }
         Err(CompleteError::UnknownToken) => StatusCode::NOT_FOUND.into_response(),
         Err(CompleteError::Cancelled) => StatusCode::CONFLICT.into_response(),
         Err(CompleteError::ClaimedElsewhere) => (
@@ -380,25 +387,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn start_body_is_narrow_not_snapshot() {
+    fn start_body_is_durable_bytes_not_snapshot() {
         let def = WorkflowDefinition::builder("wf")
+            .on_failure(OnFailure::FailSubtree)
             .node("hold", "wait")
             .node("next", "next")
+            .join("next", Join::AllDone)
             .edge("hold", "next")
             .build()
             .unwrap();
         let body = StartBody::from(&def);
         let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["workflow_id"], "wf");
-        assert!(json.get("on_failure").is_none());
-        assert!(json["nodes"][0].get("join").is_none());
+        assert_eq!(json["id"], "wf");
+        assert_eq!(json["on_failure"], "FailSubtree");
+        assert_eq!(json["nodes"][1]["join"], "AllDone");
         assert!(json.get("nodes").unwrap().as_array().unwrap()[0]
             .get("state")
             .is_none());
         assert!(json.get("resume_token").is_none());
+        let durable: serde_json::Value = serde_json::from_slice(&def.durable_bytes()).unwrap();
+        assert_eq!(json, durable, "StartBody must be kernel durable JSON");
         let back = body.into_definition().unwrap();
-        assert_eq!(back.id(), def.id());
-        assert_eq!(back.nodes().len(), 2);
+        assert_eq!(back.content_hash(), def.content_hash());
+        assert_eq!(back.on_failure(), OnFailure::FailSubtree);
+        assert_eq!(
+            back.join_of(&keel_rt::NodeId::new("next")),
+            Some(Join::AllDone)
+        );
     }
 
     #[test]
@@ -684,5 +699,50 @@ mod tests {
         let back: InspectView = serde_json::from_value(json).unwrap();
         assert_eq!(back.resume_token(&hold), Some(&token));
         assert!(back.resume_token(&keel_rt::NodeId::new("slow")).is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reap_started_consumes_terminal_handles() {
+        let rt = Runtime::builder().build();
+        let started = Mutex::new(Vec::new());
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(handle.wait_stable().await, ExecutionState::Waiting);
+        let token = handle
+            .inspect()
+            .await
+            .node(&keel_rt::NodeId::new("hold"))
+            .and_then(|n| n.resume_token.clone())
+            .unwrap();
+        started.lock().unwrap().push(handle);
+        reap_started(&started).await;
+        assert_eq!(started.lock().unwrap().len(), 1, "parked wait stays held");
+        rt.complete(
+            token,
+            Resume::Complete(keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(
+                b"ok",
+            ))),
+        )
+        .await
+        .unwrap();
+        let id = started.lock().unwrap()[0].execution_id().clone();
+        for _ in 0..64 {
+            if rt.inspect(&id).await.is_some_and(|s| s.state.is_terminal()) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        reap_started(&started).await;
+        assert_eq!(
+            started.lock().unwrap().len(),
+            0,
+            "terminal handles must be consumed, not held until process drop"
+        );
     }
 }

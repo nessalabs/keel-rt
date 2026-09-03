@@ -1,8 +1,10 @@
 # keel-rt-http
 
-Thin adapter. Another binary starts a run, inspects a live wait, reads
-the token, then `POST`s that token and payload; this process calls
-`Runtime::start` / `Runtime::inspect` / `Runtime::complete`. Not the kernel.
+Thin adapter. Another binary starts a run (`POST /start` is kernel
+`WorkflowDefinition::durable_bytes` — `id`, `on_failure`, nodes with
+`join`, edges), inspects a live wait, reads the token, then `POST`s
+that token and payload; this process calls `Runtime::start` /
+`Runtime::inspect` / `Runtime::complete`. Not the kernel.
 No forms, no identity, no schedule HTTP.
 
 A **shared secret is required** on every route. Send
@@ -31,7 +33,7 @@ POST /start
 Authorization: Bearer <secret>
 Content-Type: application/json
 
-{ "workflow_id": "wf", "nodes": [{"id":"hold","executor_id":"wait"}], "edges": [] }
+{ "id": "wf", "on_failure": "FailExecution", "nodes": [{"id":"hold","executor_id":"wait","join":"AllSucceeded"}], "edges": [] }
 ```
 
 ```

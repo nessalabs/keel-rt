@@ -102,7 +102,10 @@ flowchart TB
 ```
 
 `keel-rt-http` `KeelClient` POSTs `StartBody` to `POST /start`
-(`Runtime::start`, returns `ExecutionId`), GETs `InspectView` from
+(`Runtime::start`, returns `ExecutionId`). `StartBody` **is** kernel
+`WorkflowDefinition::durable_bytes` (`id`, `on_failure`, nodes with
+`join`, edges) — not a snapshot dump. Live handles stay on the server
+so Drop does not cancel; terminals are reaped. GETs `InspectView` from
 `GET /inspect/:id`, then POSTs `CompleteBody` to `POST /complete`.
 `approve` / `reject` are `Decision::Complete` / `Decision::Fail` through
 the same complete path — not extra routes. Same secret. The server wraps
@@ -141,9 +144,19 @@ classDiagram
     +reject(token)
   }
   class StartBody {
-    workflow_id
+    id
+    on_failure
     nodes
     edges
+  }
+  class StartNode {
+    id
+    executor_id
+    join
+  }
+  class StartEdge {
+    from
+    to
   }
   class StartView {
     execution_id
@@ -177,6 +190,8 @@ classDiagram
     Complete NodeOutcome
     Reinvoke
   }
+  StartBody --> StartNode
+  StartBody --> StartEdge
   Decision --> Resume : Into
   KeelClient --> StartBody : POST /start
   KeelClient --> StartView

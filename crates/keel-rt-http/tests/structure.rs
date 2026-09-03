@@ -194,6 +194,19 @@ fn public_surface_is_complete_resume_token() {
     assert!(!client.contains("CompleteClient"));
     assert!(client.contains("pub async fn start"));
     assert!(lib.contains("pub struct StartBody"));
+    assert!(
+        lib.contains("pub on_failure: OnFailure")
+            && lib.contains("pub join: Join")
+            && lib.contains("durable_bytes")
+            && lib.contains("from_durable_bytes"),
+        "StartBody must be kernel durable JSON, not a second graph language"
+    );
+    assert!(
+        lib.contains("fn reap_started")
+            && lib.contains("fn reap_started_consumes_terminal_handles"),
+        "HTTP start must reap terminal handles so the vec is not process-lifetime"
+    );
+    assert!(lib.contains("fn start_body_is_durable_bytes_not_snapshot"));
     assert!(lib.contains("pub struct StartView"));
     assert!(lib.contains(".route(\"/start\""));
     let start_fn = client
@@ -274,6 +287,9 @@ fn required_client_tests_exist() {
         "fn client_start_succeeds_against_bearer_only_server",
         "fn client_start_inspect_approve_unblocks_wait",
         "fn client_start_inspect_reject_fails_execution",
+        "fn client_start_fail_subtree_keeps_running_sibling",
+        "fn client_drop_http_server_after_start_cancels_wait",
+        "fn http_start_second_runtime_new_id_is_not_steal",
         "fn client_approve_issued_token_for_running_node_leaves_wait_parked",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
@@ -321,6 +337,7 @@ fn architecture_mermaid_names_keel_client() {
         "Runtime::inspect",
         "Runtime::start",
         "StartBody",
+        "StartNode",
         "StartView",
         "InspectView",
         "InspectNodeState",

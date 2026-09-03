@@ -2,11 +2,18 @@
 
 ## Start then approve / reject (`sdk/start-approve`)
 
-[`KeelClient::start`] is `POST /start` with a narrow [`StartBody`]
-(workflow id, nodes `{id, executor_id}`, edges) — not a dumped
-[`WorkflowDefinition`] / snapshot. The server calls [`Runtime::start`]
-and **holds the handle** so Drop does not cancel. The client returns
-the new [`ExecutionId`]. Each call is a new run (`client_two_starts_are_distinct_ids`).
+[`KeelClient::start`] is `POST /start` with kernel durable JSON
+([`WorkflowDefinition::durable_bytes`] / [`from_durable_bytes`]):
+`id`, `on_failure`, nodes `{id, executor_id, join}`, edges — not a
+snapshot dump and not a second graph language. FailSubtree / AllDone
+survive the wire (`client_start_fail_subtree_keeps_running_sibling`).
+The server calls [`Runtime::start`] and **holds live handles** so Drop
+does not cancel; terminals are reaped (`reap_started_consumes_terminal_handles`).
+Dropping the server still Drop-cancels parks
+(`client_drop_http_server_after_start_cancels_wait`). The client
+returns the new [`ExecutionId`]. Each call is a new run
+(`client_two_starts_are_distinct_ids`); a second Runtime's new id is
+not a steal (`http_start_second_runtime_new_id_is_not_steal`).
 Unregistered / empty definition is **400**; oversized **413**; missing
 secret **401** (verb-neutral Display; no `START_*` names). Same
 [`SECRET_HEADER`] / [`HANG_BOUND`] / `send` as inspect and complete.
@@ -16,7 +23,8 @@ secret **401** (verb-neutral Display; no `START_*` names). Same
 (`NodeOutcome::failed("failed")` → execution Failed). There is no
 `Decision` reject variant (PR #9). No `/approve` or `/reject` routes.
 Proof: `client_start_inspect_approve_unblocks_wait`,
-`client_start_inspect_reject_fails_execution`. Approve of an issued
+`client_start_inspect_reject_fails_execution` (cite
+`client_decision_fail_fails_execution`). Approve of an issued
 Running-node token leaves the wait parked
 (`client_approve_issued_token_for_running_node_leaves_wait_parked`).
 Kernel `src/` unchanged.
