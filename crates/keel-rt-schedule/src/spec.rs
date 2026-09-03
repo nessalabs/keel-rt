@@ -5,15 +5,18 @@ use chrono_tz::Tz;
 use croner::Cron;
 use keel_rt::{Timestamp, WorkflowDefinition};
 use std::str::FromStr;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// One reusable definition on a 5-field cron in an IANA timezone.
 /// The definition is not scheduled on [`WorkflowDefinition`].
+///
+/// Many specs may share one definition via [`Clone`] (`Arc` inside).
 #[derive(Clone, Debug)]
 pub struct ScheduleSpec {
     cron: Cron,
     tz: Tz,
-    definition: WorkflowDefinition,
+    definition: Arc<WorkflowDefinition>,
     expr: String,
     tz_name: String,
 }
@@ -34,6 +37,15 @@ impl ScheduleSpec {
         cron: impl Into<String>,
         tz: impl Into<String>,
         definition: WorkflowDefinition,
+    ) -> Result<Self, SpecError> {
+        Self::with_shared(cron, tz, Arc::new(definition))
+    }
+
+    /// Same as [`Self::new`] with a shared definition (N specs, one DAG).
+    pub fn with_shared(
+        cron: impl Into<String>,
+        tz: impl Into<String>,
+        definition: Arc<WorkflowDefinition>,
     ) -> Result<Self, SpecError> {
         let expr = cron.into();
         let tz_name = tz.into();
@@ -67,7 +79,8 @@ impl ScheduleSpec {
         &self.definition
     }
 
-    /// Next fire strictly after `now`. None if the expression never fires again.
+    /// Next fire strictly after `now`. None if the expression never fires again
+    /// (including when `now` does not fit a chrono instant — not due-now).
     ///
     /// DST is croner's `find_next_occurrence` in this timezone, not a
     /// keel-rt wall-time interpreter:

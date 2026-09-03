@@ -10,9 +10,11 @@ run). It is not distributed workers, HTTP, HITL, or a sqlite timer table.
 ## Contract
 
 - 5-field cron (`min hour dom month dow`) plus an explicit IANA timezone.
-- Drive waits with `Clock::wait_until` (use `FakeClock` in tests).
+- Drive waits with `Clock::wait_until` (use `FakeClock` in tests). One
+  loop + a next-T min-heap (not a linear scan, not a task per spec).
 - Missed ticks after a pause: **one** catch-up start, then next from now.
-  Never replay every missed Monday as N starts.
+  Never replay every missed Monday as N starts. A 200k-period jump is
+  one `next_after(now)`, not a walk of intermediate slots.
 - Overlap: if the previous run is still live, still `start`. There is no
   `SkipIfRunning`.
 - Phase 1 is in-memory. Crash of the ticker loses the loop; the caller
@@ -27,6 +29,14 @@ run). It is not distributed workers, HTTP, HITL, or a sqlite timer table.
   only): that fire is skipped, the ticker arms the next slot, sibling
   jobs still start. No retry-storm. Store `put`/`persist` `Err` happens
   after `start` Ok and is the kernel drive, not this crate.
+- Many specs share one definition (`ScheduleSpec::clone` / `with_shared`).
+  There is no fire-history vec. `Runtime::start` still takes an owned
+  `WorkflowDefinition` (kernel), so each fire clones that DAG once.
+- A jump that makes N specs due issues N starts on that wake (Runtime
+  concurrency is per execution, not across starts).
+  `max_starts_per_wake` paces the burst; remaining due jobs still fire.
+- Stuck Armed (clock never reaches T): `wait_until` does not return.
+  Drop `RunningSchedule` is the hang-bound. There is no `ScheduleState`.
 
 ```rust
 use keel_rt::{Runtime, WorkflowDefinition};

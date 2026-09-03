@@ -105,8 +105,137 @@ fn required_schedule_tests_exist() {
         "fn two_running_schedules_on_one_runtime_each_start",
         "fn vancouver_spring_forward_skips_missing_local_minute",
         "fn vancouver_fall_back_picks_next_occurrence_not_both",
+        "fn next_after_max_is_none_not_due_now",
+        "fn catch_up_200k_periods_is_one_start",
+        "fn jump_to_timestamp_max_is_one_start_not_due_now",
+        "fn drop_without_clock_advance_exits_stuck_armed",
+        "fn executor_panic_ticker_survives",
+        "fn max_starts_per_wake_does_not_drop_fires",
+        "fn clock_jump_backward_while_armed_does_not_fire",
     ] {
         assert!(tests.contains(name), "schedule.rs missing {name}");
+    }
+}
+
+/// The crate is spec.rs + runner.rs. No second workflow engine.
+#[test]
+fn crate_is_spec_and_runner_only() {
+    let src = crate_src();
+    let mut files = Vec::new();
+    for e in fs::read_dir(&src).unwrap() {
+        let p = e.unwrap().path();
+        assert!(p.is_file(), "no src subdirs: {}", p.display());
+        files.push(p.file_name().unwrap().to_string_lossy().into_owned());
+    }
+    files.sort();
+    assert_eq!(files, vec!["lib.rs", "runner.rs", "spec.rs"]);
+}
+
+#[test]
+fn public_types_are_exactly_the_ticker() {
+    let lib = fs::read_to_string(crate_src().join("lib.rs")).unwrap();
+    assert!(lib.contains("pub use runner::{RunningSchedule, Schedule, ScheduleBuilder}"));
+    assert!(lib.contains("pub use spec::{ScheduleSpec, SpecError}"));
+    let mut structs = Vec::new();
+    let mut enums = Vec::new();
+    for name in ["lib.rs", "runner.rs", "spec.rs"] {
+        let s = fs::read_to_string(crate_src().join(name)).unwrap();
+        for line in s.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("pub struct ") {
+                structs.push(rest.split_whitespace().next().unwrap().to_string());
+            }
+            if let Some(rest) = t.strip_prefix("pub enum ") {
+                enums.push(rest.split_whitespace().next().unwrap().to_string());
+            }
+        }
+    }
+    structs.sort();
+    enums.sort();
+    assert_eq!(
+        structs,
+        vec![
+            "RunningSchedule",
+            "Schedule",
+            "ScheduleBuilder",
+            "ScheduleSpec"
+        ]
+    );
+    assert_eq!(enums, vec!["SpecError"]);
+}
+
+#[test]
+fn src_has_no_second_engine_or_schedule_state() {
+    let mut stack = vec![crate_src()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            let s = fs::read_to_string(&p).unwrap();
+            for banned in [
+                "ScheduleState",
+                "ExecutionState",
+                "EventSink",
+                "LeaseEpoch",
+                "ClaimError",
+                "RetryPolicy",
+                "ResumeToken",
+                "remain_pred",
+                "EventLog",
+                "runnable_at",
+                "CREATE TABLE",
+                "rusqlite",
+                "Heartbeat",
+                "Supervisor",
+                "JobRegistry",
+            ] {
+                assert!(
+                    !s.contains(banned),
+                    "{} contains banned {banned}",
+                    p.display()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn runner_is_one_drive_loop_with_a_heap() {
+    let runner = fs::read_to_string(crate_src().join("runner.rs")).unwrap();
+    assert!(
+        runner.contains("BinaryHeap"),
+        "100k armed specs need a next-T heap, not a linear min() each tick"
+    );
+    assert!(
+        runner.matches("async fn drive").count() == 1,
+        "exactly one drive loop"
+    );
+    assert_eq!(
+        runner.matches("tokio::spawn(drive").count(),
+        1,
+        "one drive task, not a spawn per spec"
+    );
+    let lines = runner.lines().count();
+    assert!(
+        lines <= 220,
+        "runner.rs is {lines} lines — a second scheduler, cut it"
+    );
+    let spec = fs::read_to_string(crate_src().join("spec.rs")).unwrap();
+    let spec_lines = spec.lines().count();
+    assert!(spec_lines <= 160, "spec.rs is {spec_lines} lines");
+}
+
+#[test]
+fn no_fire_history_vec() {
+    let runner = fs::read_to_string(crate_src().join("runner.rs")).unwrap();
+    for banned in ["last_fired", "fire_log", "fired_at", "history"] {
+        assert!(!runner.contains(banned), "runner stores {banned}");
     }
 }
 

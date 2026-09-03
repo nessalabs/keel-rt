@@ -1,7 +1,11 @@
 //! Drive loop: `Clock::wait_until` then `Runtime::start`. Not the kernel scheduler.
+//!
+//! One loop + a next-T min-heap. Not per-spec tasks. Not a second workflow engine.
 
 use crate::spec::ScheduleSpec;
 use keel_rt::{Clock, Runtime, Timestamp};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::{AbortHandle, JoinHandle};
@@ -14,12 +18,14 @@ pub struct Schedule {
     runtime: Arc<Runtime>,
     clock: Arc<dyn Clock>,
     jobs: Vec<ScheduleSpec>,
+    max_starts_per_wake: usize,
 }
 
 pub struct ScheduleBuilder {
     runtime: Arc<Runtime>,
     clock: Option<Arc<dyn Clock>>,
     jobs: Vec<ScheduleSpec>,
+    max_starts_per_wake: usize,
 }
 
 impl Schedule {
@@ -28,13 +34,20 @@ impl Schedule {
             runtime,
             clock: None,
             jobs: Vec::new(),
+            max_starts_per_wake: usize::MAX,
         }
     }
 
     /// Spawn the drive. Drop the returned runner to stop further starts.
-    /// In-flight executions are not cancelled.
+    /// In-flight executions are not cancelled. A clock that never reaches the
+    /// armed T stays in `wait_until`; Drop is the only hang-bound.
     pub fn run(self) -> RunningSchedule {
-        let drive = tokio::spawn(drive(self.runtime, self.clock, self.jobs));
+        let drive = tokio::spawn(drive(
+            self.runtime,
+            self.clock,
+            self.jobs,
+            self.max_starts_per_wake,
+        ));
         RunningSchedule {
             abort: drive.abort_handle(),
             _join: drive,
@@ -53,11 +66,26 @@ impl ScheduleBuilder {
         self
     }
 
+    pub fn jobs(mut self, specs: impl IntoIterator<Item = ScheduleSpec>) -> Self {
+        self.jobs.extend(specs);
+        self
+    }
+
+    /// Cap `Runtime::start` calls per wake. Default is unbounded (`usize::MAX`):
+    /// a jump that makes N specs due issues N starts in that wake (Runtime
+    /// concurrency is per execution, not across starts). Remaining due jobs
+    /// after a cap still fire on the next loop — fires are not dropped.
+    pub fn max_starts_per_wake(mut self, n: usize) -> Self {
+        self.max_starts_per_wake = n.max(1);
+        self
+    }
+
     pub fn build(self) -> Schedule {
         Schedule {
             runtime: self.runtime,
             clock: self.clock.unwrap_or_else(|| Arc::new(WallClock)),
             jobs: self.jobs,
+            max_starts_per_wake: self.max_starts_per_wake,
         }
     }
 }
@@ -79,7 +107,12 @@ struct Armed {
     next: Timestamp,
 }
 
-async fn drive(runtime: Arc<Runtime>, clock: Arc<dyn Clock>, jobs: Vec<ScheduleSpec>) {
+async fn drive(
+    runtime: Arc<Runtime>,
+    clock: Arc<dyn Clock>,
+    jobs: Vec<ScheduleSpec>,
+    max_starts_per_wake: usize,
+) {
     let now = clock.now();
     let mut armed: Vec<Armed> = jobs
         .into_iter()
@@ -88,22 +121,41 @@ async fn drive(runtime: Arc<Runtime>, clock: Arc<dyn Clock>, jobs: Vec<ScheduleS
             Some(Armed { spec, next })
         })
         .collect();
+    let mut heap: BinaryHeap<Reverse<(Timestamp, usize)>> = BinaryHeap::with_capacity(armed.len());
+    for (i, job) in armed.iter().enumerate() {
+        heap.push(Reverse((job.next, i)));
+    }
     loop {
-        let Some(when) = armed.iter().map(|a| a.next).min() else {
-            return;
+        let when = loop {
+            let Some(Reverse((t, i))) = heap.peek().copied() else {
+                return;
+            };
+            if armed[i].next != t {
+                heap.pop();
+                continue;
+            }
+            break t;
         };
         if when == Timestamp::MAX {
             return;
         }
         clock.wait_until(when).await;
         let now = clock.now();
-        for job in &mut armed {
-            if job.next > now {
+        let mut started = 0usize;
+        while started < max_starts_per_wake {
+            let Some(Reverse((t, i))) = heap.peek().copied() else {
+                break;
+            };
+            if armed[i].next != t {
+                heap.pop();
                 continue;
             }
-            // Catch-up=1: one start for any number of missed ticks, then
-            // next is computed from now (not each skipped Monday).
-            match runtime.start(job.spec.definition().clone()) {
+            if t > now {
+                break;
+            }
+            heap.pop();
+            // Catch-up=1: one start, then next from now (not each missed slot).
+            match runtime.start(armed[i].spec.definition().clone()) {
                 Ok(handle) => {
                     tokio::spawn(async move {
                         handle.wait().await;
@@ -111,7 +163,12 @@ async fn drive(runtime: Arc<Runtime>, clock: Arc<dyn Clock>, jobs: Vec<ScheduleS
                 }
                 Err(_) => {}
             }
-            job.next = job.spec.next_after(now).unwrap_or(Timestamp::MAX);
+            let next = armed[i].spec.next_after(now).unwrap_or(Timestamp::MAX);
+            armed[i].next = next;
+            if next != Timestamp::MAX {
+                heap.push(Reverse((next, i)));
+            }
+            started += 1;
         }
     }
 }

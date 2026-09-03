@@ -523,3 +523,181 @@ fn vancouver_fall_back_picks_next_occurrence_not_both() {
         "must not return the same fall-back 01:30 twice"
     );
 }
+
+const PERIOD_MS: u64 = 60_000;
+const CATCH_UP_PERIODS: u64 = 200_000;
+
+#[test]
+fn next_after_every_minute_is_plus_one_period() {
+    let spec = ScheduleSpec::new("* * * * *", "UTC", weekday_def()).unwrap();
+    assert_eq!(spec.next_after(Timestamp(0)), Some(Timestamp(PERIOD_MS)));
+    assert_eq!(
+        spec.next_after(Timestamp(PERIOD_MS)),
+        Some(Timestamp(2 * PERIOD_MS))
+    );
+}
+
+/// Overflow / unrepresentable now is None — never due-now (item 9).
+#[test]
+fn next_after_max_is_none_not_due_now() {
+    let spec = ScheduleSpec::new("* * * * *", "UTC", weekday_def()).unwrap();
+    assert_eq!(spec.next_after(Timestamp::MAX), None);
+    assert_eq!(spec.next_after(Timestamp(i64::MAX as u64)), None);
+}
+
+/// Catch-up jump of 200k minute slots is one start, not a 200k walk (item 12).
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_200k_periods_is_one_start() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(0));
+    let starts = Arc::new(AtomicU32::new(0));
+    let rt = counting_runtime(clock.clone(), starts.clone());
+    let spec = ScheduleSpec::new("* * * * *", "UTC", weekday_def()).unwrap();
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .job(spec)
+        .build()
+        .run();
+    settle().await;
+    clock.set(Timestamp(CATCH_UP_PERIODS * PERIOD_MS));
+    wait_starts(&starts, 1).await;
+    settle().await;
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        1,
+        "catch-up=1 after {CATCH_UP_PERIODS} missed minutes"
+    );
+    drop(running);
+}
+
+/// Jump to Timestamp::MAX after arming: one catch-up start, then stop. Not due-now loop.
+#[tokio::test(flavor = "current_thread")]
+async fn jump_to_timestamp_max_is_one_start_not_due_now() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(0));
+    let starts = Arc::new(AtomicU32::new(0));
+    let rt = counting_runtime(clock.clone(), starts.clone());
+    let spec = ScheduleSpec::new("* * * * *", "UTC", weekday_def()).unwrap();
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .job(spec)
+        .build()
+        .run();
+    settle().await;
+    clock.set(Timestamp::MAX);
+    wait_starts(&starts, 1).await;
+    settle().await;
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    drop(running);
+}
+
+/// Stuck Armed: clock never reaches T. Drop is the hang-bound (item 6).
+#[tokio::test(flavor = "current_thread")]
+async fn drop_without_clock_advance_exits_stuck_armed() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(0));
+    let starts = Arc::new(AtomicU32::new(0));
+    let rt = counting_runtime(clock.clone(), starts.clone());
+    let spec = ScheduleSpec::new("0 9 * * 1", "UTC", weekday_def()).unwrap();
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .job(spec)
+        .build()
+        .run();
+    settle().await;
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        drop(running);
+    })
+    .await
+    .expect("Drop is the exit from a wait_until that never completes");
+    clock.set(MON1_9);
+    settle().await;
+    assert_eq!(starts.load(Ordering::SeqCst), 0, "fire after stop");
+}
+
+/// Executor panic is the kernel drive. Ticker arms next and siblings still fire (item 7).
+#[tokio::test(flavor = "current_thread")]
+async fn executor_panic_ticker_survives() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(MON1_9.as_millis() - 1_000));
+    let starts = Arc::new(AtomicU32::new(0));
+    let sink_starts = starts.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(clock.clone())
+            .sink(FnSink(move |e: &Event| {
+                if matches!(e, Event::ExecutionStarted { .. }) {
+                    sink_starts.fetch_add(1, Ordering::SeqCst);
+                }
+            }))
+            .register_fn("boom", |_ctx: ExecutionContext| async {
+                panic!("executor boom");
+            })
+            .register_fn("work", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build(),
+    );
+    let boom = WorkflowDefinition::builder("boom")
+        .node("x", "boom")
+        .build()
+        .unwrap();
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .job(ScheduleSpec::new("0 9 * * 1", "UTC", boom).unwrap())
+        .job(ScheduleSpec::new("0 9 * * 1", "UTC", weekday_def()).unwrap())
+        .build()
+        .run();
+    settle().await;
+    clock.set(MON1_9);
+    wait_starts(&starts, 2).await;
+    clock.set(MON2_9);
+    wait_starts(&starts, 4).await;
+    drop(running);
+}
+
+/// A start-budget does not eat due fires (thundering herd cap).
+#[tokio::test(flavor = "current_thread")]
+async fn max_starts_per_wake_does_not_drop_fires() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(MON1_9.as_millis() - 1_000));
+    let starts = Arc::new(AtomicU32::new(0));
+    let rt = counting_runtime(clock.clone(), starts.clone());
+    let spec = ScheduleSpec::new("0 9 * * 1", "UTC", weekday_def()).unwrap();
+    let n = 32u32;
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .max_starts_per_wake(3)
+        .jobs((0..n).map(|_| spec.clone()))
+        .build()
+        .run();
+    settle().await;
+    clock.set(MON1_9);
+    wait_starts(&starts, n).await;
+    settle().await;
+    assert_eq!(starts.load(Ordering::SeqCst), n, "cap paces; does not drop");
+    drop(running);
+}
+
+/// Jump backward while still Armed (before any fire) must not start (item 11).
+#[tokio::test(flavor = "current_thread")]
+async fn clock_jump_backward_while_armed_does_not_fire() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(MON1_9.as_millis() - 1_000));
+    let starts = Arc::new(AtomicU32::new(0));
+    let rt = counting_runtime(clock.clone(), starts.clone());
+    let spec = ScheduleSpec::new("0 9 * * 1", "UTC", weekday_def()).unwrap();
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .job(spec)
+        .build()
+        .run();
+    settle().await;
+    clock.set(Timestamp(0));
+    settle().await;
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    clock.set(MON1_9);
+    wait_starts(&starts, 1).await;
+    drop(running);
+}
