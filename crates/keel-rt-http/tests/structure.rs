@@ -265,7 +265,10 @@ fn public_surface_is_complete_resume_token() {
         "start/cancel must not add verb-specific hang/secret/Display names"
     );
     assert!(client.contains("pub async fn cancel"));
-    assert!(lib.contains(".route(\"/cancel/:id\""));
+    assert!(
+        lib.contains("\"/cancel/:id\"") && lib.contains("post(cancel_handler)"),
+        "cancel route must stay POST /cancel/:id"
+    );
     let cancel_fn = client
         .split("pub async fn cancel(")
         .nth(1)
