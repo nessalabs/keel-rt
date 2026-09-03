@@ -70,6 +70,10 @@ Sqlite adapter lines are not kernel `src/`.
 | Engine-down complete (new Runtime, same store) | lease released or expired; new Runtime claims; apply + persist + drive | `test: complete_from_store_after_engine_down_unblocks_wait` `test: complete_after_sqlite_kill_new_runtime_unblocks_wait` |
 | Shared MemoryStore, second Runtime resume | `ClaimedElsewhere` | `test: shared_memory_store_second_runtime_resume_is_claimed_elsewhere` |
 | HTTP adapter `POST /complete` | another process → `Runtime::complete`; secret required; loopback default | `test: post_complete_unblocks_wait_node` `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` (crate `keel-rt-http`) |
+| `CompleteClient` same JSON | other binary POSTs token + Resume; Decision maps onto Resume | `test: client_complete_unblocks_wait_node` `test: client_decision_complete_unblocks_wait_node` |
+| `CompleteClient` missing/wrong secret | 401 Unauthorized; does not complete | `test: client_without_secret_is_401` `test: client_wrong_secret_is_401` |
+| `CompleteClient` after drop handle | 409 Cancelled; does not revive | `test: client_after_drop_handle_is_409_does_not_revive` |
+| `CompleteClient` duplicate / oversized | 200 noop / 413; snapshot stays Waiting | `test: client_duplicate_complete_is_noop` `test: client_oversized_body_is_413_does_not_complete` |
 | HTTP missing/wrong secret | 401; does not complete | `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` `test: post_query_secret_is_still_401` |
 | HTTP oversized body | 413/400; snapshot stays Waiting | `test: post_oversized_body_is_413_does_not_complete` |
 | HTTP replay after success / cancel | 200 noop / 409 Cancelled | `test: post_duplicate_complete_is_200_noop` `test: post_after_cancel_is_409_does_not_revive` |

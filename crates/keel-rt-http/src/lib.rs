@@ -2,7 +2,12 @@
 //! process calls [`Runtime::complete`]. No forms, no identity.
 //!
 //! A shared secret is required. Default bind is `127.0.0.1` only.
+//! [`CompleteClient`] POSTs the same JSON from the other process.
 //! Kernel `keel-rt` does not depend on this crate.
+
+mod client;
+
+pub use client::{CompleteClient, CompleteClientError, Decision};
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::AUTHORIZATION;

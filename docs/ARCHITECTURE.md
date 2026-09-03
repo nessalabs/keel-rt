@@ -101,6 +101,42 @@ flowchart TB
   sched --> crate
 ```
 
+`keel-rt-http` `CompleteClient` POSTs `CompleteBody` to `POST /complete`;
+the server calls `Runtime::complete`. Kernel `src/` is unchanged.
+
+```mermaid
+flowchart LR
+  other[other process]
+  client[CompleteClient]
+  httpPost["keel-rt-http POST /complete"]
+  rt["Runtime::complete"]
+  other --> client --> httpPost --> rt
+```
+
+```mermaid
+classDiagram
+  class CompleteClient {
+    +new(base_url, CompleteSecret)
+    +without_secret(base_url)
+    +complete(token, Resume)
+  }
+  class Decision {
+    Complete Bytes
+    Fail
+    Reinvoke
+  }
+  class CompleteBody {
+    token ResumeToken
+    resume Resume
+  }
+  class Resume {
+    Complete NodeOutcome
+    Reinvoke
+  }
+  Decision --> Resume : Into
+  CompleteClient --> CompleteBody : POST JSON
+```
+
 `keel-rt-schedule` is `ScheduleSpec` → `next_after` → `Clock::wait_until` →
 `Runtime::start` → arm next. Drop `RunningSchedule` stops further starts.
 The kernel does not depend on this crate.
@@ -281,6 +317,7 @@ edit `scheduler.rs`.
 | Snapshot resume / CAS                        | `restore.rs` + `Runtime::resume`           | event replay              |
 | RetryFailed recover                          | `apply` + `Runtime::resume_with`           | `handle.resume` (token)   |
 | Wait / gate complete                         | `Wait` + `Runtime::complete`               | HTTP crate (secret/bind)  |
+| Out-of-process complete client               | `keel-rt-http` `CompleteClient`            | kernel `src/`             |
 | Cancel, wait, token-resume, inspect          | `handle` + `inject::Event`                 | domain types              |
 | Ready-queue / permits / spawn                | `scheduler` + `spawn`                      | `Policy`                  |
 | Test graph construction                      | `WorkflowTest`                             | private scheduler fields  |
