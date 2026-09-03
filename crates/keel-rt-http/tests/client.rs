@@ -6,7 +6,7 @@ use keel_rt::testing::NoRefreshHeartbeat;
 use keel_rt::{
     ExecutionContext, ExecutionId, ExecutionState, FakeClock, Join, MemoryStore, NodeId,
     NodeOutcome, NodeState, OnFailure, Resume, ResumeToken, Runtime, StateStore,
-    WorkflowDefinition, DEFAULT_LEASE_TTL,
+    WorkflowDefinition, DEFAULT_LEASE_TTL, WAIT_ID,
 };
 use keel_rt_http::{
     serve_ephemeral, CompleteBody, CompleteSecret, Decision, InspectNodeState, KeelClient,
@@ -146,6 +146,12 @@ async fn client_inspect_then_complete_unblocks_wait() {
     let after = client.inspect(&id).await.expect("after");
     assert_eq!(after.state, ExecutionState::Succeeded);
     assert!(after.resume_token(&NodeId::new("hold")).is_none());
+    assert_eq!(
+        after.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"gate"),
+        })
+    );
     server.abort();
 }
 
@@ -209,6 +215,18 @@ async fn client_inspect_while_running_has_no_token_then_wait_sees_token() {
     assert!(
         running.resume_token(&NodeId::new("slow")).is_none(),
         "InspectView must not expose a Running-node token"
+    );
+    let slow_json = serde_json::to_value(
+        running
+            .node(&NodeId::new("slow"))
+            .map(|n| &n.state)
+            .expect("slow"),
+    )
+    .unwrap();
+    assert_eq!(slow_json["kind"], "running");
+    assert!(
+        slow_json.get("output").is_none(),
+        "Running inspect JSON must not own output: {slow_json}"
     );
     go.notify_one();
     assert_eq!(
@@ -697,7 +715,7 @@ async fn client_inspect_wait_sibling_while_running_completes_only_wait() {
             let v = client.inspect(&id).await.expect("poll");
             if matches!(
                 v.node(&NodeId::new("hold")).map(|n| &n.state),
-                Some(InspectNodeState::Succeeded)
+                Some(InspectNodeState::Succeeded { .. })
             ) {
                 assert!(
                     matches!(
@@ -1642,14 +1660,62 @@ async fn client_start_wrong_secret_is_401() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn client_start_unregistered_is_400_nothing_runs() {
-    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("research", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"notes"))
+            })
+            .build(),
+    );
     let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let client = client_at(addr);
+    let catalog = client.executors().await.expect("catalog");
+    assert!(
+        catalog.iter().any(|id| id.as_str() == "research"),
+        "after register_fn(research) catalog must name it: {catalog:?}"
+    );
+    assert!(
+        catalog.iter().any(|id| id.as_str() == WAIT_ID),
+        "catalog must include builtin wait: {catalog:?}"
+    );
+    assert!(
+        !catalog.iter().any(|id| id.as_str() == "not-on-this-engine"),
+        "catalog must not invent missing ids: {catalog:?}"
+    );
     let def = WorkflowDefinition::builder("wf")
-        .node("work", "missing-exec")
+        .node("work", "not-on-this-engine")
         .build()
         .unwrap();
-    let err = client_at(addr).start(def).await.unwrap_err();
-    assert!(matches!(err, KeelClientError::BadRequest), "{err:?}");
+    let err = client.start(def).await.unwrap_err();
+    match &err {
+        KeelClientError::Unregistered { executors } => {
+            assert!(
+                executors
+                    .iter()
+                    .any(|id| id.as_str() == "not-on-this-engine"),
+                "{executors:?}"
+            );
+        }
+        other => panic!("unregistered start must name the id, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("not-on-this-engine"),
+        "400 Display must name the missing id: {err}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_executors_without_secret_is_401() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = KeelClient::without_secret(format!("http://{addr}"))
+        .unwrap()
+        .executors()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::Unauthorized), "{err:?}");
     server.abort();
 }
 
@@ -1861,10 +1927,26 @@ async fn client_start_inspect_approve_unblocks_wait() {
     .await
     .expect("terminal");
     assert_eq!(done.state, ExecutionState::Succeeded);
-    assert!(matches!(
+    assert_eq!(
         done.node(&NodeId::new("hold")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
-    ));
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"gate"),
+        })
+    );
+    assert_eq!(
+        done.node(&NodeId::new("next")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"gate"),
+        })
+    );
+    let running_json = serde_json::to_value(
+        done.node(&NodeId::new("hold"))
+            .map(|n| &n.state)
+            .expect("hold"),
+    )
+    .unwrap();
+    assert_eq!(running_json["kind"], "succeeded");
+    assert!(running_json.get("token").is_none());
     let snap = rt.inspect(&id).await.expect("downstream");
     assert_eq!(
         snap.node(&NodeId::new("next"))
@@ -2023,7 +2105,7 @@ async fn client_start_fail_subtree_keeps_running_sibling() {
             let v = client.inspect(&id).await.expect("inspect");
             if matches!(
                 v.node(&NodeId::new("join")).map(|n| &n.state),
-                Some(InspectNodeState::Succeeded)
+                Some(InspectNodeState::Succeeded { .. })
             ) {
                 return v;
             }
@@ -2227,7 +2309,7 @@ async fn client_approve_then_reject_does_not_fail_succeeded() {
     assert_eq!(snap.state, ExecutionState::Succeeded);
     assert!(matches!(
         snap.node(&NodeId::new("hold")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
+        Some(InspectNodeState::Succeeded { .. })
     ));
     server.abort();
 }
@@ -2435,7 +2517,7 @@ async fn client_approve_after_fail_fast_other_node_is_409() {
     assert_eq!(snap.state, ExecutionState::Failed);
     assert!(!matches!(
         snap.node(&NodeId::new("hold")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
+        Some(InspectNodeState::Succeeded { .. })
     ));
     server.abort();
 }
@@ -3342,7 +3424,7 @@ async fn client_cancel_fail_subtree_cancels_running_sibling() {
     assert_eq!(after.state, ExecutionState::Cancelled);
     assert!(!matches!(
         after.node(&NodeId::new("sib")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
+        Some(InspectNodeState::Succeeded { .. })
     ));
     server.abort();
 }

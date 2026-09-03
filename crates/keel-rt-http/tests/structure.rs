@@ -154,6 +154,18 @@ fn public_surface_is_complete_resume_token() {
         !lib.contains("pub resume_token: Option"),
         "InspectNode must not have a ghost resume_token field"
     );
+    assert!(
+        lib.contains("Succeeded { output: Bytes }"),
+        "Succeeded must own output; not a unit variant"
+    );
+    assert!(
+        !lib.contains("pub output: Option"),
+        "InspectNode must not have a ghost output field"
+    );
+    assert!(
+        client.contains("Unregistered { executors"),
+        "400 must name missing executors"
+    );
     assert!(lib.contains("pub const CLAIMED_ELSEWHERE"));
     assert!(
         client.contains("ClaimedElsewhere") && client.contains("CLAIMED_ELSEWHERE"),
@@ -250,8 +262,44 @@ fn public_surface_is_complete_resume_token() {
     assert!(client.contains("pub async fn approve"));
     assert!(client.contains("pub async fn reject"));
     assert!(
-        !lib.contains(".route(\"/approve\"") && !lib.contains(".route(\"/reject\""),
-        "approve/reject must reuse POST /complete, not alias routes"
+        lib.contains(".route(\"/approve\"") && lib.contains(".route(\"/reject\""),
+        "approve/reject must be thin alias routes over complete_handler"
+    );
+    assert!(
+        lib.contains("async fn approve_handler")
+            && lib.contains("async fn reject_handler")
+            && lib.contains("complete_handler("),
+        "alias routes must call complete_handler, not a second apply SM"
+    );
+    let approve_fn = client
+        .split("pub async fn approve(")
+        .nth(1)
+        .expect("approve")
+        .split("    pub async fn ")
+        .next()
+        .expect("approve body");
+    assert!(
+        approve_fn.contains("\"approve\"") && !approve_fn.contains("\"complete\""),
+        "approve must POST /approve, not pretend the route while posting /complete"
+    );
+    let reject_fn = client
+        .split("pub async fn reject(")
+        .nth(1)
+        .expect("reject")
+        .split("    pub async fn ")
+        .next()
+        .expect("reject body");
+    assert!(
+        reject_fn.contains("\"reject\"") && !reject_fn.contains("\"complete\""),
+        "reject must POST /reject, not post /complete"
+    );
+    assert!(
+        client.contains("async fn post_apply("),
+        "complete/approve/reject must share one apply POST + status map"
+    );
+    assert!(
+        lib.contains(".route(\"/executors\"") && client.contains("pub async fn executors"),
+        "GET /executors and KeelClient::executors must exist"
     );
     assert!(!client.contains("pub async fn schedule"));
     assert!(!client.contains("pub async fn claim"));
@@ -341,6 +389,7 @@ fn required_client_tests_exist() {
         "fn client_start_without_secret_is_401",
         "fn client_start_wrong_secret_is_401",
         "fn client_start_unregistered_is_400_nothing_runs",
+        "fn client_executors_without_secret_is_401",
         "fn client_start_empty_definition_is_400",
         "fn client_start_oversized_body_is_413",
         "fn client_hung_start_is_hung_not_forever",
@@ -391,6 +440,10 @@ fn required_client_tests_exist() {
         lib.contains("fn inspect_view_json_running_pred_does_not_contain_running_token"),
         "InspectView JSON must omit Running-node tokens"
     );
+    assert!(
+        lib.contains("fn inspect_view_json_succeeded_owns_output"),
+        "Succeeded inspect JSON must own output bytes"
+    );
     let complete =
         fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/complete.rs").unwrap();
     assert!(
@@ -425,8 +478,12 @@ fn architecture_mermaid_names_keel_client() {
         "POST /complete",
         "POST /start",
         "GET /inspect",
+        "GET /executors",
+        "POST /approve",
+        "POST /reject",
         "POST /cancel",
         "Runtime::complete",
+        "Runtime::executor_ids",
         "Runtime::inspect",
         "Runtime::start",
         "Runtime::cancel",
@@ -437,6 +494,9 @@ fn architecture_mermaid_names_keel_client() {
         "InspectNodeState",
         "Decision",
         "CompleteBody",
+        "ExecutorsView",
+        "OutputBody",
+        "TokenBody",
     ] {
         assert!(arch.contains(name), "ARCHITECTURE missing {name}");
     }
@@ -517,9 +577,11 @@ fn sdk_loop_example_and_test_exist() {
         example.contains("register_fn(\"research\"")
             && example.contains("register_fn(\"write\"")
             && example.contains("KeelClient::new")
+            && example.contains(".executors(")
             && example.contains(".approve(")
             && example.contains(".cancel(")
-            && example.contains("not-on-this-engine"),
+            && example.contains("not-on-this-engine")
+            && example.contains("engine owns executors"),
         "example must register on the engine and start/approve/cancel on the client"
     );
     let tests =

@@ -5,8 +5,11 @@
 //!
 //! A shared secret is required. Default bind is `127.0.0.1` only.
 //! The engine process registers executors; [`KeelClient::start`] sends
-//! only the definition. [`KeelClient::start`] + [`KeelClient::inspect`] +
-//! [`KeelClient::complete`] / [`KeelClient::cancel`] is the out-of-process
+//! only the definition. [`GET /executors`](KeelClient::executors) lists
+//! the ids this Runtime has registered (plus builtin `wait`).
+//! [`KeelClient::start`] + [`KeelClient::inspect`] +
+//! [`KeelClient::complete`] / [`KeelClient::approve`] /
+//! [`KeelClient::reject`] / [`KeelClient::cancel`] is the out-of-process
 //! wait round-trip (`examples/sdk_loop.rs`). Kernel `keel-rt` does not
 //! depend on this crate.
 
@@ -90,6 +93,37 @@ pub struct CompleteBody {
     pub resume: Resume,
 }
 
+/// `POST /approve` body: token + optional output bytes.
+/// Maps onto [`Decision::Complete`] → the existing complete path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputBody {
+    pub token: ResumeToken,
+    #[serde(default)]
+    pub output: Option<Bytes>,
+}
+
+/// `POST /reject` body: token only.
+/// Maps onto [`Decision::Fail`] → the existing complete path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TokenBody {
+    pub token: ResumeToken,
+}
+
+/// `GET /executors` body. Ids from [`Runtime::executor_ids`] — including
+/// builtin [`keel_rt::WAIT_ID`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutorsView {
+    pub executors: Vec<ExecutorId>,
+}
+
+/// `POST /start` 400 when the definition names ids this Runtime does not
+/// have. `error` is `"unregistered"`; `executors` is the missing ids.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnregisteredBody {
+    pub error: String,
+    pub executors: Vec<ExecutorId>,
+}
+
 /// `POST /start` body. This **is** kernel durable JSON
 /// ([`WorkflowDefinition::durable_bytes`] / [`WorkflowDefinition::from_durable_bytes`]),
 /// not a second graph language and not a snapshot dump.
@@ -153,7 +187,8 @@ pub struct InspectView {
 
 /// One node on the inspect wire: id + DTO state.
 /// Wait token exists only as [`InspectNodeState::Waiting { token }`].
-/// Running-node snapshot tokens, outputs, and last_error are not on this type.
+/// Output bytes exist only as [`InspectNodeState::Succeeded { output }`].
+/// Running-node snapshot tokens, last_error, and resume_token are not on this type.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectNode {
     pub id: NodeId,
@@ -162,6 +197,7 @@ pub struct InspectNode {
 
 /// HTTP inspect state. Mapped from kernel [`NodeState`]; not kernel serde.
 /// `Waiting` is the only variant that carries a token.
+/// `Succeeded` is the only variant that carries output bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InspectNodeState {
@@ -169,15 +205,15 @@ pub enum InspectNodeState {
     Ready,
     Running { attempt: u32 },
     Waiting { token: ResumeToken, attempt: u32 },
-    Succeeded,
+    Succeeded { output: Bytes },
     Failed,
     Cancelled,
     TimedOut,
 }
 
 impl InspectNodeState {
-    fn from_kernel(state: &NodeState) -> Self {
-        match state {
+    fn from_kernel(n: &keel_rt::NodeSnapshot) -> Self {
+        match &n.state {
             NodeState::Pending => Self::Pending,
             NodeState::Ready { .. } => Self::Ready,
             NodeState::Running { attempt } => Self::Running { attempt: *attempt },
@@ -185,7 +221,9 @@ impl InspectNodeState {
                 token: token.clone(),
                 attempt: *attempt,
             },
-            NodeState::Succeeded => Self::Succeeded,
+            NodeState::Succeeded => Self::Succeeded {
+                output: n.output.clone().unwrap_or_default(),
+            },
             NodeState::Failed => Self::Failed,
             NodeState::Cancelled => Self::Cancelled,
             NodeState::TimedOut => Self::TimedOut,
@@ -202,7 +240,7 @@ impl InspectView {
                 .iter_nodes()
                 .map(|(id, n)| InspectNode {
                     id: id.clone(),
-                    state: InspectNodeState::from_kernel(&n.state),
+                    state: InspectNodeState::from_kernel(n),
                 })
                 .collect(),
         }
@@ -230,11 +268,15 @@ struct App {
 }
 
 /// Router a caller can nest or serve. Paths: `POST /start`, `GET /inspect/:id`,
-/// `POST /complete`, `POST /cancel/:id`.
+/// `GET /executors`, `POST /complete`, `POST /approve`, `POST /reject`,
+/// `POST /cancel/:id`.
 pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
     Router::new()
         .route("/start", post(start_handler))
         .route("/complete", post(complete_handler))
+        .route("/approve", post(approve_handler))
+        .route("/reject", post(reject_handler))
+        .route("/executors", get(executors_handler))
         .route("/inspect/:id", get(inspect_handler))
         .route(
             "/cancel/:id",
@@ -341,8 +383,25 @@ async fn start_handler(
             hold_if_live(&app.started, handle, terminal);
             Json(StartView { execution_id }).into_response()
         }
-        Err(StartError::UnregisteredExecutors(_)) => StatusCode::BAD_REQUEST.into_response(),
+        Err(StartError::UnregisteredExecutors(missing)) => (
+            StatusCode::BAD_REQUEST,
+            Json(UnregisteredBody {
+                error: "unregistered".into(),
+                executors: missing.0,
+            }),
+        )
+            .into_response(),
     }
+}
+
+async fn executors_handler(
+    State(app): State<App>,
+    headers: HeaderMap,
+) -> Result<Json<ExecutorsView>, StatusCode> {
+    authorize(&app, &headers)?;
+    Ok(Json(ExecutorsView {
+        executors: app.runtime.executor_ids(),
+    }))
 }
 
 async fn inspect_handler(
@@ -396,6 +455,38 @@ async fn complete_handler(
             .into_response(),
         Err(_) => StatusCode::BAD_REQUEST.into_response(),
     }
+}
+
+async fn approve_handler(
+    state: State<App>,
+    headers: HeaderMap,
+    Json(body): Json<OutputBody>,
+) -> axum::response::Response {
+    complete_handler(
+        state,
+        headers,
+        Json(CompleteBody {
+            token: body.token,
+            resume: Decision::Complete(body.output.unwrap_or_default()).into(),
+        }),
+    )
+    .await
+}
+
+async fn reject_handler(
+    state: State<App>,
+    headers: HeaderMap,
+    Json(body): Json<TokenBody>,
+) -> axum::response::Response {
+    complete_handler(
+        state,
+        headers,
+        Json(CompleteBody {
+            token: body.token,
+            resume: Decision::Fail.into(),
+        }),
+    )
+    .await
 }
 
 async fn cancel_handler(
@@ -743,6 +834,89 @@ mod tests {
             view.node(&slow).unwrap().state,
             InspectNodeState::Running { .. }
         ));
+        assert!(
+            !json.contains("\"output\""),
+            "Running/Waiting inspect JSON must not carry an output field: {json}"
+        );
+    }
+
+    #[test]
+    fn inspect_view_json_succeeded_owns_output() {
+        let id = keel_rt::ExecutionId::parse("exec-out").unwrap();
+        let write = keel_rt::NodeId::new("write");
+        let slow = keel_rt::NodeId::new("slow");
+        let run_tok = ResumeToken::issue(id.clone(), slow.clone(), 1);
+        let mut snap = ExecutionSnapshot {
+            schema_version: keel_rt::SCHEMA_VERSION,
+            revision: 1,
+            execution_id: id,
+            workflow_id: keel_rt::WorkflowId::new("wf"),
+            state: ExecutionState::Running,
+            nodes: Default::default(),
+            node_order: vec![write.clone(), slow.clone()],
+            definition_hash: Default::default(),
+        };
+        snap.nodes.insert(
+            write.clone(),
+            keel_rt::NodeSnapshot {
+                state: NodeState::Succeeded,
+                output: Some(bytes::Bytes::from_static(b"human-ok")),
+                attempt: 1,
+                resume_token: None,
+                last_error: None,
+            },
+        );
+        snap.nodes.insert(
+            slow.clone(),
+            keel_rt::NodeSnapshot {
+                state: NodeState::Running { attempt: 1 },
+                output: Some(bytes::Bytes::from_static(b"ghost")),
+                attempt: 1,
+                resume_token: Some(run_tok),
+                last_error: None,
+            },
+        );
+        let view = InspectView::from_snapshot(&snap);
+        assert_eq!(
+            view.node(&write).map(|n| &n.state),
+            Some(&InspectNodeState::Succeeded {
+                output: bytes::Bytes::from_static(b"human-ok"),
+            })
+        );
+        assert!(matches!(
+            view.node(&slow).unwrap().state,
+            InspectNodeState::Running { .. }
+        ));
+        let json = serde_json::to_value(&view).unwrap();
+        let write_json = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "write")
+            .cloned()
+            .unwrap();
+        let slow_json = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "slow")
+            .cloned()
+            .unwrap();
+        assert_eq!(write_json["state"]["kind"], "succeeded");
+        assert_eq!(
+            write_json["state"]["output"],
+            serde_json::to_value(bytes::Bytes::from_static(b"human-ok")).unwrap()
+        );
+        assert!(write_json["state"].get("token").is_none());
+        assert!(
+            slow_json["state"].get("output").is_none(),
+            "Running must not own output: {slow_json}"
+        );
+        assert!(slow_json["state"].get("token").is_none());
+        assert!(slow_json.get("last_error").is_none());
+        assert!(slow_json.get("resume_token").is_none());
+        assert!(slow_json["state"].get("last_error").is_none());
+        assert!(slow_json["state"].get("resume_token").is_none());
     }
 
     #[test]

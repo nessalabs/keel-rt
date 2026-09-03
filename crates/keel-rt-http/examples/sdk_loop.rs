@@ -1,19 +1,20 @@
 //! Two-process SDK loop in one binary.
 //!
+//! The engine owns executors; this client never registers them.
+//!
 //! **Engine** (this process): registers `research` and `write`. Builtin
 //! `wait` needs no register. Then `serve_ephemeral` on `127.0.0.1`.
 //!
-//! **Client** (`KeelClient`): sends only the definition (`durable_bytes`).
-//! It cannot register executors. A node whose `executor_id` is missing
-//! on the server is **400** (`client_start_unregistered_is_400_nothing_runs`).
+//! **Client** (`KeelClient`): `GET /executors`, then sends only the
+//! definition (`durable_bytes`). A node whose `executor_id` is missing
+//! is **400** with that id (`client_start_unregistered_is_400_nothing_runs`).
 //!
 //! ```text
 //! cargo run -p keel-rt-http --example sdk_loop
 //! ```
 //!
-//! Inspect is status + wait token — not node outputs. `write` having
-//! [`ExecutionState::Succeeded`] is what the client can see. This binary
-//! also counts `write` on the engine so we can print the join bytes.
+//! After approve, inspect `write` is [`InspectNodeState::Succeeded`] with
+//! the join bytes. Waiting is still the only variant with a token.
 
 use bytes::Bytes;
 use keel_rt::{ExecutionContext, ExecutionState, NodeId, NodeOutcome, Runtime, WorkflowDefinition};
@@ -111,6 +112,28 @@ async fn main() -> ExitCode {
     println!("engine   http://{addr}  (research + write registered; wait is builtin)");
 
     let client = KeelClient::new(format!("http://{addr}"), secret).expect("client");
+    let catalog = match client.executors().await {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("catalog failed: {e}");
+            server.abort();
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "catalog  {}",
+        catalog
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if !catalog.iter().any(|id| id.as_str() == "research") {
+        eprintln!("catalog missing research after engine register_fn");
+        server.abort();
+        return ExitCode::FAILURE;
+    }
+
     let def = dag();
     println!(
         "client   start body is durable_bytes ({} B) — not a snapshot",
@@ -127,13 +150,17 @@ async fn main() -> ExitCode {
         )
         .await
     {
-        Err(KeelClientError::BadRequest) => {
-            println!(
-                "unreg    start of executor_id=not-on-this-engine → 400 (engine must register)"
-            )
+        Err(e @ KeelClientError::Unregistered { .. }) => {
+            let text = e.to_string();
+            if !text.contains("not-on-this-engine") {
+                eprintln!("400 must name not-on-this-engine, got {text}");
+                server.abort();
+                return ExitCode::FAILURE;
+            }
+            println!("unreg    {text}");
         }
         other => {
-            eprintln!("expected 400 unregistered, got {other:?}");
+            eprintln!("expected 400 unregistered with id, got {other:?}");
             server.abort();
             return ExitCode::FAILURE;
         }
@@ -159,10 +186,25 @@ async fn main() -> ExitCode {
     })
     .await;
     print_inspect("inspect", &parked);
-    let wire = serde_json::to_string(&parked).expect("json");
-    println!("wire     {wire}");
-    if wire.contains("notes") || wire.contains("human-ok") {
-        eprintln!("InspectView must omit outputs; saw payload in JSON");
+    let parked_wire = serde_json::to_string(&parked).expect("json");
+    println!("wire     {parked_wire}");
+    match parked.node(&NodeId::new("research")).map(|n| &n.state) {
+        Some(InspectNodeState::Succeeded { output }) if output.as_ref() == b"notes" => {}
+        other => {
+            eprintln!("research inspect must be Succeeded(notes), got {other:?}");
+            server.abort();
+            return ExitCode::FAILURE;
+        }
+    }
+    let hold_json = serde_json::to_value(
+        parked
+            .node(&NodeId::new("hold"))
+            .map(|n| &n.state)
+            .expect("hold"),
+    )
+    .expect("hold json");
+    if hold_json.get("output").is_some() {
+        eprintln!("Waiting inspect JSON must not own output: {hold_json}");
         server.abort();
         return ExitCode::FAILURE;
     }
@@ -194,33 +236,36 @@ async fn main() -> ExitCode {
         server.abort();
         return ExitCode::FAILURE;
     }
-    println!("approve  Decision::Complete(human-ok) via POST /complete");
+    println!("approve  Decision::Complete(human-ok) via POST /approve");
 
     let done = inspect_until(&client, &id, |v| v.state == ExecutionState::Succeeded).await;
     print_inspect("done    ", &done);
-    let write_ok = matches!(
-        done.node(&NodeId::new("write")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
-    );
+    let done_wire = serde_json::to_string(&done).expect("done json");
+    println!("inspect  {done_wire}");
+    match done.node(&NodeId::new("write")).map(|n| &n.state) {
+        Some(InspectNodeState::Succeeded { output }) if output.as_ref() == b"human-ok" => {}
+        other => {
+            eprintln!("write inspect must be Succeeded(human-ok), got {other:?}");
+            server.abort();
+            return ExitCode::FAILURE;
+        }
+    }
     let wrote = writes.load(Ordering::SeqCst);
     let payload = last_write.lock().expect("write").clone();
-    if !write_ok || done.state != ExecutionState::Succeeded || wrote != 1 {
+    if done.state != ExecutionState::Succeeded || wrote != 1 {
         eprintln!(
-            "write did not finish: write_ok={write_ok} writes={wrote} state={:?}",
+            "write did not finish: writes={wrote} state={:?}",
             done.state
         );
         server.abort();
         return ExitCode::FAILURE;
     }
     if payload.as_ref() != b"human-ok" {
-        eprintln!(
-            "write join input was {:?}, expected human-ok (engine-side; inspect has no outputs)",
-            payload
-        );
+        eprintln!("write join input was {:?}, expected human-ok", payload);
         server.abort();
         return ExitCode::FAILURE;
     }
-    println!("write    ran once; join input human-ok (seen on engine, not InspectView)");
+    println!("write    Succeeded output human-ok (inspect + engine join)");
 
     // Run 2: start → cancel while waiting → later approve is 409.
     let id2 = client.start(def).await.expect("second start");

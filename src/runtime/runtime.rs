@@ -290,6 +290,12 @@ impl Runtime {
         RuntimeBuilder::default()
     }
 
+    /// Executor ids this Runtime will accept on start, including builtin
+    /// [`crate::WAIT_ID`]. Registry keys only — not an HTTP type.
+    pub fn executor_ids(&self) -> Vec<ExecutorId> {
+        self.registry.ids()
+    }
+
     /// Start one execution. Fails **before** spawn if any node's executor id
     /// is not registered — nothing runs.
     pub fn start(&self, definition: WorkflowDefinition) -> Result<ExecutionHandle, StartError> {
@@ -778,6 +784,23 @@ mod tests {
             .node("a", "a")
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn executor_ids_includes_wait_and_registered() {
+        let rt = Runtime::builder()
+            .register_fn("research", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let ids = rt.executor_ids();
+        assert!(
+            ids.iter()
+                .any(|id| id.as_str() == crate::runtime::wait::WAIT_ID),
+            "{ids:?}"
+        );
+        assert!(ids.iter().any(|id| id.as_str() == "research"), "{ids:?}");
+        assert!(!ids.iter().any(|id| id.as_str() == "not-on-this-engine"));
     }
 
     #[tokio::test(flavor = "current_thread")]

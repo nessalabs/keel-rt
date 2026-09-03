@@ -4,9 +4,17 @@
 
 `cargo run -p keel-rt-http --example sdk_loop` is the two-process path
 in one binary: engine `register_fn` (`research`, `write`; builtin
-`wait`), client `start` / `inspect` / `approve` / `cancel`. The client
-sends only `durable_bytes`. Unregistered `executor_id` is **400**.
-Inspect omits outputs. CI: `sdk_loop_approve_then_cancel_is_409`.
+`wait`), client `executors` / `start` / `inspect` / `approve` / `cancel`.
+The engine owns executors; the client never registers them. The client
+sends only `durable_bytes`. Unregistered `executor_id` is **400**
+`{"error":"unregistered","executors":[...]}` — the missing ids are in
+[`KeelClientError::Unregistered`]. `GET /executors` lists
+[`Runtime::executor_ids`] (including builtin `wait`).
+`InspectNodeState::Succeeded { output }` carries result bytes;
+Waiting still owns the only token. `POST /approve` / `POST /reject`
+are thin aliases over the complete apply path. CI:
+`sdk_loop_approve_then_cancel_is_409`,
+`client_start_unregistered_is_400_nothing_runs`.
 
 ## Cancel one execution (`sdk/cancel`)
 
@@ -72,28 +80,33 @@ HTTP start + inspect + complete on sqlite (two Runtimes, one file)
 lives in `keel-rt-sqlite` — this crate does not import SqliteStore
 (`http_sqlite_start_inspect_complete_two_runtimes_new_id_is_not_steal`).
 Unregistered / empty definition is **400**; oversized **413**; missing
-secret **401** (verb-neutral Display; no `START_*` names). Same
+secret **401** (verb-neutral Display; no `START_*` names). Unregistered
+400 names the missing ids (`UnregisteredBody` /
+`KeelClientError::Unregistered`). Empty-definition 400 stays
+`BadRequest` and does not invent executor names. Same
 [`SECRET_HEADER`] / [`HANG_BOUND`] / `send` / `uri` as inspect and
 complete. [`CompleteSecret`] stays named for historical
 `x-keel-complete`; it is the secret on every route.
 
-[`KeelClient::approve`] / [`KeelClient::reject`] POST the existing
-`/complete` body: `Decision::Complete(bytes)` and `Decision::Fail`
-(`NodeOutcome::failed("failed")` → execution Failed). There is no
-`Decision` reject variant (PR #9). No `/approve` or `/reject` routes.
-Proof: `client_start_inspect_approve_unblocks_wait`,
+[`KeelClient::approve`] / [`KeelClient::reject`] POST `/approve` and
+`/reject` (`OutputBody` / `TokenBody`) which call the existing
+`complete_handler`: `Decision::Complete(bytes)` and `Decision::Fail`
+(`NodeOutcome::failed("failed")` → execution Failed). Same 409/423
+map. There is no `Decision` reject variant (PR #9) and no second
+state machine. Proof: `client_start_inspect_approve_unblocks_wait`,
 `client_start_inspect_reject_fails_execution` (cite
 `client_decision_fail_fails_execution`). Approve of an issued
 Running-node token leaves the wait parked
 (`client_approve_issued_token_for_running_node_leaves_wait_parked`).
-Kernel `src/` unchanged.
+Kernel thaw: [`Runtime::executor_ids`] lists registry keys only.
 
 ## Inspect then complete (`sdk/inspect`)
 
 [`KeelClient::inspect`] is `GET /inspect/:id` with the same secret as
 [`KeelClient::complete`] (`X-Keel-Complete` and `Authorization: Bearer`).
 The response is [`InspectView`] (execution id, state, nodes with wait
-token inside [`InspectNodeState::Waiting`]) — not an [`ExecutionHandle`]
+token inside [`InspectNodeState::Waiting`] and result bytes only on
+[`InspectNodeState::Succeeded { output }`]) — not an [`ExecutionHandle`]
 and not a cloned kernel [`NodeState`]. Unknown id is 404; terminal and
 Cancelled are 200 with state (complete of a cancelled token is still
 409). Shared client errors are verb-neutral (`request rejected`, `hung`,
@@ -106,7 +119,9 @@ completes; the engine unblocks and downstream sees the bytes. Proof:
 `client_inspect_then_complete_unblocks_wait`. `InspectView` JSON carries
 the wait token **once**, inside `InspectNodeState::Waiting { token }`
 (kernel snapshot serde is frozen; the HTTP DTO has no `resume_token`
-field and does not clone `NodeState`). Running-node tokens stay on the
+field and does not clone `NodeState`). Succeeded owns `output`; Running
+JSON has no output field
+(`inspect_view_json_succeeded_owns_output`). Running-node tokens stay on the
 snapshot and do not appear on inspect JSON
 (`inspect_view_json_running_pred_does_not_contain_running_token`). Two
 Runtimes: inspect does not steal; complete on the non-owner is **423
