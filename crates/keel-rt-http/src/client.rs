@@ -3,6 +3,12 @@
 
 use crate::{CompleteBody, CompleteSecret, COMPLETE_SECRET_HEADER};
 use bytes::Bytes;
+use http_body_util::Full;
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::{Method, Request, Uri};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
 use keel_rt::{NodeOutcome, Resume, ResumeToken};
 use std::fmt;
 use thiserror::Error;
@@ -41,7 +47,7 @@ pub enum CompleteClientError {
     #[error("unexpected complete status {0}")]
     Unexpected(u16),
     #[error("complete transport: {0}")]
-    Transport(#[from] reqwest::Error),
+    Transport(String),
 }
 
 /// POSTs `token` + [`Resume`] to `{base}/complete`.
@@ -50,8 +56,8 @@ pub enum CompleteClientError {
 /// Duplicate complete is Ok (server 200 noop). Does not revive Cancelled.
 #[derive(Clone)]
 pub struct CompleteClient {
-    http: reqwest::Client,
-    complete_url: String,
+    http: Client<HttpConnector, Full<Bytes>>,
+    complete_url: Uri,
     secret: Option<CompleteSecret>,
 }
 
@@ -70,12 +76,12 @@ impl CompleteClient {
     }
 
     fn build(base_url: &str, secret: Option<CompleteSecret>) -> Result<Self, CompleteClientError> {
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let complete_url = complete_url(base_url)
+            .parse::<Uri>()
+            .map_err(|e| CompleteClientError::Transport(e.to_string()))?;
         Ok(Self {
-            http,
-            complete_url: complete_url(base_url),
+            http: Client::builder(TokioExecutor::new()).build_http(),
+            complete_url,
             secret,
         })
     }
@@ -88,14 +94,27 @@ impl CompleteClient {
         token: ResumeToken,
         resume: impl Into<Resume>,
     ) -> Result<(), CompleteClientError> {
-        let mut req = self.http.post(&self.complete_url).json(&CompleteBody {
+        let json = serde_json::to_vec(&CompleteBody {
             token,
             resume: resume.into(),
-        });
+        })
+        .map_err(|e| CompleteClientError::Transport(e.to_string()))?;
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(self.complete_url.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_LENGTH, json.len());
         if let Some(secret) = &self.secret {
-            req = req.header(COMPLETE_SECRET_HEADER, secret.as_str());
+            builder = builder.header(COMPLETE_SECRET_HEADER, secret.as_str());
         }
-        let resp = req.send().await?;
+        let req = builder
+            .body(Full::new(Bytes::from(json)))
+            .map_err(|e| CompleteClientError::Transport(e.to_string()))?;
+        let resp = self
+            .http
+            .request(req)
+            .await
+            .map_err(|e| CompleteClientError::Transport(e.to_string()))?;
         match resp.status().as_u16() {
             200 => Ok(()),
             401 => Err(CompleteClientError::Unauthorized),
