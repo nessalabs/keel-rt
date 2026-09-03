@@ -127,7 +127,9 @@ fn kernel_src_still_has_no_http_agent_or_hitl() {
 #[test]
 fn public_surface_is_complete_resume_token() {
     let lib = fs::read_to_string(crate_src().join("lib.rs")).unwrap();
-    assert!(lib.contains("pub use client::{CompleteClient, CompleteClientError, Decision}"));
+    assert!(lib.contains(
+        "pub use client::{CompleteClient, CompleteClientError, Decision, COMPLETE_HANG_BOUND}"
+    ));
     assert!(lib.contains("pub struct CompleteBody"));
     assert!(lib.contains("pub struct CompleteSecret"));
     let client = fs::read_to_string(crate_src().join("client.rs")).unwrap();
