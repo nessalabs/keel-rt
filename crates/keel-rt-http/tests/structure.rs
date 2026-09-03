@@ -159,15 +159,15 @@ fn public_surface_is_complete_resume_token() {
         "Succeeded must own output; not a unit variant"
     );
     let inspect_node = lib
-        .split("pub struct InspectNode")
+        .split("pub struct InspectNode {")
         .nth(1)
         .expect("InspectNode")
-        .split("pub enum InspectNodeState")
+        .split('}')
         .next()
-        .expect("InspectNode body");
+        .expect("InspectNode fields");
     assert!(
         !inspect_node.contains("output"),
-        "InspectNode must not have a ghost output field"
+        "InspectNode must not have a ghost output field: {inspect_node}"
     );
     let inspect_enum = lib
         .split("pub enum InspectNodeState")
