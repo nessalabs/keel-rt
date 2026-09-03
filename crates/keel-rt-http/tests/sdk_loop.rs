@@ -1,0 +1,155 @@
+//! CI lock for `examples/sdk_loop.rs`. Same public types, FakeClock, no wall sleep.
+
+use bytes::Bytes;
+use keel_rt::{
+    ExecutionContext, ExecutionState, FakeClock, NodeId, NodeOutcome, Runtime, WorkflowDefinition,
+};
+use keel_rt_http::{
+    serve_ephemeral, CompleteSecret, InspectNodeState, KeelClient, KeelClientError,
+};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const BOUND: Duration = Duration::from_secs(5);
+const SECRET: &str = "sdk-loop-secret";
+
+fn secret() -> CompleteSecret {
+    CompleteSecret::new(SECRET).unwrap()
+}
+
+fn dag() -> WorkflowDefinition {
+    WorkflowDefinition::builder("research-hold-write")
+        .node("research", "research")
+        .node("hold", "wait")
+        .node("write", "write")
+        .edge("research", "hold")
+        .edge("hold", "write")
+        .build()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sdk_loop_approve_then_cancel_is_409() {
+    let writes = Arc::new(AtomicU32::new(0));
+    let last = Arc::new(Mutex::new(Bytes::new()));
+    let w = writes.clone();
+    let last_c = last.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("research", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"notes"))
+            })
+            .register_fn("write", move |ctx: ExecutionContext| {
+                let w = w.clone();
+                let last = last_c.clone();
+                async move {
+                    w.fetch_add(1, Ordering::SeqCst);
+                    let out = ctx
+                        .inputs
+                        .get(&NodeId::new("hold"))
+                        .cloned()
+                        .unwrap_or_default();
+                    *last.lock().expect("write") = out.clone();
+                    NodeOutcome::Succeeded(out)
+                }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+
+    let err = client
+        .start(
+            WorkflowDefinition::builder("missing")
+                .node("x", "not-on-this-engine")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::BadRequest), "{err:?}");
+
+    let id = client.start(dag()).await.expect("start");
+    let parked = tokio::time::timeout(BOUND, async {
+        loop {
+            let v = client.inspect(&id).await.expect("i");
+            if v.state == ExecutionState::Waiting {
+                if let Some(InspectNodeState::Waiting { .. }) =
+                    v.node(&NodeId::new("hold")).map(|n| &n.state)
+                {
+                    return v;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("park");
+    assert_eq!(
+        parked.node(&NodeId::new("research")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded)
+    );
+    assert!(parked.resume_token(&NodeId::new("research")).is_none());
+    assert!(parked.resume_token(&NodeId::new("write")).is_none());
+    let token = parked
+        .resume_token(&NodeId::new("hold"))
+        .cloned()
+        .expect("token only on Waiting");
+    let wire = serde_json::to_string(&parked).unwrap();
+    assert!(!wire.contains("notes"), "InspectView omits outputs: {wire}");
+
+    client
+        .approve(token, Bytes::from_static(b"human-ok"))
+        .await
+        .expect("approve");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            let v = client.inspect(&id).await.expect("i");
+            if v.state == ExecutionState::Succeeded {
+                assert_eq!(
+                    v.node(&NodeId::new("write")).map(|n| &n.state),
+                    Some(&InspectNodeState::Succeeded)
+                );
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("succeeded");
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
+    assert_eq!(last.lock().unwrap().as_ref(), b"human-ok");
+
+    let id2 = client.start(dag()).await.expect("second");
+    let token2 = tokio::time::timeout(BOUND, async {
+        loop {
+            let v = client.inspect(&id2).await.expect("i");
+            if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                return t.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token2");
+    client.cancel(&id2).await.expect("cancel");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id2).await.expect("i").state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Cancelled");
+    let err = client
+        .approve(token2, Bytes::from_static(b"too-late"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::Cancelled), "{err:?}");
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
+    server.abort();
+}

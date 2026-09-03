@@ -4,9 +4,11 @@
 //! [`Runtime::complete`] / [`Runtime::cancel`]. No forms, no identity.
 //!
 //! A shared secret is required. Default bind is `127.0.0.1` only.
-//! [`KeelClient::start`] + [`KeelClient::inspect`] + [`KeelClient::complete`]
-//! / [`KeelClient::cancel`] is the out-of-process wait round-trip. Kernel
-//! `keel-rt` does not depend on this crate.
+//! The engine process registers executors; [`KeelClient::start`] sends
+//! only the definition. [`KeelClient::start`] + [`KeelClient::inspect`] +
+//! [`KeelClient::complete`] / [`KeelClient::cancel`] is the out-of-process
+//! wait round-trip (`examples/sdk_loop.rs`). Kernel `keel-rt` does not
+//! depend on this crate.
 
 mod client;
 

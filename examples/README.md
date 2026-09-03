@@ -16,6 +16,9 @@ cargo run --release --manifest-path benches/jemalloc_compare/Cargo.toml -- --mul
 
 # Allocation count on 256-wide join (system allocator)
 cargo run --release --example alloc_count
+
+# Out-of-process start / inspect / approve / cancel (sibling crate)
+cargo run -p keel-rt-http --example sdk_loop
 ```
 
 Or: `./scripts/jemalloc-benches.sh` (and pass `--multi-thread` for the experiment).
