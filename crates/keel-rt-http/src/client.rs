@@ -1,22 +1,22 @@
-//! Out-of-process complete. POSTs the same JSON [`CompleteBody`] the server
-//! already accepts. Not a second token type.
+//! Out-of-process inspect + complete. POSTs the same JSON [`CompleteBody`]
+//! the server already accepts. Not a second token type.
 
-use crate::{CompleteBody, CompleteSecret, COMPLETE_SECRET_HEADER};
+use crate::{CompleteBody, CompleteSecret, InspectView, CLAIMED_ELSEWHERE, SECRET_HEADER};
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::{Method, Request, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use keel_rt::{NodeOutcome, Resume, ResumeToken};
+use keel_rt::{ExecutionId, NodeOutcome, Resume, ResumeToken};
 use std::fmt;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Bound for one `POST /complete`. A hung server is [`KeelClientError::Hung`],
-/// not a forever wait. Tokio time (FakeClock is the kernel clock).
-pub const COMPLETE_HANG_BOUND: Duration = Duration::from_secs(5);
+/// Bound for one inspect or complete request. A hung server is
+/// [`KeelClientError::Hung`], not a forever wait. Tokio time.
+pub const HANG_BOUND: Duration = Duration::from_secs(5);
 
 /// Thin mapping onto [`Resume`]. Not a second state machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,37 +36,42 @@ impl From<Decision> for Resume {
     }
 }
 
-/// Errors from [`KeelClient::complete`]. Status map matches the server.
+/// Errors from [`KeelClient::inspect`] and [`KeelClient::complete`].
+/// Status map matches the server. Display is verb-neutral for shared codes.
 #[derive(Debug, Error)]
 pub enum KeelClientError {
-    #[error("complete rejected: missing or wrong secret")]
+    #[error("request rejected: missing or wrong secret")]
     Unauthorized,
     #[error("unknown resume token")]
     UnknownToken,
+    #[error("unknown execution")]
+    UnknownExecution,
     #[error("token belongs to a cancelled execution")]
     Cancelled,
-    #[error("complete body exceeds server limit")]
+    #[error("request body exceeds server limit")]
     PayloadTooLarge,
-    #[error("complete request rejected")]
+    #[error("request rejected")]
     BadRequest,
-    #[error("unexpected complete status {0}")]
+    #[error("execution claimed elsewhere")]
+    ClaimedElsewhere,
+    #[error("unexpected status {0}")]
     Unexpected(u16),
-    #[error("complete hung: no response within hang-bound")]
+    #[error("request hung: no response within hang-bound")]
     Hung,
-    #[error("complete transport: {0}")]
+    #[error("transport: {0}")]
     Transport(String),
 }
 
-/// Out-of-process SDK client. This crate implements [`Self::complete`] only.
+/// Out-of-process SDK client. This crate implements [`Self::inspect`] and
+/// [`Self::complete`]. No start / schedule HTTP.
 ///
-/// Sends [`COMPLETE_SECRET_HEADER`] and `Authorization: Bearer` when
-/// constructed with a secret. A server that copies only one of those
-/// still accepts [`Self::complete`].
-/// Duplicate complete is Ok (server 200 noop). Does not revive Cancelled.
-/// Does not follow redirects (stays on the URL it was given).
+/// Sends [`SECRET_HEADER`] and `Authorization: Bearer` when constructed
+/// with a secret. Duplicate complete is Ok (server 200 noop).
+/// Does not revive Cancelled. Does not follow redirects.
 #[derive(Clone)]
 pub struct KeelClient {
     http: Client<HttpConnector, Full<Bytes>>,
+    base: String,
     complete_url: Uri,
     secret: Option<CompleteSecret>,
     hang_bound: Duration,
@@ -84,21 +89,83 @@ impl KeelClient {
     }
 
     fn build(base_url: &str, secret: Option<CompleteSecret>) -> Result<Self, KeelClientError> {
-        let complete_url = complete_url(base_url)
+        let base = base_url.trim_end_matches('/').to_string();
+        let complete_url = complete_url(&base)
             .parse::<Uri>()
             .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         Ok(Self {
             http: Client::builder(TokioExecutor::new()).build_http(),
+            base,
             complete_url,
             secret,
-            hang_bound: COMPLETE_HANG_BOUND,
+            hang_bound: HANG_BOUND,
         })
     }
 
-    /// Override [`COMPLETE_HANG_BOUND`] for this client.
+    /// Override [`HANG_BOUND`] for this client.
     pub fn hang_bound(mut self, bound: Duration) -> Self {
         self.hang_bound = bound;
         self
+    }
+
+    fn with_secret(
+        &self,
+        mut builder: hyper::http::request::Builder,
+    ) -> hyper::http::request::Builder {
+        if let Some(secret) = &self.secret {
+            builder = builder
+                .header(SECRET_HEADER, secret.as_str())
+                .header(AUTHORIZATION, format!("Bearer {}", secret.as_str()));
+        }
+        builder
+    }
+
+    /// Headers + hang-bound. Callers map status.
+    async fn send(
+        &self,
+        builder: hyper::http::request::Builder,
+        body: Bytes,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, KeelClientError> {
+        let req = self
+            .with_secret(builder)
+            .body(Full::new(body))
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        match tokio::time::timeout(self.hang_bound, self.http.request(req)).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(e)) => Err(KeelClientError::Transport(e.to_string())),
+            Err(_) => Err(KeelClientError::Hung),
+        }
+    }
+
+    /// `GET /inspect/:id` — same secret as complete. Hang-bound applies.
+    pub async fn inspect(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> Result<InspectView, KeelClientError> {
+        let url = format!("{}/inspect/{}", self.base, execution_id.as_str())
+            .parse::<Uri>()
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        let resp = self
+            .send(
+                Request::builder().method(Method::GET).uri(url),
+                Bytes::new(),
+            )
+            .await?;
+        match resp.status().as_u16() {
+            200 => {
+                let bytes = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
+                    .to_bytes();
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))
+            }
+            401 => Err(KeelClientError::Unauthorized),
+            404 => Err(KeelClientError::UnknownExecution),
+            other => Err(KeelClientError::Unexpected(other)),
+        }
     }
 
     /// POST the same [`CompleteBody`] the server already accepts.
@@ -114,24 +181,16 @@ impl KeelClient {
             resume: resume.into(),
         })
         .map_err(|e| KeelClientError::Transport(e.to_string()))?;
-        let mut builder = Request::builder()
-            .method(Method::POST)
-            .uri(self.complete_url.clone())
-            .header(CONTENT_TYPE, "application/json")
-            .header(CONTENT_LENGTH, json.len());
-        if let Some(secret) = &self.secret {
-            builder = builder
-                .header(COMPLETE_SECRET_HEADER, secret.as_str())
-                .header(AUTHORIZATION, format!("Bearer {}", secret.as_str()));
-        }
-        let req = builder
-            .body(Full::new(Bytes::from(json)))
-            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
-        let resp = match tokio::time::timeout(self.hang_bound, self.http.request(req)).await {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => return Err(KeelClientError::Transport(e.to_string())),
-            Err(_) => return Err(KeelClientError::Hung),
-        };
+        let resp = self
+            .send(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(self.complete_url.clone())
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(CONTENT_LENGTH, json.len()),
+                Bytes::from(json),
+            )
+            .await?;
         match resp.status().as_u16() {
             200 => Ok(()),
             401 => Err(KeelClientError::Unauthorized),
@@ -139,6 +198,7 @@ impl KeelClient {
             409 => Err(KeelClientError::Cancelled),
             413 => Err(KeelClientError::PayloadTooLarge),
             400 => Err(KeelClientError::BadRequest),
+            CLAIMED_ELSEWHERE => Err(KeelClientError::ClaimedElsewhere),
             other => Err(KeelClientError::Unexpected(other)),
         }
     }
@@ -199,6 +259,22 @@ mod tests {
 
     #[test]
     fn hang_bound_default_is_five_seconds() {
-        assert_eq!(COMPLETE_HANG_BOUND, Duration::from_secs(5));
+        assert_eq!(HANG_BOUND, Duration::from_secs(5));
+        assert_eq!(crate::CLAIMED_ELSEWHERE, 423);
+    }
+
+    #[test]
+    fn inspect_shared_errors_display_does_not_say_complete() {
+        for err in [
+            KeelClientError::Unauthorized,
+            KeelClientError::UnknownExecution,
+            KeelClientError::Hung,
+        ] {
+            let text = err.to_string();
+            assert!(
+                !text.to_ascii_lowercase().contains("complete"),
+                "inspect-shared error must be verb-neutral: {text}"
+            );
+        }
     }
 }

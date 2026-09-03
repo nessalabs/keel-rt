@@ -101,16 +101,25 @@ flowchart TB
   sched --> crate
 ```
 
-`keel-rt-http` `KeelClient` POSTs `CompleteBody` to `POST /complete`;
-the server calls `Runtime::complete`. Kernel `src/` is unchanged.
+`keel-rt-http` `KeelClient` GETs `InspectView` from `GET /inspect/:id`
+then POSTs `CompleteBody` to `POST /complete`. Same secret as complete.
+The server wraps [`Runtime::inspect`] / [`Runtime::complete`]. No HTTP
+types in kernel `src/`. `InspectView` JSON carries the wait token once
+(`InspectNodeState::Waiting { token }`, not a cloned kernel `NodeState`).
+`POST /complete` ClaimedElsewhere is
+**423 Locked** `{"error":"claimed_elsewhere"}` (not 400, not 409).
 
 ```mermaid
 flowchart LR
   other[other process]
   client[KeelClient]
+  httpGet["keel-rt-http GET /inspect"]
   httpPost["keel-rt-http POST /complete"]
-  rt["Runtime::complete"]
-  other --> client --> httpPost --> rt
+  rti["Runtime::inspect"]
+  rtc["Runtime::complete"]
+  other --> client
+  client --> httpGet --> rti
+  client --> httpPost --> rtc
 ```
 
 ```mermaid
@@ -119,7 +128,24 @@ classDiagram
     +new(base_url, CompleteSecret)
     +without_secret(base_url)
     +hang_bound(Duration)
+    +inspect(execution_id) InspectView
     +complete(token, Resume)
+  }
+  class InspectView {
+    execution_id
+    state
+    nodes
+    +resume_token(NodeId)
+  }
+  class InspectNode {
+    id
+    state InspectNodeState
+  }
+  class InspectNodeState {
+    Pending Ready
+    Running attempt
+    Waiting token attempt
+    Succeeded Failed Cancelled TimedOut
   }
   class Decision {
     Complete Bytes
@@ -135,6 +161,9 @@ classDiagram
     Reinvoke
   }
   Decision --> Resume : Into
+  KeelClient --> InspectView : GET JSON
+  InspectView --> InspectNode
+  InspectNode --> InspectNodeState
   KeelClient --> CompleteBody : POST JSON
 ```
 
@@ -190,6 +219,8 @@ classDiagram
     +start(WorkflowDefinition) Result~ExecutionHandle, StartError~
     +run(WorkflowDefinition) Result~ExecutionState, StartError~
     +resume(ExecutionId) Result~ExecutionHandle, ResumeError~
+    +inspect(ExecutionId) Option~ExecutionSnapshot~
+    +complete(ResumeToken, Resume) Result
   }
   class ExecutionHandle {
     <<must_use Drop cancels>>
@@ -318,7 +349,8 @@ edit `scheduler.rs`.
 | Snapshot resume / CAS                        | `restore.rs` + `Runtime::resume`           | event replay              |
 | RetryFailed recover                          | `apply` + `Runtime::resume_with`           | `handle.resume` (token)   |
 | Wait / gate complete                         | `Wait` + `Runtime::complete`               | HTTP crate (secret/bind)  |
-| Out-of-process complete client               | `keel-rt-http` `KeelClient`            | kernel `src/`             |
+| Out-of-process inspect + complete            | `keel-rt-http` `KeelClient` / `InspectView` | start / resume / complete |
+| Runtime inspect by id                        | `Runtime::inspect` (live or store)         | HTTP / HITL types         |
 | Cancel, wait, token-resume, inspect          | `handle` + `inject::Event`                 | domain types              |
 | Ready-queue / permits / spawn                | `scheduler` + `spawn`                      | `Policy`                  |
 | Test graph construction                      | `WorkflowTest`                             | private scheduler fields  |

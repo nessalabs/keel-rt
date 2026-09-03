@@ -495,6 +495,14 @@ fn public_event_variants_are_frozen_without_node_ready() {
         !names.iter().any(|n| n == "NodeReady"),
         "NodeReady is not a public Event"
     );
+    assert!(
+        !names.iter().any(|n| n == "Inspect"),
+        "drive Inspect is crate-private inject::Event, not a public workflow Event"
+    );
+    assert!(
+        !contains_word(&src, "Inspect"),
+        "src/domain/events.rs must not name Inspect (NodeReady-like leak)"
+    );
 }
 
 #[test]

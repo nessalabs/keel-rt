@@ -71,9 +71,10 @@ A definition may `.node("hold", "wait")` without registering an executor.
 Another task or process calls `rt.complete(token, Resume::Complete(...))`.
 If that Runtime already owns the live drive, complete injects. If the engine
 is down, a new Runtime on the same store applies, persists, and drives.
-`keel-rt-http` exposes `POST /complete` and `KeelClient::complete` so another
-binary can POST the same JSON without hand-rolling the request. The
-adapter requires a shared secret and binds `127.0.0.1` by default. Two
+`keel-rt-http` exposes `GET /inspect/:id` and `POST /complete`. Another
+binary calls `KeelClient::inspect` to read the wait token, then
+`KeelClient::complete` with the same JSON the server already accepts.
+The adapter requires a shared secret and binds `127.0.0.1` by default. Two
 Runtimes on one sqlite file take a store lease (`claim` / epoch); the
 other binary does not open the file while the owner lives. **Drop handle
 cancels. Drop Runtime releases the lease.**

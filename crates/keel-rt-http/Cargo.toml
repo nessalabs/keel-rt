@@ -2,7 +2,7 @@
 name = "keel-rt-http"
 version = "0.1.0"
 edition = "2021"
-description = "HTTP adapter: POST /complete server and KeelClient (not the kernel)"
+description = "HTTP adapter: GET /inspect + POST /complete and KeelClient (not the kernel)"
 license = "MIT"
 publish = false
 

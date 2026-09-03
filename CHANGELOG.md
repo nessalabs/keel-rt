@@ -1,5 +1,45 @@
 # Changelog
 
+## Inspect then complete (`sdk/inspect`)
+
+[`KeelClient::inspect`] is `GET /inspect/:id` with the same secret as
+[`KeelClient::complete`] (`X-Keel-Complete` and `Authorization: Bearer`).
+The response is [`InspectView`] (execution id, state, nodes with wait
+token inside [`InspectNodeState::Waiting`]) — not an [`ExecutionHandle`]
+and not a cloned kernel [`NodeState`]. Unknown id is 404; terminal and
+Cancelled are 200 with state (complete of a cancelled token is still
+409). Shared client errors are verb-neutral (`request rejected`, `hung`,
+`unknown execution`): inspect 401 Display does not contain the word
+`complete`. Inspect and complete share one send path ([`HANG_BOUND`],
+[`SECRET_HEADER`]). A hung inspect is [`KeelClientError::Hung`] at
+[`HANG_BOUND`]; the client does not follow redirects off
+loopback. The other process reads the wait token from inspect, then
+completes; the engine unblocks and downstream sees the bytes. Proof:
+`client_inspect_then_complete_unblocks_wait`. `InspectView` JSON carries
+the wait token **once**, inside `InspectNodeState::Waiting { token }`
+(kernel snapshot serde is frozen; the HTTP DTO has no `resume_token`
+field and does not clone `NodeState`). Running-node tokens stay on the
+snapshot and do not appear on inspect JSON
+(`inspect_view_json_running_pred_does_not_contain_running_token`). Two
+Runtimes: inspect does not steal; complete on the non-owner is **423
+Locked** [`KeelClientError::ClaimedElsewhere`] with body
+`{"error":"claimed_elsewhere"}` — not 400, not 409 Cancelled.
+Live inspect and the
+store agree on the wait token after `NodeWaiting` is announced
+(`inspect_after_node_waiting_matches_store_and_does_not_emit`); inspect
+does not emit a public `Event`. Inspect while a predecessor is Running
+has no wait token
+(`client_inspect_while_running_has_no_token_then_wait_sees_token`).
+A parked wait beside a Running sibling still exposes the wait token;
+complete of the Running handle token does not unblock
+(`client_inspect_wait_sibling_while_running_completes_only_wait`).
+Completing a token issued for the Running node leaves the wait parked
+(`client_complete_issued_token_for_running_node_leaves_wait_parked`).
+Release numbers: [`benches/BASELINE.md`](benches/BASELINE.md). Thin
+[`Runtime::inspect`] wraps the existing live [`Event::Inspect`] / store
+get so the adapter can read by id. Start / resume / complete are
+unchanged. No forms, no HITL names, no start HTTP, no schedule.
+
 ## Complete client (`sdk/complete`)
 
 [`keel-rt-http::KeelClient`] is the out-of-process SDK client;
@@ -11,7 +51,7 @@ the server already accepts (`X-Keel-Complete` and
 state machine. Missing/wrong secret is still 401; cancelled token 409
 (complete does not revive); duplicate complete is 200 noop; body > 1
 MiB is 413. A hung server is [`KeelClientError::Hung`] after
-[`COMPLETE_HANG_BOUND`] (5s); the client does not follow redirects
+[`HANG_BOUND`] (5s); the client does not follow redirects
 off the given URL. In-process complete stays [`Runtime::complete`].
 Kernel `src/` is unchanged. The kernel does not depend on this crate.
 Not sqlite, not a lease, not a schedule ticker, not forms or identity.

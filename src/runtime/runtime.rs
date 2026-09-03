@@ -2,7 +2,7 @@ use crate::domain::definition::WorkflowDefinition;
 use crate::domain::ids::{ExecutionId, ExecutorId, NodeId, ResumeToken};
 use crate::domain::outcome::{NodeOutcome, Recover, Resume};
 use crate::domain::policy::{AcceptPolicy, Policy};
-use crate::domain::snapshot::SnapshotError;
+use crate::domain::snapshot::{ExecutionSnapshot, SnapshotError};
 use crate::domain::state::{ApplyCmd, ApplyError, Execution, ExecutionState};
 use crate::domain::time::Timestamp;
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
@@ -442,6 +442,20 @@ impl Runtime {
         self.lease.live_tx(id)
     }
 
+    /// Snapshot for an execution this Runtime can see: live drive first
+    /// (same [`ExecutionHandle::inspect`]), else the store. Unknown id is
+    /// [`None`]. Does not take a new lease.
+    pub async fn inspect(&self, execution_id: &ExecutionId) -> Option<ExecutionSnapshot> {
+        if let Some(tx) = self.live_tx(execution_id) {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(Event::Inspect { reply });
+            if let Ok(snap) = rx.await {
+                return Some(snap);
+            }
+        }
+        self.store.get(execution_id).await.unwrap_or(None)
+    }
+
     /// Complete or reinvoke a Waiting node. Live drive: inject (no second
     /// scheduler) only if this process still holds the lease. A stolen
     /// lease is [`CompleteError::ClaimedElsewhere`] — do not inject.
@@ -685,6 +699,7 @@ impl Drop for Runtime {
 mod tests {
     use super::*;
     use crate::domain::ids::ResumeToken;
+    use crate::runtime::sink::FnSink;
     use bytes::Bytes;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -802,6 +817,214 @@ mod tests {
             matches!(ev, Event::Cancel),
             "inbox must beat due Timer without wait_until, got {ev:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspect_unknown_id_is_none() {
+        let rt = Runtime::builder().build();
+        assert!(rt
+            .inspect(&ExecutionId::parse("exec-missing").unwrap())
+            .await
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspect_live_wait_sees_token() {
+        let rt = Runtime::builder().build();
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), handle.wait_stable())
+            .await
+            .unwrap();
+        let snap = rt
+            .inspect(handle.execution_id())
+            .await
+            .expect("live inspect");
+        assert_eq!(snap.state, ExecutionState::Waiting);
+        assert!(snap
+            .node(&NodeId::new("hold"))
+            .unwrap()
+            .resume_token
+            .is_some());
+        handle.cancel().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspect_after_drop_is_cancelled() {
+        let store = MemoryStore::new();
+        let rt = Runtime::builder().store(store.clone()).build();
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        tokio::time::timeout(Duration::from_secs(5), handle.wait_stable())
+            .await
+            .unwrap();
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(s) = store.get(&id).await.unwrap() {
+                    if s.state == ExecutionState::Cancelled {
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled");
+        let snap = rt.inspect(&id).await.expect("store inspect");
+        assert_eq!(snap.state, ExecutionState::Cancelled);
+        assert!(snap
+            .node(&NodeId::new("hold"))
+            .and_then(|n| n.resume_token.clone())
+            .is_none());
+    }
+
+    struct GetFails;
+
+    #[async_trait::async_trait]
+    impl StateStore for GetFails {
+        async fn put(&self, _: &ExecutionSnapshot) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn get(&self, _: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
+            Err(StoreError::Message("get fail".into()))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspect_store_err_is_none() {
+        let rt = Runtime::builder().store(GetFails).build();
+        assert!(rt.inspect(&ExecutionId::new()).await.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspect_dead_drive_falls_back_to_store() {
+        let store = MemoryStore::new();
+        let rt = Runtime::builder().store(store.clone()).build();
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), handle.wait_stable())
+            .await
+            .unwrap();
+        let id = handle.execution_id().clone();
+        let tx = rt.live_tx(&id).expect("live");
+        let _ = tx.send(Event::Shutdown);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (reply, rx) = tokio::sync::oneshot::channel();
+                match rt
+                    .live_tx(&id)
+                    .expect("still registered")
+                    .send(Event::Inspect { reply })
+                {
+                    Ok(()) => {
+                        if rx.await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drive gone");
+        let snap = rt.inspect(&id).await.expect("store fallback");
+        assert_eq!(snap.state, ExecutionState::Waiting);
+        drop(handle);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspect_after_node_waiting_matches_store_and_does_not_emit() {
+        let store = MemoryStore::new();
+        let seen = Arc::new(Mutex::new(Vec::<crate::Event>::new()));
+        let log = seen.clone();
+        let rt = Runtime::builder()
+            .store(store.clone())
+            .sink(FnSink(move |e: &crate::Event| {
+                log.lock().unwrap().push(e.clone());
+            }))
+            .build();
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| matches!(e, crate::Event::NodeWaiting { .. }))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("NodeWaiting announced");
+        let announced = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|e| match e {
+                crate::Event::NodeWaiting { token, .. } => Some(token.clone()),
+                _ => None,
+            })
+            .expect("token on event");
+        let live = rt.inspect(&id).await.expect("live");
+        let stored = store.get(&id).await.unwrap().expect("persisted");
+        assert_eq!(live.state, ExecutionState::Waiting);
+        assert_eq!(stored.state, live.state);
+        let live_tok = live
+            .node(&NodeId::new("hold"))
+            .and_then(|n| n.resume_token.clone());
+        let store_tok = stored
+            .node(&NodeId::new("hold"))
+            .and_then(|n| n.resume_token.clone());
+        assert_eq!(live_tok.as_ref(), Some(&announced));
+        assert_eq!(store_tok, live_tok);
+        let n = seen.lock().unwrap().len();
+        let _ = rt.inspect(&id).await;
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            n,
+            "inspect must not emit a public Event"
+        );
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| format!("{e:?}").contains("Inspect")),
+            "public Event must not grow an Inspect variant"
+        );
+        handle.cancel().await;
     }
 
     #[tokio::test(flavor = "current_thread")]

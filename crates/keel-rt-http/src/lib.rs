@@ -2,20 +2,24 @@
 //! process calls [`Runtime::complete`]. No forms, no identity.
 //!
 //! A shared secret is required. Default bind is `127.0.0.1` only.
-//! [`KeelClient::complete`] POSTs the same JSON from the other process.
-//! Kernel `keel-rt` does not depend on this crate.
+//! [`KeelClient::inspect`] + [`KeelClient::complete`] is the out-of-process
+//! wait round-trip. Kernel `keel-rt` does not depend on this crate.
 
 mod client;
 
-pub use client::{Decision, KeelClient, KeelClientError, COMPLETE_HANG_BOUND};
+pub use client::{Decision, KeelClient, KeelClientError, HANG_BOUND};
 
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
-use keel_rt::{CompleteError, Resume, ResumeToken, Runtime};
+use keel_rt::{
+    CompleteError, ExecutionId, ExecutionSnapshot, ExecutionState, NodeId, NodeState, Resume,
+    ResumeToken, Runtime,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -28,8 +32,14 @@ pub const DEFAULT_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALH
 /// JSON larger than this is not accepted. Oversized body does not call `complete`.
 pub const MAX_COMPLETE_BODY: usize = 1024 * 1024;
 
+/// `POST /complete` when another Runtime holds the execution
+/// (`CompleteError::ClaimedElsewhere`). **423 Locked**. Not 400 (malformed
+/// body) and not 409 (Cancelled). Body is `{"error":"claimed_elsewhere"}`.
+pub const CLAIMED_ELSEWHERE: u16 = 423;
+
 /// Shared-secret header (alternative to `Authorization: Bearer …`).
-pub const COMPLETE_SECRET_HEADER: &str = "x-keel-complete";
+/// Same header on inspect and complete. Wire name is historical.
+pub const SECRET_HEADER: &str = "x-keel-complete";
 
 /// Shared secret for `POST /complete`. Not identity. Empty is rejected.
 #[derive(Clone)]
@@ -37,7 +47,7 @@ pub struct CompleteSecret(Arc<str>);
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SecretError {
-    #[error("complete secret must not be empty")]
+    #[error("secret must not be empty")]
     Empty,
 }
 
@@ -68,22 +78,102 @@ pub struct CompleteBody {
     pub resume: Resume,
 }
 
+/// Read-only view of an execution for `GET /inspect/:id`.
+/// Not an [`keel_rt::ExecutionHandle`]. Not a cloned [`ExecutionSnapshot`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectView {
+    pub execution_id: ExecutionId,
+    pub state: ExecutionState,
+    pub nodes: Vec<InspectNode>,
+}
+
+/// One node on the inspect wire: id + DTO state.
+/// Wait token exists only as [`InspectNodeState::Waiting { token }`].
+/// Running-node snapshot tokens, outputs, and last_error are not on this type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectNode {
+    pub id: NodeId,
+    pub state: InspectNodeState,
+}
+
+/// HTTP inspect state. Mapped from kernel [`NodeState`]; not kernel serde.
+/// `Waiting` is the only variant that carries a token.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InspectNodeState {
+    Pending,
+    Ready,
+    Running { attempt: u32 },
+    Waiting { token: ResumeToken, attempt: u32 },
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl InspectNodeState {
+    fn from_kernel(state: &NodeState) -> Self {
+        match state {
+            NodeState::Pending => Self::Pending,
+            NodeState::Ready { .. } => Self::Ready,
+            NodeState::Running { attempt } => Self::Running { attempt: *attempt },
+            NodeState::Waiting { token, attempt } => Self::Waiting {
+                token: token.clone(),
+                attempt: *attempt,
+            },
+            NodeState::Succeeded => Self::Succeeded,
+            NodeState::Failed => Self::Failed,
+            NodeState::Cancelled => Self::Cancelled,
+            NodeState::TimedOut => Self::TimedOut,
+        }
+    }
+}
+
+impl InspectView {
+    pub fn from_snapshot(snap: &ExecutionSnapshot) -> Self {
+        Self {
+            execution_id: snap.execution_id.clone(),
+            state: snap.state,
+            nodes: snap
+                .iter_nodes()
+                .map(|(id, n)| InspectNode {
+                    id: id.clone(),
+                    state: InspectNodeState::from_kernel(&n.state),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn node(&self, id: &NodeId) -> Option<&InspectNode> {
+        self.nodes.iter().find(|n| n.id == *id)
+    }
+
+    /// Wait token for `id` if that node is [`InspectNodeState::Waiting`].
+    pub fn resume_token(&self, id: &NodeId) -> Option<&ResumeToken> {
+        match &self.node(id)?.state {
+            InspectNodeState::Waiting { token, .. } => Some(token),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct App {
     runtime: Arc<Runtime>,
     secret: CompleteSecret,
 }
 
-/// Router a caller can nest or serve. Path is `/complete`.
+/// Router a caller can nest or serve. Paths: `POST /complete`, `GET /inspect/:id`.
 pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
     Router::new()
         .route("/complete", post(complete_handler))
+        .route("/inspect/:id", get(inspect_handler))
         .layer(DefaultBodyLimit::max(MAX_COMPLETE_BODY))
         .with_state(App { runtime, secret })
 }
 
 fn provided_secret(headers: &HeaderMap) -> Option<&[u8]> {
-    if let Some(v) = headers.get(COMPLETE_SECRET_HEADER) {
+    if let Some(v) = headers.get(SECRET_HEADER) {
         return Some(v.as_bytes());
     }
     headers
@@ -102,20 +192,51 @@ fn secrets_equal(expected: &str, got: &[u8]) -> bool {
         == 0
 }
 
+fn authorize(app: &App, headers: &HeaderMap) -> Result<(), StatusCode> {
+    match provided_secret(headers) {
+        Some(got) if secrets_equal(app.secret.as_str(), got) => Ok(()),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+async fn inspect_handler(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<InspectView>, StatusCode> {
+    authorize(&app, &headers)?;
+    let id = ExecutionId::parse(&id).map_err(|_| StatusCode::NOT_FOUND)?;
+    match app.runtime.inspect(&id).await {
+        Some(snap) => Ok(Json(InspectView::from_snapshot(&snap))),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    error: &'static str,
+}
+
 async fn complete_handler(
     State(app): State<App>,
     headers: HeaderMap,
     Json(body): Json<CompleteBody>,
-) -> StatusCode {
-    match provided_secret(&headers) {
-        Some(got) if secrets_equal(app.secret.as_str(), got) => {}
-        _ => return StatusCode::UNAUTHORIZED,
+) -> axum::response::Response {
+    if authorize(&app, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
     }
     match app.runtime.complete(body.token, body.resume).await {
-        Ok(()) => StatusCode::OK,
-        Err(CompleteError::UnknownToken) => StatusCode::NOT_FOUND,
-        Err(CompleteError::Cancelled) => StatusCode::CONFLICT,
-        Err(_) => StatusCode::BAD_REQUEST,
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(CompleteError::UnknownToken) => StatusCode::NOT_FOUND.into_response(),
+        Err(CompleteError::Cancelled) => StatusCode::CONFLICT.into_response(),
+        Err(CompleteError::ClaimedElsewhere) => (
+            StatusCode::LOCKED,
+            Json(ErrorBody {
+                error: "claimed_elsewhere",
+            }),
+        )
+            .into_response(),
+        Err(_) => StatusCode::BAD_REQUEST.into_response(),
     }
 }
 
@@ -199,7 +320,7 @@ mod tests {
         assert!(provided_secret(&h).is_none());
         h.insert(AUTHORIZATION, "Bearer tok".parse().unwrap());
         assert_eq!(provided_secret(&h), Some(&b"tok"[..]));
-        h.insert(COMPLETE_SECRET_HEADER, "hdr".parse().unwrap());
+        h.insert(SECRET_HEADER, "hdr".parse().unwrap());
         assert_eq!(provided_secret(&h), Some(&b"hdr"[..]));
     }
 
@@ -212,5 +333,225 @@ mod tests {
             serve_body.contains("DEFAULT_BIND") && serve_body.contains("serve_on"),
             "serve must use DEFAULT_BIND via serve_on, not an implicit unspecified bind"
         );
+    }
+
+    #[test]
+    fn inspect_view_reads_wait_token_from_snapshot() {
+        let id = keel_rt::ExecutionId::parse("exec-1").unwrap();
+        let hold = keel_rt::NodeId::new("hold");
+        let token = ResumeToken::issue(id.clone(), hold.clone(), 1);
+        let mut snap = ExecutionSnapshot {
+            schema_version: keel_rt::SCHEMA_VERSION,
+            revision: 1,
+            execution_id: id.clone(),
+            workflow_id: keel_rt::WorkflowId::new("wf"),
+            state: ExecutionState::Waiting,
+            nodes: Default::default(),
+            node_order: vec![hold.clone()],
+            definition_hash: Default::default(),
+        };
+        snap.nodes.insert(
+            hold.clone(),
+            keel_rt::NodeSnapshot {
+                state: NodeState::Waiting {
+                    token: token.clone(),
+                    attempt: 1,
+                },
+                output: None,
+                attempt: 1,
+                resume_token: Some(token.clone()),
+                last_error: None,
+            },
+        );
+        let view = InspectView::from_snapshot(&snap);
+        assert_eq!(view.execution_id, id);
+        assert_eq!(view.state, ExecutionState::Waiting);
+        assert_eq!(view.resume_token(&hold), Some(&token));
+        assert!(view.node(&keel_rt::NodeId::new("missing")).is_none());
+        let running_tok = ResumeToken::issue(id.clone(), keel_rt::NodeId::new("slow"), 1);
+        let mut running = snap.clone();
+        running.nodes.insert(
+            keel_rt::NodeId::new("slow"),
+            keel_rt::NodeSnapshot {
+                state: NodeState::Running { attempt: 1 },
+                output: None,
+                attempt: 1,
+                resume_token: Some(running_tok.clone()),
+                last_error: None,
+            },
+        );
+        running.node_order.push(keel_rt::NodeId::new("slow"));
+        let running_view = InspectView::from_snapshot(&running);
+        assert!(
+            running_view
+                .resume_token(&keel_rt::NodeId::new("slow"))
+                .is_none(),
+            "InspectView must not expose a Running-node token as a wait token"
+        );
+        let json = serde_json::to_string(&running_view).unwrap();
+        let wait_json = serde_json::to_string(&token).unwrap();
+        let run_json = serde_json::to_string(&running_tok).unwrap();
+        assert_eq!(
+            json.matches(wait_json.as_str()).count(),
+            1,
+            "wait token once: {json}"
+        );
+        assert!(
+            !json.contains(&run_json),
+            "Running-node resume token must not appear on inspect JSON: {json}"
+        );
+        assert!(
+            json.contains("\"kind\":\"waiting\"") && json.contains("\"kind\":\"running\""),
+            "InspectView DTO is tagged InspectNodeState, not a kernel NodeState dump: {json}"
+        );
+        assert!(
+            !json.contains("resume_token"),
+            "InspectView DTO has no resume_token field: {json}"
+        );
+        assert_eq!(CLAIMED_ELSEWHERE, StatusCode::LOCKED.as_u16());
+    }
+
+    #[test]
+    fn inspect_view_json_has_exactly_one_wait_token() {
+        let id = keel_rt::ExecutionId::parse("exec-1").unwrap();
+        let hold = keel_rt::NodeId::new("hold");
+        let token = ResumeToken::issue(id.clone(), hold.clone(), 1);
+        let mut snap = ExecutionSnapshot {
+            schema_version: keel_rt::SCHEMA_VERSION,
+            revision: 1,
+            execution_id: id,
+            workflow_id: keel_rt::WorkflowId::new("wf"),
+            state: ExecutionState::Waiting,
+            nodes: Default::default(),
+            node_order: vec![hold.clone()],
+            definition_hash: Default::default(),
+        };
+        snap.nodes.insert(
+            hold.clone(),
+            keel_rt::NodeSnapshot {
+                state: NodeState::Waiting {
+                    token: token.clone(),
+                    attempt: 1,
+                },
+                output: None,
+                attempt: 1,
+                resume_token: Some(token.clone()),
+                last_error: None,
+            },
+        );
+        let view = InspectView::from_snapshot(&snap);
+        assert_eq!(view.resume_token(&hold), Some(&token));
+        assert!(matches!(
+            view.node(&hold).unwrap().state,
+            InspectNodeState::Waiting { .. }
+        ));
+        let json = serde_json::to_string(&view).unwrap();
+        let token_json = serde_json::to_string(&token).unwrap();
+        assert_eq!(json.matches(token_json.as_str()).count(), 1, "{json}");
+        assert!(!json.contains("resume_token"), "{json}");
+        let nonce = format!("{:032x}", token.nonce());
+        assert_eq!(json.matches(nonce.as_str()).count(), 1, "{json}");
+        let back: InspectView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.resume_token(&hold), Some(&token));
+    }
+
+    #[test]
+    fn inspect_view_json_running_pred_does_not_contain_running_token() {
+        let id = keel_rt::ExecutionId::parse("exec-mix").unwrap();
+        let slow = keel_rt::NodeId::new("slow");
+        let hold = keel_rt::NodeId::new("hold");
+        let wait_tok = ResumeToken::issue(id.clone(), hold.clone(), 1);
+        let run_tok = ResumeToken::issue(id.clone(), slow.clone(), 1);
+        let mut snap = ExecutionSnapshot {
+            schema_version: keel_rt::SCHEMA_VERSION,
+            revision: 1,
+            execution_id: id.clone(),
+            workflow_id: keel_rt::WorkflowId::new("wf"),
+            state: ExecutionState::Running,
+            nodes: Default::default(),
+            node_order: vec![slow.clone(), hold.clone()],
+            definition_hash: Default::default(),
+        };
+        snap.nodes.insert(
+            slow.clone(),
+            keel_rt::NodeSnapshot {
+                state: NodeState::Running { attempt: 1 },
+                output: None,
+                attempt: 1,
+                resume_token: Some(run_tok.clone()),
+                last_error: None,
+            },
+        );
+        snap.nodes.insert(
+            hold.clone(),
+            keel_rt::NodeSnapshot {
+                state: NodeState::Waiting {
+                    token: wait_tok.clone(),
+                    attempt: 1,
+                },
+                output: None,
+                attempt: 1,
+                resume_token: Some(wait_tok.clone()),
+                last_error: None,
+            },
+        );
+        let view = InspectView::from_snapshot(&snap);
+        assert_eq!(view.resume_token(&hold), Some(&wait_tok));
+        assert!(view.resume_token(&slow).is_none());
+        let json = serde_json::to_string(&view).unwrap();
+        assert_eq!(
+            json.matches(serde_json::to_string(&wait_tok).unwrap().as_str())
+                .count(),
+            1,
+            "{json}"
+        );
+        assert!(
+            !json.contains(&serde_json::to_string(&run_tok).unwrap()),
+            "Running resume token leaked: {json}"
+        );
+        assert!(
+            json.contains("\"kind\":\"waiting\"") && json.contains("\"kind\":\"running\""),
+            "DTO wire, not cloned kernel enum: {json}"
+        );
+        assert!(matches!(
+            view.node(&slow).unwrap().state,
+            InspectNodeState::Running { .. }
+        ));
+    }
+
+    #[test]
+    fn claimed_elsewhere_status_is_423_locked_not_409() {
+        assert_eq!(CLAIMED_ELSEWHERE, 423);
+        assert_eq!(CLAIMED_ELSEWHERE, StatusCode::LOCKED.as_u16());
+        assert_ne!(CLAIMED_ELSEWHERE, StatusCode::BAD_REQUEST.as_u16());
+        assert_ne!(CLAIMED_ELSEWHERE, StatusCode::CONFLICT.as_u16());
+        let src = include_str!("lib.rs");
+        assert!(src.contains("CompleteError::ClaimedElsewhere"));
+        assert!(src.contains("StatusCode::LOCKED"));
+        assert!(src.contains("claimed_elsewhere"));
+    }
+
+    #[test]
+    fn resume_token_helper_reads_waiting_state() {
+        let id = keel_rt::ExecutionId::parse("exec-1").unwrap();
+        let hold = keel_rt::NodeId::new("hold");
+        let token = ResumeToken::issue(id.clone(), hold.clone(), 1);
+        let view = InspectView {
+            execution_id: id,
+            state: ExecutionState::Waiting,
+            nodes: vec![InspectNode {
+                id: hold.clone(),
+                state: InspectNodeState::Waiting {
+                    token: token.clone(),
+                    attempt: 1,
+                },
+            }],
+        };
+        assert_eq!(view.resume_token(&hold), Some(&token));
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(json["nodes"][0].get("resume_token").is_none());
+        let back: InspectView = serde_json::from_value(json).unwrap();
+        assert_eq!(back.resume_token(&hold), Some(&token));
+        assert!(back.resume_token(&keel_rt::NodeId::new("slow")).is_none());
     }
 }

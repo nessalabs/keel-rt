@@ -129,20 +129,72 @@ fn kernel_src_still_has_no_http_agent_or_hitl() {
 #[test]
 fn public_surface_is_complete_resume_token() {
     let lib = fs::read_to_string(crate_src().join("lib.rs")).unwrap();
-    assert!(lib
-        .contains("pub use client::{Decision, KeelClient, KeelClientError, COMPLETE_HANG_BOUND}"));
+    assert!(lib.contains("pub use client::{Decision, KeelClient, KeelClientError, HANG_BOUND}"));
     assert!(lib.contains("pub struct CompleteBody"));
     assert!(lib.contains("pub struct CompleteSecret"));
+    assert!(lib.contains("pub const SECRET_HEADER"));
     let client = fs::read_to_string(crate_src().join("client.rs")).unwrap();
     assert!(client.contains("pub struct KeelClient"));
     assert!(client.contains("pub enum KeelClientError"));
     assert!(client.contains("pub enum Decision"));
     assert!(client.contains("pub async fn complete"));
+    assert!(client.contains("pub async fn inspect"));
+    assert!(client.contains("pub const HANG_BOUND"));
+    assert!(
+        !lib.contains("COMPLETE_HANG_BOUND")
+            && !client.contains("COMPLETE_HANG_BOUND")
+            && !lib.contains("COMPLETE_SECRET_HEADER")
+            && !client.contains("COMPLETE_SECRET_HEADER"),
+        "inspect shares SECRET_HEADER / HANG_BOUND; names must not say complete-only"
+    );
+    assert!(lib.contains("pub struct InspectView"));
+    assert!(lib.contains("pub struct InspectNode"));
+    assert!(lib.contains("pub enum InspectNodeState"));
+    assert!(
+        !lib.contains("pub resume_token: Option"),
+        "InspectNode must not have a ghost resume_token field"
+    );
+    assert!(lib.contains("pub const CLAIMED_ELSEWHERE"));
+    assert!(
+        client.contains("ClaimedElsewhere") && client.contains("CLAIMED_ELSEWHERE"),
+        "KeelClient must map 423 Locked to ClaimedElsewhere"
+    );
+    let inspect_fn = client
+        .split("pub async fn inspect(")
+        .nth(1)
+        .expect("inspect")
+        .split("pub async fn complete(")
+        .next()
+        .expect("complete after inspect");
+    assert!(
+        !inspect_fn.contains("CLAIMED_ELSEWHERE"),
+        "inspect must not invent a steal / ClaimedElsewhere map"
+    );
+    assert_eq!(
+        client.matches("tokio::time::timeout").count(),
+        1,
+        "one send-path timeout, not a copy-pasted pair"
+    );
+    assert!(
+        client.contains("async fn send(") && client.contains("fn with_secret("),
+        "inspect and complete must share one send path"
+    );
+    assert!(
+        lib.contains("StatusCode::LOCKED") && lib.contains("claimed_elsewhere"),
+        "complete must return 423 Locked with claimed_elsewhere body"
+    );
+    assert!(
+        lib.contains("fn inspect_view_json_has_exactly_one_wait_token"),
+        "InspectView JSON must lock exactly one wait token"
+    );
+    assert!(
+        !lib.contains("impl Drop for InspectView") && !lib.contains("pub async fn cancel"),
+        "InspectView must not be an ExecutionHandle (no cancel / Drop-cancel)"
+    );
     assert!(!client.contains("CompleteClient"));
     assert!(!client.contains("pub async fn approve"));
     assert!(!client.contains("pub async fn reject"));
     assert!(!client.contains("pub async fn start"));
-    assert!(!client.contains("pub async fn inspect"));
     assert!(!client.contains("pub async fn schedule"));
     assert!(!client.contains("pub async fn claim"));
 }
@@ -168,9 +220,36 @@ fn required_client_tests_exist() {
         "fn client_drop_server_mid_post_is_transport_token_untouched",
         "fn client_drop_inflight_does_not_complete",
         "fn client_decision_fail_fails_execution",
+        "fn client_inspect_then_complete_unblocks_wait",
+        "fn client_inspect_without_secret_is_401",
+        "fn client_inspect_wrong_secret_is_401",
+        "fn client_inspect_unknown_id_is_404",
+        "fn client_inspect_after_drop_handle_is_cancelled_complete_409",
+        "fn client_inspect_while_running_has_no_token_then_wait_sees_token",
+        "fn two_clients_inspect_same_token",
+        "fn two_runtimes_inspect_does_not_steal_lease",
+        "fn client_complete_of_running_handle_token_does_not_unblock_wait",
+        "fn client_inspect_wait_sibling_while_running_completes_only_wait",
+        "fn client_complete_issued_token_for_running_node_leaves_wait_parked",
+        "fn client_hung_inspect_is_hung_not_forever",
+        "fn client_inspect_does_not_follow_redirect_off_loopback",
+        "fn client_inspect_wire_sends_both_secret_headers",
+        "fn client_inspect_succeeds_against_bearer_only_server",
+        "fn client_inspect_401_error_text_does_not_say_complete",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
     }
+    let lib = fs::read_to_string(crate_src().join("lib.rs")).unwrap();
+    assert!(
+        lib.contains("fn inspect_view_json_running_pred_does_not_contain_running_token"),
+        "InspectView JSON must omit Running-node tokens"
+    );
+    let complete =
+        fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/complete.rs").unwrap();
+    assert!(
+        complete.contains("fn post_claimed_elsewhere_is_423_locked_not_409"),
+        "complete.rs must lock 423 Locked vs 409 Cancelled"
+    );
     assert!(
         tests.contains("FakeClock"),
         "client tests must use FakeClock, not wall sleep"
@@ -181,7 +260,7 @@ fn required_client_tests_exist() {
     );
     let client = fs::read_to_string(crate_src().join("client.rs")).unwrap();
     assert!(
-        client.contains("COMPLETE_HANG_BOUND") && client.contains("tokio::time::timeout"),
+        client.contains("HANG_BOUND") && client.contains("tokio::time::timeout"),
         "KeelClient must bound a hung server"
     );
     assert!(
@@ -197,7 +276,11 @@ fn architecture_mermaid_names_keel_client() {
     for name in [
         "KeelClient",
         "POST /complete",
+        "GET /inspect",
         "Runtime::complete",
+        "Runtime::inspect",
+        "InspectView",
+        "InspectNodeState",
         "Decision",
         "CompleteBody",
     ] {
@@ -219,4 +302,39 @@ fn src_is_lib_and_client_only() {
     }
     files.sort();
     assert_eq!(files, vec!["client.rs", "lib.rs"]);
+}
+
+#[test]
+fn baseline_has_numbered_inspect_release_row() {
+    let base = fs::read_to_string(root().join("benches/BASELINE.md")).unwrap();
+    assert!(
+        base.contains("## Inspect then complete"),
+        "BASELINE missing inspect section"
+    );
+    assert!(
+        base.contains("KeelClient::inspect"),
+        "BASELINE must number KeelClient::inspect"
+    );
+    assert!(
+        base.contains("release after"),
+        "BASELINE must number release before/after"
+    );
+    assert!(
+        !base.contains("thread-per-call pile") || base.contains("No thread-per-call pile"),
+        "BASELINE must record hang-bound thread count"
+    );
+}
+
+#[test]
+fn profile_harness_exists() {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/profile.rs");
+    let s = fs::read_to_string(&p).unwrap();
+    assert!(
+        s.contains("fn profile_inspect_complete_release"),
+        "profile.rs must measure inspect+complete"
+    );
+    assert!(
+        s.contains("fn inspect_view_json_is_not_full_snapshot"),
+        "profile.rs must lock InspectView JSON vs fat snapshot"
+    );
 }

@@ -4,6 +4,50 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Inspect then complete (`sdk/inspect`, 2026-09-03)
+
+Sibling `keel-rt-http`. `FakeClock`, MemoryStore, loopback, shared secret.
+`cargo test -p keel-rt-http --release --test profile -- --nocapture --test-threads=1`.
+VmRSS from `/proc/self/status`. Hang-bound is `tokio::time::timeout` (no
+thread-per-call). Thin `Runtime::inspect` is live `Event::Inspect` else store
+get — same path as `ExecutionHandle::inspect`.
+
+### Release (this SHA vs first measure before wait-token-only / skip-null)
+
+| # | path | N | release before (cut) | release after | RSS / notes |
+|---|---|---:|---|---|---|
+| 1 | `KeelClient::inspect` Waiting | 1 | 0.027 ms median | **0.021 ms** median | hang-bound timeout, not a thread |
+| 2 | `KeelClient::inspect` Waiting | 10 000 | 173.837 ms (0.017 ms/call) | **155.140 ms** (0.016 ms/call) | RSS 5.2→5.3 MiB, **+12 KiB** / 10k (~1 B/call) |
+| 3 | inspect then complete (HTTP) | 1 | 0.330 ms median | **0.214 ms** median | n=7; loopback JSON |
+| 4 | handle.inspect + `Runtime::complete` | 1 | 0.005 ms median | **0.005 ms** median | in-process; HTTP is the floor |
+| 5 | `Runtime::inspect` Waiting | 10 000 | 9.862 ms (0.001 ms/call) | **9.993 ms** | vs handle.inspect **9.518 ms** — same `Event::Inspect` |
+| 6 | InspectView JSON (wait+pending) | 1 | 432 B / 412 B with duplicate | **one token in `Waiting`** | duplicate `resume_token` field omitted |
+| 7 | InspectView JSON vs fat snapshot | 1 | 320 B vs 131 504 B | **207 B vs 131 504 B** | omits 64 KiB output + duplicate token |
+
+Threads 2→2 over 10k inspects. **No thread-per-call pile.** Do not add a
+second inspect engine: kernel live inspect is already the handle path
+(+5% on 10k vs `handle.inspect`, noise). HTTP is ~40× in-process because
+of loopback, not snapshot clone. Cut: wait-token only on `InspectView`
+via `InspectNodeState` (Running tokens stay on `ExecutionSnapshot`);
+no `InspectNode.resume_token` field so the wait token appears **once** in
+`InspectNodeState::Waiting { token }` (kernel snapshot serde frozen). HTTP
+ClaimedElsewhere is **423 Locked**, not 400.
+
+### MemoryStore no-timer vs wait-gate column (debug n=7)
+
+Kernel `src/` added `Runtime::inspect`. Gate: ≤10% vs wait-gate.
+
+| bench | wait-gate (`sdk/wait-gate`) | this SHA | change |
+|---|---:|---:|---:|
+| wide_fan_out_256 | 4.435 ms | 4.508 ms | +1.6% |
+| deep_chain_128 | 2.022 ms | 2.117 ms | +4.7% |
+| diamond_10k | 160.756 ms | 164.748 ms | +2.5% |
+| apply_only | 15.045 ms | 15.019 ms | −0.2% |
+
+All four inside the 10% band. **No revert.** Release same machine n=7:
+wide 1.001 ms, chain 0.446 ms, diamond_10k 43.626 ms, apply_only 3.862 ms
+(do not compare release to the debug wait-gate column).
+
 ## Schedule ticker (`sdk/schedule`, 2026-09-03)
 
 Sibling crate. One drive loop + next-T min-heap. `NoopStore`, FakeClock,

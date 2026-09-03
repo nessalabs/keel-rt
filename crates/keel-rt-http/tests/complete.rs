@@ -3,10 +3,12 @@
 
 use bytes::Bytes;
 use keel_rt::{
-    ExecutionContext, ExecutionState, NodeId, NodeOutcome, Resume, Runtime, WorkflowDefinition,
+    ExecutionContext, ExecutionState, FakeClock, MemoryStore, NodeId, NodeOutcome, Resume, Runtime,
+    StateStore, WorkflowDefinition,
 };
 use keel_rt_http::{
-    serve_ephemeral, CompleteBody, CompleteSecret, COMPLETE_SECRET_HEADER, MAX_COMPLETE_BODY,
+    serve_ephemeral, CompleteBody, CompleteSecret, CLAIMED_ELSEWHERE, MAX_COMPLETE_BODY,
+    SECRET_HEADER,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -22,6 +24,14 @@ fn secret() -> CompleteSecret {
 }
 
 async fn post_raw(addr: std::net::SocketAddr, extra_headers: &str, body: &[u8]) -> u16 {
+    post_raw_full(addr, extra_headers, body).await.0
+}
+
+async fn post_raw_full(
+    addr: std::net::SocketAddr,
+    extra_headers: &str,
+    body: &[u8],
+) -> (u16, String) {
     let req = format!(
         "POST /complete HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n",
         body.len()
@@ -31,11 +41,13 @@ async fn post_raw(addr: std::net::SocketAddr, extra_headers: &str, body: &[u8]) 
     s.write_all(body).await.unwrap();
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await.unwrap();
-    let text = String::from_utf8_lossy(&buf);
-    text.split_whitespace()
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status = text
+        .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
-        .expect("status")
+        .expect("status");
+    (status, text)
 }
 
 async fn post_complete_auth(
@@ -45,7 +57,7 @@ async fn post_complete_auth(
 ) -> u16 {
     let json = serde_json::to_vec(body).unwrap();
     let extra = match auth {
-        Some(s) => format!("{COMPLETE_SECRET_HEADER}: {s}\r\n"),
+        Some(s) => format!("{SECRET_HEADER}: {s}\r\n"),
         None => String::new(),
     };
     post_raw(addr, &extra, &json).await
@@ -155,7 +167,7 @@ async fn post_query_secret_is_still_401() {
     })
     .unwrap();
     let req = format!(
-        "POST /complete?{COMPLETE_SECRET_HEADER}={SECRET} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST /complete?{SECRET_HEADER}={SECRET} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         json.len()
     );
     let mut s = TcpStream::connect(addr).await.unwrap();
@@ -268,6 +280,76 @@ async fn post_after_cancel_is_409_does_not_revive() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn post_claimed_elsewhere_is_423_locked_not_409() {
+    let store = MemoryStore::new();
+    let clock = Arc::new(FakeClock::new());
+    let owner = Arc::new(
+        Runtime::builder()
+            .clock(clock.clone())
+            .store(store.clone())
+            .build(),
+    );
+    let other = Arc::new(Runtime::builder().clock(clock).store(store.clone()).build());
+    let handle = owner
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    tokio::time::timeout(BOUND, handle.wait_stable())
+        .await
+        .unwrap();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(s) = store.get(&id).await.unwrap() {
+                if s.state == ExecutionState::Waiting {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("persisted");
+    let token = handle
+        .inspect()
+        .await
+        .node(&NodeId::new("hold"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .expect("token");
+    let (addr, server) = serve_ephemeral(other, secret()).await.unwrap();
+    let body = CompleteBody {
+        token,
+        resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"steal"))),
+    };
+    let json = serde_json::to_vec(&body).unwrap();
+    let extra = format!("{SECRET_HEADER}: {SECRET}\r\n");
+    let (status, text) = post_raw_full(addr, &extra, &json).await;
+    assert_eq!(status, CLAIMED_ELSEWHERE, "{text}");
+    assert_eq!(status, 423);
+    assert_ne!(status, 400);
+    assert_ne!(status, 401);
+    assert_ne!(status, 404);
+    assert_ne!(status, 409);
+    assert!(
+        text.contains("claimed_elsewhere"),
+        "body must name claimed_elsewhere: {text}"
+    );
+    assert!(
+        !text.to_ascii_lowercase().contains("cancelled"),
+        "body must be distinguishable from Cancelled: {text}"
+    );
+    assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
+    server.abort();
+    handle.cancel().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn post_duplicate_complete_is_200_noop() {
     let rt = Arc::new(Runtime::builder().build());
     let handle = rt
@@ -315,7 +397,7 @@ async fn post_oversized_body_is_413_does_not_complete() {
     let (handle, _token) = park_wait(&rt).await;
     let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
     let huge = vec![b'x'; MAX_COMPLETE_BODY + 1];
-    let extra = format!("{COMPLETE_SECRET_HEADER}: {SECRET}\r\n");
+    let extra = format!("{SECRET_HEADER}: {SECRET}\r\n");
     let status = post_raw(addr, &extra, &huge).await;
     assert!(status == 413 || status == 400, "got {status}");
     assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
