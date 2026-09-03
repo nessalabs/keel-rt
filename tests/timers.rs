@@ -551,6 +551,35 @@ async fn cancel_when_deadline_already_due_does_not_dispatch() {
     );
 }
 
+/// Same inbox as handle cancel: `Runtime::cancel` at due T must not
+/// dispatch-then-cancel.
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_cancel_at_T_does_not_dispatch_then_cancel() {
+    let clock = Arc::new(FakeClock::new());
+    let store = MemoryStore::new();
+    let (id, t) = persist_backoff(&store, DELAY).await;
+    clock.set(t);
+    let fired = Arc::new(AtomicU32::new(0));
+    let f = fired.clone();
+    let rt = Runtime::builder()
+        .store(store)
+        .clock(clock)
+        .policy(RetryPolicy::new(3, DELAY))
+        .register_fn("a", move |_ctx: ExecutionContext| {
+            f.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+        })
+        .build();
+    let handle = within(rt.resume(&id)).await.unwrap();
+    rt.cancel(&id).await.expect("cancel at T");
+    assert_eq!(within(handle.wait()).await, ExecutionState::Cancelled);
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "Runtime::cancel must beat due Timer on the same inbox"
+    );
+}
+
 /// `wait_until` stays Pending forever (haywire clock). Hang bound on the
 /// Runtime drive must still terminate; scheduler must not sleep.
 struct HungWaitClock {

@@ -1,5 +1,23 @@
 # Kernel microbench baseline (this run)
 
+## Cancel one execution (`sdk/cancel`, 2026-09-03)
+
+Sibling `keel-rt-http`. `FakeClock`, MemoryStore, loopback, shared secret.
+`cargo test -p keel-rt-http --release --test profile -- --nocapture --test-threads=1 profile_cancel`.
+Hang-bound is the existing `tokio::time::timeout` (`HANG_BOUND`). Kernel
+apply Cancel is the same `ApplyCmd`; `Runtime::cancel` waits persist-then-emit.
+MemoryStore no-timer column stays the inspect SHA (all four ≤10% vs wait-gate).
+
+| # | path | N | release | notes |
+|---|---|---:|---|---|
+| 1 | `KeelClient::cancel` | 1 | **pending** median | n=7; loopback empty body |
+| 2 | `Runtime::cancel` | 1 | **pending** median | in-process; HTTP is the floor |
+
+No `CANCEL_HANG_BOUND`. Cancel is id-only (route body limit 0).
+
+Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug), Tokio `current_thread`,
+`--test-threads=1`. Median of 7 iterations unless noted.
+
 ## Start then approve (`sdk/start-approve`, 2026-09-03)
 
 Sibling `keel-rt-http`. `FakeClock`, MemoryStore, loopback, shared secret.

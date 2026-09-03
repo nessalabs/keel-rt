@@ -34,7 +34,7 @@ use thiserror::Error;
 pub const DEFAULT_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
 /// JSON larger than this is not accepted. Oversized body does not call start
-/// or complete.
+/// or complete. Cancel is id-only: that route rejects any body (`413`).
 pub const MAX_BODY: usize = 1024 * 1024;
 
 /// `POST /complete` when another Runtime holds the execution
@@ -233,7 +233,10 @@ pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
         .route("/start", post(start_handler))
         .route("/complete", post(complete_handler))
         .route("/inspect/:id", get(inspect_handler))
-        .route("/cancel/:id", post(cancel_handler))
+        .route(
+            "/cancel/:id",
+            post(cancel_handler).layer(DefaultBodyLimit::max(0)),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(App {
             runtime,

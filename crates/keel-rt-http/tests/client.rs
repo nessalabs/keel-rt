@@ -3494,3 +3494,158 @@ async fn client_cancel_during_approve_does_not_revive() {
     }
     server.abort();
 }
+
+/// After HTTP cancel, persist is done so the handle is reaped. Server
+/// drop must not rewrite Cancelled (second Cancel on terminal is noop).
+#[tokio::test(flavor = "current_thread")]
+async fn client_http_cancel_reaps_handle_server_drop_is_noop() {
+    let store = MemoryStore::new();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .store(store.clone())
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Waiting {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("park");
+    client.cancel(&id).await.expect("cancel");
+    let after = store.get(&id).await.unwrap().expect("persisted Cancelled");
+    assert_eq!(
+        after.state,
+        ExecutionState::Cancelled,
+        "cancel Ok waits persist; inspect is already Cancelled"
+    );
+    let rev = after.revision;
+    drop(client);
+    server.abort();
+    tokio::time::timeout(BOUND, async {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let later = store.get(&id).await.unwrap().expect("still there");
+        assert_eq!(later.state, ExecutionState::Cancelled);
+        assert_eq!(
+            later.revision, rev,
+            "server-drop second Cancel on terminal must not rewrite"
+        );
+    })
+    .await
+    .expect("Cancelled survives server drop");
+}
+
+/// HTTP cancel of a Waiting snapshot this server did not HTTP-start
+/// (in-process handle, empty hold vec).
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_in_process_waiting_without_http_hold() {
+    let store = MemoryStore::new();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .store(store.clone())
+            .build(),
+    );
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(
+        tokio::time::timeout(BOUND, handle.wait_stable())
+            .await
+            .expect("park"),
+        ExecutionState::Waiting
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    client
+        .cancel(&id)
+        .await
+        .expect("cancel by id without HTTP hold");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Cancelled");
+    std::mem::forget(handle);
+    server.abort();
+}
+
+/// Cancel is id-only. A body dump must 413 and leave the park Waiting.
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_with_body_is_413_does_not_cancel() {
+    let store = MemoryStore::new();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .store(store.clone())
+            .build(),
+    );
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(
+        tokio::time::timeout(BOUND, handle.wait_stable())
+            .await
+            .expect("park"),
+        ExecutionState::Waiting
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let dump = br#"{"state":"Cancelled"}"#;
+    let req = format!(
+        "POST /cancel/{} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{SECRET_HEADER}: {SECRET}\r\n\r\n",
+        id.as_str(),
+        dump.len()
+    );
+    let mut raw = tokio::net::TcpStream::connect(addr).await.unwrap();
+    raw.write_all(req.as_bytes()).await.unwrap();
+    raw.write_all(dump).await.unwrap();
+    let mut buf = Vec::new();
+    raw.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf);
+    let status_line = text.lines().next().unwrap_or("");
+    assert!(
+        status_line.contains("413"),
+        "cancel with a body must be 413, got {status_line}"
+    );
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Waiting,
+        "body dump must not cancel"
+    );
+    handle.cancel().await;
+    server.abort();
+}

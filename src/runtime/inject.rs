@@ -21,7 +21,13 @@ pub(crate) enum Event {
         resume: Resume,
         reply: oneshot::Sender<Result<(), crate::domain::state::ApplyError>>,
     },
-    Cancel,
+    /// Same [`crate::domain::state::ApplyCmd::Cancel`] as handle Drop.
+    /// [`None`] reply is fire-and-forget (handle cancel). [`Some`] waits
+    /// for persist-then-emit so [`crate::Runtime::cancel`] is not Ok on
+    /// persist Err.
+    Cancel {
+        reply: Option<oneshot::Sender<Result<(), crate::domain::state::ApplyError>>>,
+    },
     Inspect {
         reply: oneshot::Sender<ExecutionSnapshot>,
     },
@@ -66,6 +72,18 @@ pub(crate) async fn inject_resume(
         reply,
     })
     .map_err(|_| crate::domain::state::ApplyError::Illegal("execution scheduler stopped".into()))?;
+    rx.await.map_err(|_| {
+        crate::domain::state::ApplyError::Illegal("execution scheduler stopped".into())
+    })?
+}
+
+/// Inject Cancel into a live drive. Same [`Event::Cancel`] apply as
+/// [`crate::ExecutionHandle::cancel`]; waits for persist-then-emit.
+pub(crate) async fn inject_cancel(tx: &EventTx) -> Result<(), crate::domain::state::ApplyError> {
+    let (reply, rx) = oneshot::channel();
+    tx.send(Event::Cancel { reply: Some(reply) }).map_err(|_| {
+        crate::domain::state::ApplyError::Illegal("execution scheduler stopped".into())
+    })?;
     rx.await.map_err(|_| {
         crate::domain::state::ApplyError::Illegal("execution scheduler stopped".into())
     })?

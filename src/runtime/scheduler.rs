@@ -242,11 +242,19 @@ impl Scheduler {
                     }
                 }
             }
-            Event::Cancel => {
+            Event::Cancel { reply } => {
                 self.cancel.cancel();
                 self.spawn.abort_all();
                 self.apply_cmd(ApplyCmd::Cancel);
-                self.persist_then_emit().await;
+                if self.persist_then_emit().await {
+                    if let Some(r) = reply {
+                        let _ = r.send(Ok(()));
+                    }
+                } else if let Some(r) = reply {
+                    let _ = r.send(Err(crate::domain::state::ApplyError::Illegal(
+                        "persist failed".into(),
+                    )));
+                }
             }
             Event::Inspect { reply } => {
                 let _ = reply.send(self.exec.snapshot());

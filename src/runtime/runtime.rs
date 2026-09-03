@@ -89,15 +89,18 @@ impl From<ClaimError> for CompleteError {
     }
 }
 
-/// [`Runtime::cancel`] by [`ExecutionId`]. Same [`ApplyCmd::Cancel`] as
-/// [`ExecutionHandle::cancel`] / Drop. Already-terminal is Ok (noop) —
-/// cite `cancel_already_terminal_is_noop`. Stolen lease does not inject.
+/// [`Runtime::cancel`] by [`ExecutionId`]. Not [`CompleteError`]: unknown
+/// is an execution (not a resume token), and cancel of Cancelled/Succeeded
+/// is Ok (noop), not `CompleteError::Cancelled`. Lease/store variants
+/// match complete so HTTP can map 423 the same way.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CancelError {
     #[error("unknown execution")]
     UnknownExecution,
     #[error("execution claimed elsewhere")]
     ClaimedElsewhere,
+    #[error(transparent)]
+    Apply(#[from] ApplyError),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -242,7 +245,7 @@ async fn drive(
         let timer = scheduler.next_deadline();
         let heartbeat = scheduler.next_heartbeat();
         let event = next_drive_event(&mut rx, clock.as_ref(), timer, heartbeat).await;
-        if matches!(event, Event::Cancel) {
+        if matches!(event, Event::Cancel { .. }) {
             cancel_bound_guard.arm(tx.clone(), cancel_bound);
         }
         // Start/Heartbeat returning true is a lost claim — drop live_tx so
@@ -499,18 +502,14 @@ impl Runtime {
         self.complete_from_store(token, resume).await
     }
 
-    /// Cancel one execution by id. Live drive: send the same [`Event::Cancel`]
-    /// as [`ExecutionHandle::cancel`] only if this process still holds the
-    /// lease. A stolen lease is [`CancelError::ClaimedElsewhere`] — do not
-    /// inject. Unknown id is [`CancelError::UnknownExecution`]. Already
-    /// terminal is Ok (kernel Cancel is a no-op; does not rewrite Succeeded).
+    /// Cancel one execution by id. Live drive: same inbox [`Event::Cancel`]
+    /// as [`ExecutionHandle::cancel`], after a lease refresh. Persist
+    /// Err is not Ok (same class as [`Self::complete`] / `inject_resume`).
+    /// A stolen lease is [`CancelError::ClaimedElsewhere`] — do not inject.
     pub async fn cancel(&self, execution_id: &ExecutionId) -> Result<(), CancelError> {
         if let Some(tx) = self.live_tx(execution_id) {
             match self.lease.claim_or_forget(execution_id).await {
-                Ok(()) => {
-                    let _ = tx.send(Event::Cancel);
-                    return Ok(());
-                }
+                Ok(()) => return inject::inject_cancel(&tx).await.map_err(CancelError::Apply),
                 Err(e) => return Err(e.into()),
             }
         }
@@ -814,7 +813,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn due_deadline_prefers_queued_cancel() {
         let (tx, mut rx) = inject::channel();
-        let _ = tx.send(Event::Cancel);
+        let _ = tx.send(Event::Cancel { reply: None });
         let ev = next_drive_event(
             &mut rx,
             &SystemClock,
@@ -823,7 +822,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(ev, Event::Cancel),
+            matches!(ev, Event::Cancel { .. }),
             "inbox must beat due Timer, got {ev:?}"
         );
     }
@@ -876,7 +875,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn due_deadline_does_not_call_wait_until() {
         let (tx, mut rx) = inject::channel();
-        let _ = tx.send(Event::Cancel);
+        let _ = tx.send(Event::Cancel { reply: None });
         let ev = next_drive_event(
             &mut rx,
             &PanicIfWaitUntil,
@@ -885,7 +884,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(ev, Event::Cancel),
+            matches!(ev, Event::Cancel { .. }),
             "inbox must beat due Timer without wait_until, got {ev:?}"
         );
     }
@@ -1126,10 +1125,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn due_heartbeat_prefers_queued_cancel() {
         let (tx, mut rx) = inject::channel();
-        let _ = tx.send(Event::Cancel);
+        let _ = tx.send(Event::Cancel { reply: None });
         let ev = next_drive_event(&mut rx, &SystemClock, None, Some(Timestamp(0))).await;
         assert!(
-            matches!(ev, Event::Cancel),
+            matches!(ev, Event::Cancel { .. }),
             "inbox must beat due Heartbeat, got {ev:?}"
         );
     }

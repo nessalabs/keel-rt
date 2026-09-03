@@ -118,7 +118,7 @@ impl ExecutionHandle {
 
     pub async fn cancel(&self) {
         self.cancel.cancel();
-        let _ = self.tx.send(Event::Cancel);
+        let _ = self.tx.send(Event::Cancel { reply: None });
     }
 
     pub async fn resume(&self, token: ResumeToken, resume: Resume) -> Result<(), ApplyError> {
@@ -183,7 +183,7 @@ impl Drop for ExecutionHandle {
         if !self.consumed {
             self.dropped.store(true, Ordering::SeqCst);
             self.cancel.cancel();
-            let _ = self.tx.send(Event::Cancel);
+            let _ = self.tx.send(Event::Cancel { reply: None });
         }
         let _ = self.tx.send(Event::Shutdown);
     }

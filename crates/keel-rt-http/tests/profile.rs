@@ -325,6 +325,63 @@ async fn profile_start_approve_release() {
     server.abort();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn profile_cancel_release() {
+    let mut http_cancel = Vec::new();
+    let mut inproc_cancel = Vec::new();
+    for _ in 0..MEDIAN_ITERS {
+        let rt = runtime();
+        let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+        let client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+        let id = client
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(BOUND, async {
+            loop {
+                if client.inspect(&id).await.unwrap().state == ExecutionState::Waiting {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let t = Instant::now();
+        client.cancel(&id).await.unwrap();
+        http_cancel.push(t.elapsed());
+        server.abort();
+    }
+    for _ in 0..MEDIAN_ITERS {
+        let rt = runtime();
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        tokio::time::timeout(BOUND, handle.wait_stable())
+            .await
+            .unwrap();
+        let t = Instant::now();
+        rt.cancel(&id).await.unwrap();
+        inproc_cancel.push(t.elapsed());
+    }
+    eprintln!(
+        "profile cancel HTTP median={} in-process Runtime::cancel median={} (n={MEDIAN_ITERS})",
+        ms(median_dur(http_cancel)),
+        ms(median_dur(inproc_cancel)),
+    );
+}
+
 #[test]
 fn inspect_view_json_is_not_full_snapshot() {
     let token = keel_rt::ResumeToken::issue(

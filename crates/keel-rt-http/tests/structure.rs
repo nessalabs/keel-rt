@@ -277,6 +277,18 @@ fn public_surface_is_complete_resume_token() {
         cancel_fn.contains(".send(") && cancel_fn.contains("CLAIMED_ELSEWHERE"),
         "cancel must reuse send and map 423 ClaimedElsewhere"
     );
+    assert!(
+        !cancel_fn.contains("409") && !cancel_fn.contains("413"),
+        "cancel is id-only: no complete 409/413 map"
+    );
+    assert!(
+        !lib.contains("struct CancelBody") && !client.contains("struct CancelBody"),
+        "cancel must not grow a ghost DTO"
+    );
+    assert!(
+        lib.contains("post(cancel_handler).layer(DefaultBodyLimit::max(0))"),
+        "cancel route must reject any body (id-only)"
+    );
 }
 
 #[test]
@@ -360,6 +372,9 @@ fn required_client_tests_exist() {
         "fn client_cancel_fail_subtree_cancels_running_sibling",
         "fn client_cancel_other_run_leaves_fail_subtree_sibling_running",
         "fn client_cancel_during_approve_does_not_revive",
+        "fn client_http_cancel_reaps_handle_server_drop_is_noop",
+        "fn client_cancel_in_process_waiting_without_http_hold",
+        "fn client_cancel_with_body_is_413_does_not_cancel",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
     }
@@ -451,6 +466,10 @@ fn baseline_has_numbered_inspect_release_row() {
         "BASELINE must number KeelClient::start"
     );
     assert!(
+        base.contains("## Cancel one execution") && base.contains("KeelClient::cancel"),
+        "BASELINE must number KeelClient::cancel vs Runtime::cancel"
+    );
+    assert!(
         base.contains("release after"),
         "BASELINE must number release before/after"
     );
@@ -475,5 +494,9 @@ fn profile_harness_exists() {
     assert!(
         s.contains("fn profile_start_approve_release"),
         "profile.rs must measure start+approve"
+    );
+    assert!(
+        s.contains("fn profile_cancel_release"),
+        "profile.rs must measure HTTP cancel vs Runtime::cancel"
     );
 }
