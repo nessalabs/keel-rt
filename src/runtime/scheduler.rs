@@ -10,7 +10,7 @@ use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry};
 use crate::runtime::inject::{Event, EventTx};
 use crate::runtime::sink::EventSink;
 use crate::runtime::spawn::{CatchUnwind, SpawnSet};
-use crate::runtime::store::StateStore;
+use crate::runtime::store::{ClaimError, LeaseEpoch, OwnerId, StateStore, DEFAULT_LEASE_TTL};
 use crate::runtime::time::{Clock, Timestamp};
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
@@ -35,6 +35,9 @@ pub(crate) struct Scheduler {
     state_tx: watch::Sender<ExecutionState>,
     last_persisted: u64,
     pending_events: Vec<KernelEvent>,
+    owner: OwnerId,
+    epoch: Option<LeaseEpoch>,
+    last_heartbeat: Timestamp,
 }
 
 /// Extra persist attempts on `Event::Shutdown` after the command that produced
@@ -55,12 +58,17 @@ impl Scheduler {
         concurrency: usize,
         cancel: CancellationToken,
         state_tx: watch::Sender<ExecutionState>,
+        owner: OwnerId,
     ) -> Self {
         let n = definition.len();
         let executors: Vec<Option<Arc<dyn Executor>>> = (0..n)
             .map(|i| registry.get(definition.executor_at(NodeSlot(i))))
             .collect();
         let exec = Execution::new(definition);
+        // Do not call clock.now() here: start() is sync on the caller.
+        // A panicking Clock must kill the drive, not start()
+        // (`panicking_clock_inspect_is_stopped_and_wait_is_cancelled`).
+        let last_heartbeat = Timestamp(0);
         let _ = state_tx.send(exec.state());
         Self {
             spawn: SpawnSet::new(tx.clone(), n),
@@ -78,6 +86,9 @@ impl Scheduler {
             state_tx,
             last_persisted: 0,
             pending_events: Vec::new(),
+            owner,
+            epoch: None,
+            last_heartbeat,
         }
     }
 
@@ -93,9 +104,14 @@ impl Scheduler {
         concurrency: usize,
         cancel: CancellationToken,
         state_tx: watch::Sender<ExecutionState>,
+        owner: OwnerId,
     ) -> Self {
         let n = exec.definition().len();
         let last_persisted = exec.revision();
+        let epoch = exec.fence_epoch().map(LeaseEpoch);
+        // Resume already claimed; first heartbeat is due immediately if the
+        // store clock is ahead of Timestamp(0). Avoid now() in the constructor.
+        let last_heartbeat = Timestamp(0);
         let executors: Vec<Option<Arc<dyn Executor>>> = (0..n)
             .map(|i| registry.get(exec.definition().executor_at(NodeSlot(i))))
             .collect();
@@ -118,11 +134,28 @@ impl Scheduler {
             // restore must not BEGIN IMMEDIATE just to write zero events.
             last_persisted,
             pending_events: Vec::new(),
+            owner,
+            epoch,
+            last_heartbeat,
         }
     }
 
     pub(crate) fn next_deadline(&self) -> Option<(Timestamp, NodeId)> {
         self.exec.next_deadline()
+    }
+
+    /// Next lease heartbeat. `None` when we do not hold an epoch or the
+    /// execution is already terminal. Interval is TTL/3 (Clock `now`).
+    pub(crate) fn next_heartbeat(&self) -> Option<Timestamp> {
+        if self.epoch.is_none() || self.exec.state().is_terminal() {
+            return None;
+        }
+        let at = self.last_heartbeat.saturating_add(DEFAULT_LEASE_TTL / 3);
+        if at <= self.last_heartbeat {
+            // Clock is at Timestamp::MAX; a due heartbeat would spin.
+            return None;
+        }
+        Some(at)
     }
 
     pub(crate) fn execution_id(&self) -> crate::domain::ids::ExecutionId {
@@ -144,6 +177,9 @@ impl Scheduler {
     pub(crate) async fn handle_event(&mut self, event: Event) -> bool {
         match event {
             Event::Start => {
+                if !self.claim_lease().await {
+                    return true;
+                }
                 self.apply_cmd(ApplyCmd::Start);
                 self.dispatch();
                 self.persist_then_emit().await;
@@ -190,9 +226,21 @@ impl Scheduler {
                 reply,
             } => {
                 let r = self.apply_cmd_result(ApplyCmd::Resume { token, resume });
-                let _ = reply.send(r);
-                self.dispatch();
-                self.persist_then_emit().await;
+                match r {
+                    Ok(()) => {
+                        self.dispatch();
+                        if self.persist_then_emit().await {
+                            let _ = reply.send(Ok(()));
+                        } else {
+                            let _ = reply.send(Err(crate::domain::state::ApplyError::Illegal(
+                                "persist failed".into(),
+                            )));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
             }
             Event::Cancel => {
                 self.cancel.cancel();
@@ -221,6 +269,11 @@ impl Scheduler {
                 self.spawn.abort_all();
                 self.apply_cmd(ApplyCmd::ForceCancelRunning);
                 self.persist_then_emit().await;
+            }
+            Event::Heartbeat => {
+                if !self.extend_lease().await {
+                    return true;
+                }
             }
             Event::Shutdown => {
                 self.spawn.abort_all();
@@ -281,31 +334,78 @@ impl Scheduler {
     /// on the sink). `last_persisted` advances only on persist `Ok`. Shutdown
     /// retries a recovering store so a clean `wait`/Drop matches the file.
     /// No persist queue — ADR 0001 still applies.
-    async fn persist_then_emit(&mut self) {
-        self.persist_then_emit_n(1).await;
+    async fn persist_then_emit(&mut self) -> bool {
+        self.persist_then_emit_n(1).await
     }
 
-    async fn persist_then_emit_n(&mut self, attempts: u32) {
+    async fn persist_then_emit_n(&mut self, attempts: u32) -> bool {
         if self.store.is_noop() {
             let events = std::mem::take(&mut self.pending_events);
             self.emit_events(&events);
-            return;
+            return true;
         }
         for _ in 0..attempts {
             if self.persist_snapshot().await {
                 let events = std::mem::take(&mut self.pending_events);
                 self.emit_events(&events);
-                return;
+                return true;
             }
             // Persist Err/panic: keep pending_events. Taking them on failure
             // dropped ExecutionStarted after a later persist Ok of the same
             // snapshot (and Shutdown retried with an empty slice).
+        }
+        false
+    }
+
+    async fn claim_lease(&mut self) -> bool {
+        let now = self.clock.now();
+        match self.store.claim(self.exec.id(), &self.owner, now).await {
+            Ok(epoch) => {
+                self.epoch = Some(epoch);
+                self.exec.set_fence_epoch(epoch.0);
+                self.last_heartbeat = now;
+                true
+            }
+            Err(ClaimError::ClaimedElsewhere) | Err(ClaimError::Store(_)) => false,
+        }
+    }
+
+    async fn extend_lease(&mut self) -> bool {
+        let now = self.clock.now();
+        if let Some(epoch) = self.epoch {
+            if self
+                .store
+                .heartbeat(self.exec.id(), epoch, now)
+                .await
+                .is_ok()
+            {
+                self.last_heartbeat = now;
+                return true;
+            }
+        }
+        // Drop Runtime releases; the drive may still be running (temporary
+        // Runtime in tests). Re-claim as the same owner. Another owner
+        // with a live lease is ClaimedElsewhere — stop without cancel.
+        match self.store.claim(self.exec.id(), &self.owner, now).await {
+            Ok(epoch) => {
+                self.epoch = Some(epoch);
+                self.exec.set_fence_epoch(epoch.0);
+                self.last_heartbeat = now;
+                true
+            }
+            Err(_) => {
+                self.epoch = None;
+                false
+            }
         }
     }
 
     async fn persist_snapshot(&mut self) -> bool {
         if self.exec.revision() == self.last_persisted {
             return true;
+        }
+        if let Some(epoch) = self.epoch {
+            self.exec.set_fence_epoch(epoch.0);
         }
         match CatchUnwind(AssertUnwindSafe(
             self.store
@@ -316,6 +416,11 @@ impl Scheduler {
             Ok(Ok(())) => {
                 self.exec.clear_dirty();
                 self.last_persisted = self.exec.revision();
+                if self.exec.state().is_terminal() {
+                    if let Some(epoch) = self.epoch.take() {
+                        let _ = self.store.release(self.exec.id(), epoch).await;
+                    }
+                }
                 true
             }
             Ok(Err(e)) => {

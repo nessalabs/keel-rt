@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::definition::{Join, WorkflowDefinition};
-use crate::domain::snapshot::{ExecutionSnapshot, SCHEMA_VERSION, SnapshotError};
+use crate::domain::snapshot::{ExecutionSnapshot, SnapshotError, SCHEMA_VERSION};
 
 impl Execution {
     /// Rebuild slot state from a snapshot. Definition stays a separate value.
@@ -21,9 +21,7 @@ impl Execution {
         if snap.workflow_id != *definition.id() {
             return Err(SnapshotError::WorkflowIdMismatch);
         }
-        if !snap.definition_hash.is_empty()
-            && snap.definition_hash != definition.content_hash()
-        {
+        if !snap.definition_hash.is_empty() && snap.definition_hash != definition.content_hash() {
             return Err(SnapshotError::DefinitionHashMismatch);
         }
 
@@ -85,6 +83,7 @@ impl Execution {
             n_failed: 0,
             n_cancelled: 0,
             remain,
+            fence_epoch: None,
         };
         for i in 0..n {
             exec.inc_kind(count_kind(&exec.nodes[i].state));
@@ -139,8 +138,14 @@ mod tests {
         let p = AcceptPolicy;
         let now = Timestamp(0);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -151,8 +156,14 @@ mod tests {
             now,
         )
         .unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "b".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "b".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         assert!(matches!(
             ex.node(&NodeId::new("b")).unwrap().state,
             NodeState::Running { attempt: 1 }
@@ -172,14 +183,30 @@ mod tests {
     }
 
     #[test]
+    fn fence_epoch_is_not_snapshotted() {
+        let def = linear();
+        let mut ex = Execution::new(def.clone());
+        ex.set_fence_epoch(7);
+        assert_eq!(ex.fence_epoch(), Some(7));
+        let restored = Execution::from_snapshot(def, ex.snapshot()).unwrap();
+        assert_eq!(restored.fence_epoch(), None);
+    }
+
+    #[test]
     fn from_snapshot_keeps_waiting_token() {
         let def = linear();
         let mut ex = Execution::new(def.clone());
         let p = AcceptPolicy;
         let now = Timestamp(0);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         let token = ex.resume_token(&NodeId::new("a")).unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
@@ -196,7 +223,10 @@ mod tests {
         let snap = ex.snapshot();
         let restored = Execution::from_snapshot(def, snap).unwrap();
         match &restored.node(&NodeId::new("a")).unwrap().state {
-            NodeState::Waiting { token: t, attempt: 1 } => assert_eq!(t, &token),
+            NodeState::Waiting {
+                token: t,
+                attempt: 1,
+            } => assert_eq!(t, &token),
             other => panic!("{other:?}"),
         }
     }
@@ -209,7 +239,10 @@ mod tests {
         snap.schema_version = 99;
         assert!(matches!(
             Execution::from_snapshot(def.clone(), snap).unwrap_err(),
-            SnapshotError::SchemaMismatch { found: 99, expected: SCHEMA_VERSION }
+            SnapshotError::SchemaMismatch {
+                found: 99,
+                expected: SCHEMA_VERSION
+            }
         ));
 
         let mut snap = ex.snapshot();
@@ -270,8 +303,14 @@ mod tests {
         let p = RetryPolicy::new(3, std::time::Duration::from_millis(50));
         let now = Timestamp(0);
         ex.apply(ApplyCmd::Start, &p, now).unwrap();
-        ex.apply(ApplyCmd::StartNode { node_id: "a".into() }, &p, now)
-            .unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),

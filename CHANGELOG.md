@@ -1,5 +1,34 @@
 # Changelog
 
+## Wait / gate (`sdk/wait-gate`)
+
+Builtin executor id `wait` ([`Wait`]) is auto-registered on
+[`Runtime::builder`]. `execute` returns `Waiting { token: ctx.resume_token }`.
+Override the id if a caller registers their own `"wait"`.
+
+[`Runtime::complete(token, Resume)`] is the in-process hook: if this Runtime
+already has the execution live, it injects Complete/Reinvoke (no second
+drive). If not, it loads the snapshot, applies, persists, then drives so a
+second process can complete after crash or engine-down. Drop handle still
+cancels; complete does not revive Cancelled. Unknown token is
+[`CompleteError::UnknownToken`]. Duplicate Complete remains a noop.
+Failed Complete uses definition `OnFailure` (fail-fast default).
+
+Cross-process HTTP is [`keel-rt-http`]: `POST /complete` with token + Resume.
+A shared secret is required (`Authorization: Bearer …` or `X-Keel-Complete`).
+Missing/wrong secret is 401. Default bind is `127.0.0.1` only (`serve_on`
+is the explicit 0.0.0.0 path). Body larger than 1 MiB is 413 and does not
+complete. [`ResumeToken`] nonce is a 128-bit mix (not a counter). The kernel
+crate does not depend on the HTTP crate. No cron, no EventLog, no NodeReady.
+
+Two Runtimes on one store are fenced by a store lease: `StateStore::claim`
+/ `heartbeat` / `release`. Persist and complete carry a fencing `epoch`.
+Default TTL is 30s (`DEFAULT_LEASE_TTL`, Clock `now`). sqlite columns
+`owner`, `epoch`, `lease_until` on `executions` (`ALTER TABLE` on old
+files; kernel `SCHEMA_VERSION` stays 1). Claim uses `BEGIN IMMEDIATE`
+and never `INSERT OR REPLACE`. Drop Runtime releases; drop handle still
+cancels. HTTP `POST /complete` stays on the owning process.
+
 ## Phase 4 RetryFailed (`phase-4/retry-failed`)
 
 [`Runtime::resume`] is still Continue: Failed stay Failed. [`Runtime::resume_with`]

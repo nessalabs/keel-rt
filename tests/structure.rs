@@ -93,8 +93,19 @@ fn domain_imports_nothing_outward() {
 fn kernel_src_has_no_storage_engine() {
     let cargo =
         fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
-    let deps = cargo.split("[dev-dependencies]").next().unwrap_or(&cargo);
-    for word in ["rusqlite", "postgres", "tokio_postgres", "sqlx"] {
+    let pkg = cargo.split("[package]").nth(1).unwrap_or(&cargo);
+    let deps = pkg.split("[dev-dependencies]").next().unwrap_or(pkg);
+    for word in [
+        "rusqlite",
+        "postgres",
+        "tokio_postgres",
+        "sqlx",
+        "keel-rt-http",
+        "axum",
+        "hyper",
+        "reqwest",
+        "warp",
+    ] {
         assert!(
             !deps.contains(word),
             "keel-rt package deps must not name {word}"
@@ -111,8 +122,38 @@ fn kernel_src_has_no_storage_engine() {
 }
 
 #[test]
+fn src_has_no_human_in_the_loop_phrase() {
+    for p in rust_files(&src_root()) {
+        let s = fs::read_to_string(&p).unwrap();
+        let lower = s.to_ascii_lowercase();
+        assert!(
+            !lower.contains("human-in-the-loop"),
+            "{} names human-in-the-loop",
+            rel(&p)
+        );
+        assert!(
+            !lower.contains("approval-human"),
+            "{} names approval-human",
+            rel(&p)
+        );
+    }
+}
+
+#[test]
 fn src_has_no_product_resource_identifiers() {
-    for word in ["Agent", "HTTP", "HITL", "Sql", "crawl"] {
+    for word in [
+        "Agent",
+        "HTTP",
+        "HITL",
+        "Human",
+        "HumanApproval",
+        "hyper",
+        "axum",
+        "reqwest",
+        "warp",
+        "Sql",
+        "crawl",
+    ] {
         for p in rust_files(&src_root()) {
             let s = fs::read_to_string(&p).unwrap();
             assert!(
@@ -350,6 +391,21 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes",
         "retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many",
         "retry_failed_fail_fast_diamond_times_n",
+        "complete_from_second_task_unblocks_wait_and_downstream_sees_bytes",
+        "complete_after_drop_handle_does_not_revive",
+        "complete_from_store_after_engine_down_unblocks_wait",
+        "complete_after_sqlite_kill_new_runtime_unblocks_wait",
+        "complete_unknown_token_errors",
+        "complete_token_from_a_does_not_apply_to_b",
+        "complete_store_persist_err_is_store",
+        "two_runtimes_same_file_both_may_complete",
+        "two_runtimes_lease_ttl_then_second_claims",
+        "stale_epoch_persist_is_rejected",
+        "shared_memory_store_second_runtime_resume_is_claimed_elsewhere",
+        "live_complete_after_ttl_steal_is_claimed_elsewhere",
+        "handle_resume_after_ttl_steal_is_claimed_elsewhere",
+        "complete_256_wait_nodes_then_hang_bound_cancels",
+        "resume_tokens_are_not_sequential_ints",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
@@ -579,7 +635,7 @@ fn retry_failed_runtime_maps_illegal_not_any_apply_err() {
         .split("Recover::RetryFailed")
         .nth(1)
         .expect("RetryFailed branch");
-    let branch = retry.split("let (tx, rx)").next().unwrap();
+    let branch = retry.split("let (state_tx, state_rx)").next().unwrap();
     assert!(branch.contains("ApplyError::Illegal"));
     assert!(branch.contains("ResumeError::NotFailed"));
     assert!(
@@ -641,8 +697,8 @@ fn apply_path_does_not_sleep() {
 
     let rt = fs::read_to_string(src_root().join("runtime/runtime.rs")).unwrap();
     assert!(
-        rt.contains("clock.wait_until(when)"),
-        "Runtime drive is the allowed waiter: inbox vs Clock::wait_until(T)"
+        rt.contains("clock.wait_until(t)") && rt.contains("clock.wait_until(h)"),
+        "Runtime drive is the allowed waiter: inbox vs Clock::wait_until(T) and heartbeat"
     );
     assert!(
         rt.contains("async fn next_drive_event"),

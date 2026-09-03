@@ -52,8 +52,9 @@ impl NodeOutcome {
     }
 }
 
-/// Handle resume command. Kernel issues the token; caller supplies the action.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Handle / [`crate::Runtime::complete`] command. Kernel issues the token;
+/// caller supplies the action.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Resume {
     Complete(NodeOutcome),
     Reinvoke,

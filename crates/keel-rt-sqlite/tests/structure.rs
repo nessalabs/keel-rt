@@ -81,6 +81,25 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         lib.contains("runnable_at INTEGER"),
         "T must be a nodes column, not a timer table"
     );
+    for col in ["owner TEXT", "epoch INTEGER", "lease_until INTEGER"] {
+        assert!(
+            lib.contains(col),
+            "lease column {col} must live on executions"
+        );
+    }
+    assert!(
+        lib.contains("fn claim_conn") && lib.contains("BEGIN IMMEDIATE"),
+        "claim SQL lives in keel-rt-sqlite"
+    );
+    let claim = lib
+        .split("fn claim_conn")
+        .nth(1)
+        .and_then(|s| s.split("fn heartbeat_conn").next())
+        .unwrap_or("");
+    assert!(
+        !claim.contains("INSERT OR REPLACE"),
+        "claim must not use INSERT OR REPLACE"
+    );
     for table in ["executions", "nodes", "definitions", "events"] {
         assert!(
             lib.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")),
@@ -102,6 +121,8 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "fn many_park_wakes_wal_stays_bounded",
         "fn retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes",
         "fn retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many",
+        "fn complete_after_sqlite_kill_new_runtime_unblocks_wait",
+        "fn two_runtimes_same_file_both_may_complete",
     ] {
         assert!(resume.contains(name), "resume.rs missing {name}");
     }

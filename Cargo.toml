@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/keel-rt-sqlite"]
+members = [".", "crates/keel-rt-sqlite", "crates/keel-rt-http"]
 exclude = ["benches/jemalloc_compare"]
 resolver = "2"
 
@@ -28,6 +28,7 @@ tokio-util = { version = "0.7.13", features = ["rt"] }
 tracing = "0.1.41"
 # Rust 1.83 cannot parse edition2024 manifests pulled by latest indexmap.
 indexmap = "=2.7.1"
+getrandom = "0.2"
 
 [dev-dependencies]
 async-trait = "0.1"

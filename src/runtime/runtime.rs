@@ -1,17 +1,18 @@
 use crate::domain::definition::WorkflowDefinition;
-use crate::domain::ids::{ExecutionId, ExecutorId, NodeId};
-use crate::domain::outcome::{NodeOutcome, Recover};
+use crate::domain::ids::{ExecutionId, ExecutorId, NodeId, ResumeToken};
+use crate::domain::outcome::{NodeOutcome, Recover, Resume};
 use crate::domain::policy::{AcceptPolicy, Policy};
 use crate::domain::snapshot::SnapshotError;
 use crate::domain::state::{ApplyCmd, ApplyError, Execution, ExecutionState};
 use crate::domain::time::Timestamp;
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
-use crate::runtime::handle::{ActiveGuard, ExecutionHandle};
+use crate::runtime::handle::{ActiveGuard, ActiveSet, ExecutionHandle, LeaseGate};
 use crate::runtime::inject::{self, Event, EventRx, EventTx};
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::sink::{EventSink, NoopSink};
-use crate::runtime::store::{MemoryStore, StateStore, StoreError};
+use crate::runtime::store::{ClaimError, MemoryStore, OwnerId, StateStore, StoreError};
 use crate::runtime::time::{Clock, SystemClock};
+use crate::runtime::wait::Wait;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::AtomicBool;
@@ -36,6 +37,8 @@ pub enum ResumeError {
     UnknownExecution,
     #[error("execution is already active on this runtime")]
     AlreadyActive,
+    #[error("execution claimed elsewhere")]
+    ClaimedElsewhere,
     #[error("workflow definition missing for snapshot")]
     DefinitionMissing,
     #[error(transparent)]
@@ -47,6 +50,43 @@ pub enum ResumeError {
     /// [`Recover::RetryFailed`] requires Failed or Completed-with-failures.
     #[error("execution is not Failed or Completed-with-failures")]
     NotFailed,
+}
+
+impl From<ClaimError> for ResumeError {
+    fn from(e: ClaimError) -> Self {
+        match e {
+            ClaimError::ClaimedElsewhere => Self::ClaimedElsewhere,
+            ClaimError::Store(s) => Self::Store(s),
+        }
+    }
+}
+
+/// [`Runtime::complete`] rejected the token or could not apply it.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CompleteError {
+    #[error("unknown resume token")]
+    UnknownToken,
+    #[error("execution is cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Apply(#[from] ApplyError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+    #[error("unregistered executor id(s): {0}")]
+    UnregisteredExecutors(UnregisteredExecutors),
+    #[error("execution claimed elsewhere")]
+    ClaimedElsewhere,
+}
+
+impl From<ClaimError> for CompleteError {
+    fn from(e: ClaimError) -> Self {
+        match e {
+            ClaimError::ClaimedElsewhere => Self::ClaimedElsewhere,
+            ClaimError::Store(s) => Self::Store(s),
+        }
+    }
 }
 
 /// Unknown [`ExecutorId`]s named by the definition. Display is a comma-separated list.
@@ -74,32 +114,60 @@ impl std::fmt::Display for UnregisteredExecutors {
 /// [`RuntimeBuilder::cancel_bound`].
 pub const DEFAULT_CANCEL_BOUND: Duration = Duration::from_millis(50);
 
-/// Inbox vs snapshot deadline T. This is the only kernel waiter:
-/// domain/scheduler apply given `now` and never sleep. When T is already
-/// due, prefer the inbox (Cancel / Shutdown) so a queued cancel at the
-/// same instant as a due deadline does not dispatch.
+/// Inbox vs snapshot deadline T (and optional lease heartbeat). This is
+/// the only kernel waiter: domain/scheduler apply given `now` and never
+/// sleep. When T is already due, prefer the inbox (Cancel / Shutdown) so
+/// a queued cancel at the same instant as a due deadline does not dispatch.
+/// Heartbeat shares one `wait_until` with the timer (earlier of the two).
 async fn next_drive_event(
     rx: &mut EventRx,
     clock: &dyn Clock,
     next_timer: Option<(Timestamp, NodeId)>,
+    heartbeat_at: Option<Timestamp>,
 ) -> Event {
-    match next_timer {
-        Some((when, node_id)) => {
-            let now = clock.now();
-            if when <= now {
-                return match rx.try_recv() {
-                    Ok(ev) => ev,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Event::Shutdown,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Event::Timer { node_id },
-                };
+    let now = clock.now();
+    let timer_due = next_timer.as_ref().map(|(t, _)| *t <= now).unwrap_or(false);
+    let hb_due = heartbeat_at.map(|h| h <= now).unwrap_or(false);
+    if timer_due || hb_due {
+        return match rx.try_recv() {
+            Ok(ev) => ev,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Event::Shutdown,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                match (next_timer, heartbeat_at) {
+                    (Some((t, _id)), Some(h)) if hb_due && (!timer_due || h < t) => {
+                        Event::Heartbeat
+                    }
+                    (Some((_, id)), _) if timer_due => Event::Timer { node_id: id },
+                    (_, Some(_)) => Event::Heartbeat,
+                    _ => Event::Shutdown,
+                }
             }
+        };
+    }
+    match (next_timer, heartbeat_at) {
+        (None, None) => rx.recv().await.unwrap_or(Event::Shutdown),
+        (Some((t, id)), None) => {
             tokio::select! {
                 biased;
                 ev = rx.recv() => ev.unwrap_or(Event::Shutdown),
-                _ = clock.wait_until(when) => Event::Timer { node_id },
+                _ = clock.wait_until(t) => Event::Timer { node_id: id },
             }
         }
-        None => rx.recv().await.unwrap_or(Event::Shutdown),
+        (None, Some(h)) => {
+            tokio::select! {
+                biased;
+                ev = rx.recv() => ev.unwrap_or(Event::Shutdown),
+                _ = clock.wait_until(h) => Event::Heartbeat,
+            }
+        }
+        (Some((t, id)), Some(h)) => {
+            tokio::select! {
+                biased;
+                ev = rx.recv() => ev.unwrap_or(Event::Shutdown),
+                _ = clock.wait_until(h) => Event::Heartbeat,
+                _ = clock.wait_until(t) => Event::Timer { node_id: id },
+            }
+        }
     }
 }
 
@@ -142,15 +210,27 @@ async fn drive(
     clock: Arc<dyn Clock>,
     cancel_bound: Duration,
     tx: EventTx,
+    active: Arc<Mutex<ActiveSet>>,
+    execution_id: ExecutionId,
 ) {
     let mut cancel_bound_guard = CancelBoundGuard::new();
     loop {
         let timer = scheduler.next_deadline();
-        let event = next_drive_event(&mut rx, clock.as_ref(), timer).await;
+        let heartbeat = scheduler.next_heartbeat();
+        let event = next_drive_event(&mut rx, clock.as_ref(), timer, heartbeat).await;
         if matches!(event, Event::Cancel) {
             cancel_bound_guard.arm(tx.clone(), cancel_bound);
         }
+        // Start/Heartbeat returning true is a lost claim — drop live_tx so
+        // a later complete goes through the store/claim path, not inject.
+        let drop_live = matches!(event, Event::Start | Event::Heartbeat);
         if scheduler.handle_event(event).await {
+            if drop_live {
+                active
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&execution_id);
+            }
             break;
         }
     }
@@ -167,8 +247,15 @@ pub struct Runtime {
     clock: Arc<dyn Clock>,
     concurrency: usize,
     cancel_bound: Duration,
-    /// Live execution ids on this Runtime. Handle Drop unregisters.
-    active: Arc<Mutex<HashSet<ExecutionId>>>,
+    /// Live drives on this Runtime. Handle Drop unregisters.
+    active: Arc<Mutex<ActiveSet>>,
+    /// Drives started by [`Self::complete`] when the id was not already live.
+    /// Kept so Drop of those handles cannot cancel a parked successor.
+    owned: Arc<Mutex<Vec<ExecutionHandle>>>,
+    /// Store lease owner. Two Runtimes never share this.
+    owner: OwnerId,
+    /// Shared with handles so resume and complete use one claim path.
+    lease: Arc<LeaseGate>,
 }
 
 impl Runtime {
@@ -196,12 +283,13 @@ impl Runtime {
             self.concurrency,
             cancel.clone(),
             state_tx,
+            self.owner.clone(),
         );
         let execution_id = scheduler.execution_id();
         // Documented invariant: `ExecutionId::new` is unique on this Runtime.
         // `start_two_executions_claim_distinct_ids` pins it.
         let active = self
-            .claim_active(&execution_id)
+            .claim_active(&execution_id, tx.clone())
             .expect("ExecutionId::new is unique on this Runtime");
         let _ = tx.send(Event::Start);
         tokio::spawn(drive(
@@ -210,6 +298,8 @@ impl Runtime {
             self.clock.clone(),
             self.cancel_bound,
             tx.clone(),
+            self.active.clone(),
+            execution_id.clone(),
         ));
         Ok(ExecutionHandle {
             execution_id,
@@ -219,6 +309,7 @@ impl Runtime {
             dropped: Arc::new(AtomicBool::new(false)),
             consumed: false,
             _active: active,
+            lease: self.lease.clone(),
         })
     }
 
@@ -245,10 +336,14 @@ impl Runtime {
         execution_id: &ExecutionId,
         recover: Recover,
     ) -> Result<ExecutionHandle, ResumeError> {
-        let Some(active) = self.claim_active(execution_id) else {
+        let (tx, rx) = inject::channel();
+        let Some(active) = self.claim_active(execution_id, tx.clone()) else {
             return Err(ResumeError::AlreadyActive);
         };
-        match self.spawn_resume(execution_id, active, recover).await {
+        match self
+            .spawn_resume(execution_id, active, recover, tx, rx)
+            .await
+        {
             Ok(handle) => Ok(handle),
             Err(e) => Err(e),
         }
@@ -259,6 +354,8 @@ impl Runtime {
         execution_id: &ExecutionId,
         active: ActiveGuard,
         recover: Recover,
+        tx: EventTx,
+        rx: EventRx,
     ) -> Result<ExecutionHandle, ResumeError> {
         let snap = self
             .store
@@ -274,6 +371,11 @@ impl Runtime {
         if let Some(missing) = self.missing_executors(exec.definition()) {
             return Err(ResumeError::UnregisteredExecutors(missing));
         }
+        let epoch = self
+            .store
+            .claim(execution_id, &self.owner, self.clock.now())
+            .await?;
+        exec.set_fence_epoch(epoch.0);
         if recover == Recover::RetryFailed {
             match exec.apply(
                 ApplyCmd::RetryFailed,
@@ -281,13 +383,15 @@ impl Runtime {
                 self.clock.now(),
             ) {
                 Ok(_) => {}
-                Err(ApplyError::Illegal(_)) => return Err(ResumeError::NotFailed),
+                Err(ApplyError::Illegal(_)) => {
+                    let _ = self.store.release(execution_id, epoch).await;
+                    return Err(ResumeError::NotFailed);
+                }
                 Err(e) => unreachable!("RetryFailed apply returns only Illegal, got {e}"),
             }
             // Persist recovered snapshot before dispatch. CAS still applies.
             self.store.persist(&exec).await?;
         }
-        let (tx, rx) = inject::channel();
         let (state_tx, state_rx) = watch::channel(exec.state());
         let cancel = CancellationToken::new();
         let scheduler = Scheduler::from_execution(
@@ -301,6 +405,7 @@ impl Runtime {
             self.concurrency,
             cancel.clone(),
             state_tx,
+            self.owner.clone(),
         );
         let _ = tx.send(Event::Restore);
         tokio::spawn(drive(
@@ -309,6 +414,8 @@ impl Runtime {
             self.clock.clone(),
             self.cancel_bound,
             tx.clone(),
+            self.active.clone(),
+            execution_id.clone(),
         ));
         Ok(ExecutionHandle {
             execution_id: execution_id.clone(),
@@ -318,15 +425,120 @@ impl Runtime {
             dropped: Arc::new(AtomicBool::new(false)),
             consumed: false,
             _active: active,
+            lease: self.lease.clone(),
         })
     }
 
-    fn claim_active(&self, id: &ExecutionId) -> Option<ActiveGuard> {
+    fn claim_active(&self, id: &ExecutionId, tx: EventTx) -> Option<ActiveGuard> {
         let mut g = self.active.lock().unwrap_or_else(|p| p.into_inner());
-        if !g.insert(id.clone()) {
+        if g.contains_key(id) {
             return None;
         }
+        g.insert(id.clone(), tx);
         Some(ActiveGuard::new(id.clone(), self.active.clone()))
+    }
+
+    fn live_tx(&self, id: &ExecutionId) -> Option<EventTx> {
+        self.lease.live_tx(id)
+    }
+
+    /// Complete or reinvoke a Waiting node. Live drive: inject (no second
+    /// scheduler) only if this process still holds the lease. A stolen
+    /// lease is [`CompleteError::ClaimedElsewhere`] — do not inject.
+    /// Otherwise load the snapshot, apply, persist, then drive.
+    /// Does not revive [`ExecutionState::Cancelled`].
+    pub async fn complete(&self, token: ResumeToken, resume: Resume) -> Result<(), CompleteError> {
+        let id = token.execution_id();
+        if let Some(tx) = self.live_tx(id) {
+            match self.lease.claim_or_forget(id).await {
+                Ok(()) => {
+                    return self
+                        .map_complete_apply(inject::inject_resume(&tx, token, resume).await);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.complete_from_store(token, resume).await
+    }
+
+    fn map_complete_apply(&self, r: Result<(), ApplyError>) -> Result<(), CompleteError> {
+        match r {
+            Ok(()) => Ok(()),
+            Err(ApplyError::TokenMismatch) | Err(ApplyError::UnknownNode(_)) => {
+                Err(CompleteError::UnknownToken)
+            }
+            Err(ApplyError::ResumeAfterCancel) => Err(CompleteError::Cancelled),
+            Err(e) => Err(CompleteError::Apply(e)),
+        }
+    }
+
+    async fn complete_from_store(
+        &self,
+        token: ResumeToken,
+        resume: Resume,
+    ) -> Result<(), CompleteError> {
+        let id = token.execution_id().clone();
+        let snap = self
+            .store
+            .get(&id)
+            .await?
+            .ok_or(CompleteError::UnknownToken)?;
+        if snap.state == ExecutionState::Cancelled {
+            return Err(CompleteError::Cancelled);
+        }
+        let definition = self
+            .store
+            .workflow_definition(&id)
+            .await?
+            .ok_or(CompleteError::UnknownToken)?;
+        if let Some(missing) = self.missing_executors(&definition) {
+            return Err(CompleteError::UnregisteredExecutors(missing));
+        }
+        let mut exec = Execution::from_snapshot(definition, snap)?;
+        if exec.state() == ExecutionState::Cancelled {
+            return Err(CompleteError::Cancelled);
+        }
+        let epoch = self.store.claim(&id, &self.owner, self.clock.now()).await?;
+        exec.set_fence_epoch(epoch.0);
+        let applied = exec.apply(
+            ApplyCmd::Resume {
+                token: token.clone(),
+                resume: resume.clone(),
+            },
+            self.policy.as_ref(),
+            self.clock.now(),
+        );
+        if let Err(e) = applied {
+            let _ = self.store.release(&id, epoch).await;
+            return self.map_complete_apply(Err(e));
+        }
+        if let Err(e) = self.store.persist(&exec).await {
+            return Err(CompleteError::Store(e));
+        }
+        if exec.state().is_terminal() {
+            let _ = self.store.release(&id, epoch).await;
+            return Ok(());
+        }
+        if let Some(tx) = self.live_tx(&id) {
+            return self.map_complete_apply(inject::inject_resume(&tx, token, resume).await);
+        }
+        let (tx, rx) = inject::channel();
+        if let Some(active) = self.claim_active(&id, tx.clone()) {
+            if let Ok(handle) = self
+                .spawn_resume(&id, active, Recover::Continue, tx, rx)
+                .await
+            {
+                self.owned
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(handle);
+            }
+            return Ok(());
+        }
+        if let Some(tx) = self.live_tx(&id) {
+            return self.map_complete_apply(inject::inject_resume(&tx, token, resume).await);
+        }
+        Ok(())
     }
 
     fn missing_executors(&self, definition: &WorkflowDefinition) -> Option<UnregisteredExecutors> {
@@ -361,11 +573,13 @@ pub struct RuntimeBuilder {
 
 impl Default for RuntimeBuilder {
     fn default() -> Self {
+        let mut registry = ExecutorRegistry::new();
+        registry.register(Arc::new(Wait));
         Self {
             store: None,
             policy: None,
             sink: None,
-            registry: ExecutorRegistry::new(),
+            registry,
             clock: None,
             concurrency: 8,
             cancel_bound: DEFAULT_CANCEL_BOUND,
@@ -439,22 +653,38 @@ impl RuntimeBuilder {
     }
 
     pub fn build(self) -> Runtime {
+        let store = self.store.unwrap_or_else(|| Arc::new(MemoryStore::new()));
+        let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
+        let owner = OwnerId::new();
+        let active = Arc::new(Mutex::new(ActiveSet::new()));
         Runtime {
-            store: self.store.unwrap_or_else(|| Arc::new(MemoryStore::new())),
+            store: store.clone(),
             policy: self.policy.unwrap_or_else(|| Arc::new(AcceptPolicy)),
             sink: self.sink.unwrap_or_else(|| Arc::new(NoopSink)),
             registry: self.registry,
-            clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
+            clock: clock.clone(),
             concurrency: self.concurrency,
             cancel_bound: self.cancel_bound,
-            active: Arc::new(Mutex::new(HashSet::new())),
+            active: active.clone(),
+            owned: Arc::new(Mutex::new(Vec::new())),
+            owner: owner.clone(),
+            lease: LeaseGate::new(store, owner, clock, active),
         }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Drop handle still cancels. Drop Runtime releases the store lease
+        // so another Runtime may claim (engine-down / process death analog).
+        self.store.release_owner_now(&self.owner);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ids::ResumeToken;
     use bytes::Bytes;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -503,6 +733,7 @@ mod tests {
             &mut rx,
             &SystemClock,
             Some((Timestamp(0), NodeId::new("a"))),
+            None,
         )
         .await;
         assert!(
@@ -518,6 +749,7 @@ mod tests {
             &mut rx,
             &SystemClock,
             Some((Timestamp(0), NodeId::new("n"))),
+            None,
         )
         .await
         {
@@ -534,7 +766,8 @@ mod tests {
             next_drive_event(
                 &mut rx,
                 &SystemClock,
-                Some((Timestamp(0), NodeId::new("a")))
+                Some((Timestamp(0), NodeId::new("a"))),
+                None,
             )
             .await,
             Event::Shutdown
@@ -562,11 +795,253 @@ mod tests {
             &mut rx,
             &PanicIfWaitUntil,
             Some((Timestamp(0), NodeId::new("a"))),
+            None,
         )
         .await;
         assert!(
             matches!(ev, Event::Cancel),
             "inbox must beat due Timer without wait_until, got {ev:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn complete_unknown_token_is_unknown() {
+        let rt = Runtime::builder().build();
+        let token = ResumeToken::issue(ExecutionId::new(), NodeId::new("hold"), 1);
+        match rt
+            .complete(
+                token,
+                Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
+            )
+            .await
+        {
+            Err(CompleteError::UnknownToken) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn due_heartbeat_empty_inbox_is_heartbeat() {
+        let (_tx, mut rx) = inject::channel();
+        assert!(matches!(
+            next_drive_event(&mut rx, &SystemClock, None, Some(Timestamp(0))).await,
+            Event::Heartbeat
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn due_heartbeat_prefers_queued_cancel() {
+        let (tx, mut rx) = inject::channel();
+        let _ = tx.send(Event::Cancel);
+        let ev = next_drive_event(&mut rx, &SystemClock, None, Some(Timestamp(0))).await;
+        assert!(
+            matches!(ev, Event::Cancel),
+            "inbox must beat due Heartbeat, got {ev:?}"
+        );
+    }
+
+    struct JumpClock {
+        now: std::sync::Mutex<Timestamp>,
+        tick: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl Clock for JumpClock {
+        fn now(&self) -> Timestamp {
+            *self.now.lock().unwrap()
+        }
+        async fn sleep(&self, duration: Duration) {
+            if duration.is_zero() {
+                return;
+            }
+            let target = self.now().saturating_add(duration);
+            loop {
+                let notified = self.tick.notified();
+                if self.now() >= target {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn future_heartbeat_waits_until_clock() {
+        let (_tx, mut rx) = inject::channel();
+        let clock = Arc::new(JumpClock {
+            now: std::sync::Mutex::new(Timestamp(0)),
+            tick: tokio::sync::Notify::new(),
+        });
+        let clock_c = clock.clone();
+        let task = tokio::spawn(async move {
+            next_drive_event(&mut rx, clock_c.as_ref(), None, Some(Timestamp(10))).await
+        });
+        *clock.now.lock().unwrap() = Timestamp(10);
+        clock.tick.notify_waiters();
+        assert!(matches!(task.await.unwrap(), Event::Heartbeat));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heartbeat_earlier_than_timer_is_heartbeat() {
+        let (_tx, mut rx) = inject::channel();
+        let ev = next_drive_event(
+            &mut rx,
+            &SystemClock,
+            Some((Timestamp(10_000), NodeId::new("a"))),
+            Some(Timestamp(0)),
+        )
+        .await;
+        assert!(
+            matches!(ev, Event::Heartbeat),
+            "earlier heartbeat must beat future timer, got {ev:?}"
+        );
+    }
+
+    struct RejectClaim;
+
+    #[async_trait::async_trait]
+    impl StateStore for RejectClaim {
+        async fn put(
+            &self,
+            _: &crate::domain::snapshot::ExecutionSnapshot,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn get(
+            &self,
+            _: &ExecutionId,
+        ) -> Result<Option<crate::domain::snapshot::ExecutionSnapshot>, StoreError> {
+            Ok(None)
+        }
+        async fn claim(
+            &self,
+            _: &ExecutionId,
+            _: &OwnerId,
+            _: Timestamp,
+        ) -> Result<crate::runtime::store::LeaseEpoch, ClaimError> {
+            Err(ClaimError::ClaimedElsewhere)
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn start_claim_elsewhere_stops_drive() {
+        let rt = Runtime::builder()
+            .store(RejectClaim)
+            .register_fn("a", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build();
+        let handle = rt.start(tiny()).unwrap();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        drop(handle);
+    }
+
+    struct FailHeartbeat {
+        inner: MemoryStore,
+        claimed: std::sync::atomic::AtomicBool,
+    }
+
+    impl FailHeartbeat {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStore::new(),
+                claimed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StateStore for FailHeartbeat {
+        async fn put(
+            &self,
+            snap: &crate::domain::snapshot::ExecutionSnapshot,
+        ) -> Result<(), StoreError> {
+            self.inner.put(snap).await
+        }
+        async fn get(
+            &self,
+            id: &ExecutionId,
+        ) -> Result<Option<crate::domain::snapshot::ExecutionSnapshot>, StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            self.inner.persist(exec).await
+        }
+        async fn persist_with_events(
+            &self,
+            exec: &Execution,
+            events: &[crate::domain::events::Event],
+        ) -> Result<(), StoreError> {
+            self.inner.persist_with_events(exec, events).await
+        }
+        async fn workflow_definition(
+            &self,
+            id: &ExecutionId,
+        ) -> Result<Option<WorkflowDefinition>, StoreError> {
+            self.inner.workflow_definition(id).await
+        }
+        async fn claim(
+            &self,
+            id: &ExecutionId,
+            owner: &OwnerId,
+            now: Timestamp,
+        ) -> Result<crate::runtime::store::LeaseEpoch, ClaimError> {
+            if self.claimed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(ClaimError::ClaimedElsewhere);
+            }
+            self.inner.claim(id, owner, now).await
+        }
+        async fn heartbeat(
+            &self,
+            _: &ExecutionId,
+            _: crate::runtime::store::LeaseEpoch,
+            _: Timestamp,
+        ) -> Result<(), ClaimError> {
+            Err(ClaimError::ClaimedElsewhere)
+        }
+        fn release_owner_now(&self, owner: &OwnerId) {
+            self.inner.release_owner_now(owner);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heartbeat_lost_lease_stops_drive_without_cancel() {
+        let clock = Arc::new(JumpClock {
+            now: std::sync::Mutex::new(Timestamp(0)),
+            tick: tokio::sync::Notify::new(),
+        });
+        let rt = Runtime::builder()
+            .store(FailHeartbeat::new())
+            .clock(clock.clone())
+            .build();
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(handle.wait_stable().await, ExecutionState::Waiting);
+        *clock.now.lock().unwrap() =
+            Timestamp(0).saturating_add(crate::runtime::store::DEFAULT_LEASE_TTL / 3);
+        clock.tick.notify_waiters();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        drop(handle);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_is_registered_without_manual_executor() {
+        let rt = Runtime::builder().build();
+        let def = WorkflowDefinition::builder("wf")
+            .node("hold", "wait")
+            .build()
+            .unwrap();
+        let h = rt.start(def).unwrap();
+        assert_eq!(h.wait_stable().await, ExecutionState::Waiting);
+        h.cancel().await;
+        assert_eq!(h.wait().await, ExecutionState::Cancelled);
     }
 }

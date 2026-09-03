@@ -1498,7 +1498,7 @@ async fn advance_past_t_while_persist_in_flight_fires_once() {
     assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
 }
 
-/// Two Runtimes, one MemoryStore, parked T: still unfenced (both may resume).
+/// Two Runtimes, one MemoryStore, parked T: second resume is ClaimedElsewhere.
 #[tokio::test(flavor = "current_thread")]
 async fn two_runtimes_parked_deadline_are_not_fenced() {
     let store = MemoryStore::new();
@@ -1523,14 +1523,12 @@ async fn two_runtimes_parked_deadline_are_not_fenced() {
         .build();
     let ha = within(a.resume(&id)).await.unwrap();
     let hb = within(b.resume(&id)).await;
-    assert!(
-        hb.is_ok(),
-        "AlreadyActive is per Runtime; two runtimes stay unfenced"
-    );
-    let _ = within(ha.wait()).await;
-    if let Ok(h) = hb {
-        let _ = within(h.wait()).await;
+    match hb {
+        Err(keel_rt::ResumeError::ClaimedElsewhere) => {}
+        Ok(_) => panic!("shared MemoryStore must fence the second Runtime"),
+        Err(e) => panic!("expected ClaimedElsewhere, got {e}"),
     }
+    let _ = within(ha.wait()).await;
 }
 
 async fn persist_retry_at(

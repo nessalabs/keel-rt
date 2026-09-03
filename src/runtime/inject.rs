@@ -29,6 +29,8 @@ pub(crate) enum Event {
         node_id: NodeId,
     },
     ForceCancelBound,
+    /// Extend the store lease. Not a domain apply.
+    Heartbeat,
     /// Handle dropped (after wait or cancel). Ends the apply loop.
     Shutdown,
 }
@@ -48,4 +50,23 @@ pub(crate) type EventRx = mpsc::UnboundedReceiver<Event>;
 
 pub(crate) fn channel() -> (EventTx, EventRx) {
     mpsc::unbounded_channel()
+}
+
+/// Inject Complete / Reinvoke into a live drive. Same path as
+/// [`crate::ExecutionHandle::resume`].
+pub(crate) async fn inject_resume(
+    tx: &EventTx,
+    token: ResumeToken,
+    resume: Resume,
+) -> Result<(), crate::domain::state::ApplyError> {
+    let (reply, rx) = oneshot::channel();
+    tx.send(Event::Resume {
+        token,
+        resume,
+        reply,
+    })
+    .map_err(|_| crate::domain::state::ApplyError::Illegal("execution scheduler stopped".into()))?;
+    rx.await.map_err(|_| {
+        crate::domain::state::ApplyError::Illegal("execution scheduler stopped".into())
+    })?
 }
