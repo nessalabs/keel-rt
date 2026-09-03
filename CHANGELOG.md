@@ -5,8 +5,13 @@
 Sibling crate [`keel-rt-schedule`]: 5-field cron + IANA timezone, driven
 by `Clock::wait_until`. Each fire is `Runtime::start` (new `ExecutionId`).
 Catch-up after a paused ticker is one start, then next from now. Overlap
-still starts. Kernel `src/` has no cron types. The kernel does not depend
-on this crate. Not a sqlite timer table. Not HTTP. Not HITL.
+still starts. `start` `Err` (unregistered) skips that fire and arms the
+next slot — no hang, no retry-storm. Store put/persist `Err` is after
+`start` Ok (kernel drive). America/Vancouver DST is croner's next
+occurrence: spring-forward `30 2 * * *` from 01:59 PST lands on 03:00
+PDT, not an invented 02:30. Kernel `src/` has no cron types. The kernel
+does not depend on this crate. Not a sqlite timer table. Not HTTP. Not
+HITL.
 
 ## Wait / gate (`sdk/wait-gate`)
 

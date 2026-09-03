@@ -17,6 +17,16 @@ run). It is not distributed workers, HTTP, HITL, or a sqlite timer table.
   `SkipIfRunning`.
 - Phase 1 is in-memory. Crash of the ticker loses the loop; the caller
   reconstructs specs. No schedule table.
+- DST: croner's `find_next_occurrence` in the IANA zone. A spring-forward
+  gap minute is not invented. For America/Vancouver 2026, `30 2 * * *`
+  from 01:59 PST lands on the first valid instant after the gap (03:00
+  PDT / `2026-03-08T10:00:00Z`), not a fabricated 02:30 and not the next
+  calendar day's 02:30. A fall-back repeated minute is the next
+  occurrence after `now`, not both copies. See `ScheduleSpec::next_after`.
+- `start()` `Err` on a tick (`StartError` is unregistered executors
+  only): that fire is skipped, the ticker arms the next slot, sibling
+  jobs still start. No retry-storm. Store `put`/`persist` `Err` happens
+  after `start` Ok and is the kernel drive, not this crate.
 
 ```rust
 use keel_rt::{Runtime, WorkflowDefinition};

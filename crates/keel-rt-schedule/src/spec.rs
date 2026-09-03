@@ -68,6 +68,17 @@ impl ScheduleSpec {
     }
 
     /// Next fire strictly after `now`. None if the expression never fires again.
+    ///
+    /// DST is croner's `find_next_occurrence` in this timezone, not a
+    /// keel-rt wall-time interpreter:
+    ///
+    /// - Spring-forward gap: a missing local minute is not invented. From
+    ///   just before the America/Vancouver 2026 jump, `30 2 * * *` lands
+    ///   on the first valid instant after the gap (03:00 PDT /
+    ///   `2026-03-08T10:00:00Z`), not a fabricated 02:30 on the missing
+    ///   hour and not the next calendar day's 02:30.
+    /// - Fall-back overlap: the next occurrence after `now` is one fire,
+    ///   not both copies of the same local minute.
     pub fn next_after(&self, now: Timestamp) -> Option<Timestamp> {
         let utc = DateTime::<Utc>::from_timestamp_millis(i64::try_from(now.as_millis()).ok()?)?;
         let local = utc.with_timezone(&self.tz);
