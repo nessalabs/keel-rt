@@ -289,6 +289,10 @@ fn public_surface_is_complete_resume_token() {
         lib.contains("post(cancel_handler).layer(DefaultBodyLimit::max(0))"),
         "cancel route must reject any body (id-only)"
     );
+    assert!(
+        lib.contains("if !body.is_empty()") && lib.contains("PAYLOAD_TOO_LARGE"),
+        "cancel_handler must 413 a non-empty body (limit layer only runs if body is read)"
+    );
 }
 
 #[test]

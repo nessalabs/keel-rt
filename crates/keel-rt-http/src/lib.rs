@@ -12,6 +12,7 @@ mod client;
 
 pub use client::{Decision, KeelClient, KeelClientError, HANG_BOUND};
 
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
@@ -399,9 +400,13 @@ async fn cancel_handler(
     State(app): State<App>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: Bytes,
 ) -> axum::response::Response {
     if authorize(&app, &headers).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !body.is_empty() {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let id = match ExecutionId::parse(&id) {
         Ok(id) => id,
