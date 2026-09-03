@@ -4,6 +4,27 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Schedule ticker (`sdk/schedule`, 2026-09-03)
+
+Sibling crate. One drive loop + next-T min-heap. `NoopStore`, FakeClock,
+isolated `cargo test -p keel-rt-schedule --test stress <name> -- --nocapture --test-threads=1`.
+VmRSS from `/proc/self/status`. Kernel `src/` unchanged.
+
+| # | path | N | starts | debug | RSS |
+|---|---|---:|---:|---:|---|
+| 1 | missed-tick storm (`* * * * *` jump) | 200 000 periods | **1** | 0.153 ms | 6.9 MiB |
+| 2 | sequential one-period walk | 100 000 fires | 100 000 | 4.555 s | 6.9 → 7.0 MiB (+4 KiB from 10k→100k) |
+| 3 | armed specs, one fire each (budget 64 + yield) | 10 000 | 10 000 | 0.326 s | arm 13.7 MiB / after 17.2 MiB |
+| 4 | armed specs, one fire each (budget 64 + yield) | 100 000 | 100 000 | 3.056 s | arm 74.8 MiB (+68.4) / after **78.4 MiB** |
+
+Before the start-budget cut, an unbounded wake of 100k due specs was
+**4.100 s / 1067 MiB** after fire (same test, isolated). Catch-up of
+200k periods is one `next_after(now)`, not a walk of missed slots.
+
+Remaining cost: ~685 B/spec to arm (croner + heap + strings; definition
+is one `Arc`). `Runtime::start` still clones the DAG once per fire
+(kernel API). 100k unique fat definitions would dominate — do not do that.
+
 ## Wait / gate (`sdk/wait-gate`, 2026-09-02)
 
 `ResumeToken::issue` mixes a process key with a counter (no per-token

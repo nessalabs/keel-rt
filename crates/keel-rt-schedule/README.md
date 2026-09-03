@@ -32,9 +32,11 @@ run). It is not distributed workers, HTTP, HITL, or a sqlite timer table.
 - Many specs share one definition (`ScheduleSpec::clone` / `with_shared`).
   There is no fire-history vec. `Runtime::start` still takes an owned
   `WorkflowDefinition` (kernel), so each fire clones that DAG once.
-- A jump that makes N specs due issues N starts on that wake (Runtime
-  concurrency is per execution, not across starts).
-  `max_starts_per_wake` paces the burst; remaining due jobs still fire.
+- A jump that makes N specs due would issue N starts on one wake if
+  unbounded (Runtime concurrency is per execution, not across starts).
+  Default `max_starts_per_wake` is 64; remaining due jobs still fire
+  (the drive yields between batches so started executions can finish).
+  Pass `usize::MAX` for an unbounded burst.
 - Stuck Armed (clock never reaches T): `wait_until` does not return.
   Drop `RunningSchedule` is the hang-bound. There is no `ScheduleState`.
 

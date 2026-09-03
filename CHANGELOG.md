@@ -12,9 +12,10 @@ occurrence: spring-forward `30 2 * * *` from 01:59 PST lands on 03:00
 PDT, not an invented 02:30. Kernel `src/` has no cron types. The kernel
 does not depend on this crate. Not a sqlite timer table. Not HTTP. Not
 HITL. Drive is one loop + a next-T heap. Specs share a definition
-`Arc`. A 200k-period catch-up is one start. `max_starts_per_wake`
-paces a due burst; it does not drop fires. Drop of the runner is the
-hang-bound for a `wait_until` that never completes.
+`Arc`. A 200k-period catch-up is one start. Default `max_starts_per_wake`
+is 64 (Runtime concurrency does not cap starts). The drive yields
+between batches; remaining due jobs still fire. Drop of the runner is
+the hang-bound for a `wait_until` that never completes.
 
 ## Wait / gate (`sdk/wait-gate`)
 

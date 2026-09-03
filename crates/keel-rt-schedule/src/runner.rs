@@ -34,7 +34,7 @@ impl Schedule {
             runtime,
             clock: None,
             jobs: Vec::new(),
-            max_starts_per_wake: usize::MAX,
+            max_starts_per_wake: 64,
         }
     }
 
@@ -71,10 +71,11 @@ impl ScheduleBuilder {
         self
     }
 
-    /// Cap `Runtime::start` calls per wake. Default is unbounded (`usize::MAX`):
-    /// a jump that makes N specs due issues N starts in that wake (Runtime
-    /// concurrency is per execution, not across starts). Remaining due jobs
-    /// after a cap still fire on the next loop — fires are not dropped.
+    /// Cap `Runtime::start` calls per wake. Default is 64. Runtime concurrency
+    /// is per execution, not across starts — an unbounded wake of 100k due
+    /// specs is 100k live drives. Remaining due jobs after a cap still fire
+    /// on the next loop (`wait_until` of a due T returns immediately).
+    /// Fires are not dropped. Pass `usize::MAX` for an unbounded burst.
     pub fn max_starts_per_wake(mut self, n: usize) -> Self {
         self.max_starts_per_wake = n.max(1);
         self
@@ -169,6 +170,13 @@ async fn drive(
                 heap.push(Reverse((next, i)));
             }
             started += 1;
+        }
+        // A jump can make every spec due at `now`. Yield so started
+        // drives can finish before the next due batch (wait_until of a
+        // past T returns immediately). This is not a live-execution
+        // supervisor and does not drop remaining fires.
+        if started == max_starts_per_wake {
+            tokio::task::yield_now().await;
         }
     }
 }
