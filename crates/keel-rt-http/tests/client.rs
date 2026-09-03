@@ -1,4 +1,4 @@
-//! Public CompleteClient against the existing POST /complete server.
+//! Public KeelClient against the existing POST /complete server.
 //! Same protocol as `complete.rs`. No wall sleep.
 
 use bytes::Bytes;
@@ -7,7 +7,7 @@ use keel_rt::{
     StateStore, WorkflowDefinition,
 };
 use keel_rt_http::{
-    serve_ephemeral, CompleteBody, CompleteClient, CompleteClientError, CompleteSecret, Decision,
+    serve_ephemeral, CompleteBody, CompleteSecret, Decision, KeelClient, KeelClientError,
     COMPLETE_HANG_BOUND, COMPLETE_SECRET_HEADER, MAX_COMPLETE_BODY,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -63,8 +63,8 @@ async fn park_wait(rt: &Runtime) -> (keel_rt::ExecutionHandle, keel_rt::ResumeTo
     (handle, token)
 }
 
-fn client_at(addr: std::net::SocketAddr) -> CompleteClient {
-    CompleteClient::new(format!("http://{addr}"), secret()).unwrap()
+fn client_at(addr: std::net::SocketAddr) -> KeelClient {
+    KeelClient::new(format!("http://{addr}"), secret()).unwrap()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -121,7 +121,7 @@ async fn client_without_secret_is_401() {
         NodeId::new("hold"),
         1,
     );
-    let client = CompleteClient::without_secret(format!("http://{addr}")).unwrap();
+    let client = KeelClient::without_secret(format!("http://{addr}")).unwrap();
     let err = client
         .complete(
             token,
@@ -129,7 +129,7 @@ async fn client_without_secret_is_401() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, CompleteClientError::Unauthorized), "{err:?}");
+    assert!(matches!(err, KeelClientError::Unauthorized), "{err:?}");
     server.abort();
 }
 
@@ -138,7 +138,7 @@ async fn client_wrong_secret_is_401() {
     let rt = runtime_with_next();
     let (handle, token) = park_wait(&rt).await;
     let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
-    let client = CompleteClient::new(
+    let client = KeelClient::new(
         format!("http://{addr}"),
         CompleteSecret::new("wrong-secret").unwrap(),
     )
@@ -150,7 +150,7 @@ async fn client_wrong_secret_is_401() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, CompleteClientError::Unauthorized), "{err:?}");
+    assert!(matches!(err, KeelClientError::Unauthorized), "{err:?}");
     assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
     handle.cancel().await;
     server.abort();
@@ -172,7 +172,7 @@ async fn client_unknown_token_is_unknown() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, CompleteClientError::UnknownToken), "{err:?}");
+    assert!(matches!(err, KeelClientError::UnknownToken), "{err:?}");
     server.abort();
 }
 
@@ -222,7 +222,7 @@ async fn client_after_drop_handle_is_409_does_not_revive() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, CompleteClientError::Cancelled), "{err:?}");
+    assert!(matches!(err, KeelClientError::Cancelled), "{err:?}");
     let snap = store.get(&id).await.unwrap().unwrap();
     assert_eq!(snap.state, ExecutionState::Cancelled);
     server.abort();
@@ -276,10 +276,7 @@ async fn client_oversized_body_is_413_does_not_complete() {
         .complete(token, Resume::Complete(NodeOutcome::Succeeded(huge)))
         .await
         .unwrap_err();
-    assert!(
-        matches!(err, CompleteClientError::PayloadTooLarge),
-        "{err:?}"
-    );
+    assert!(matches!(err, KeelClientError::PayloadTooLarge), "{err:?}");
     assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
     handle.cancel().await;
     server.abort();
@@ -419,7 +416,7 @@ async fn client_does_not_follow_redirect_off_loopback() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, CompleteClientError::Unexpected(302)),
+        matches!(err, KeelClientError::Unexpected(302)),
         "must not follow redirect: {err:?}"
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "SSRF: followed to 0.0.0.0");
@@ -435,7 +432,7 @@ async fn client_hung_server_is_hung_not_forever() {
         let (_s, _) = listener.accept().await.unwrap();
         std::future::pending::<()>().await;
     });
-    let client = CompleteClient::new(format!("http://{addr}"), secret()).unwrap();
+    let client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
     let mut fut = std::pin::pin!(client.complete(dummy_token(), Resume::Reinvoke));
     for _ in 0..64 {
         tokio::select! {
@@ -446,7 +443,7 @@ async fn client_hung_server_is_hung_not_forever() {
     }
     tokio::time::advance(COMPLETE_HANG_BOUND + Duration::from_millis(1)).await;
     let err = fut.await.unwrap_err();
-    assert!(matches!(err, CompleteClientError::Hung), "{err:?}");
+    assert!(matches!(err, KeelClientError::Hung), "{err:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -468,7 +465,7 @@ async fn client_drop_server_mid_post_is_transport_token_untouched() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, CompleteClientError::Transport(_)), "{err:?}");
+    assert!(matches!(err, KeelClientError::Transport(_)), "{err:?}");
     assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
     handle.cancel().await;
     server.abort();

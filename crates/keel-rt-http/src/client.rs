@@ -14,7 +14,7 @@ use std::fmt;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Bound for one `POST /complete`. A hung server is [`CompleteClientError::Hung`],
+/// Bound for one `POST /complete`. A hung server is [`KeelClientError::Hung`],
 /// not a forever wait. Tokio time (FakeClock is the kernel clock).
 pub const COMPLETE_HANG_BOUND: Duration = Duration::from_secs(5);
 
@@ -36,9 +36,9 @@ impl From<Decision> for Resume {
     }
 }
 
-/// Errors from [`CompleteClient::complete`]. Status map matches the server.
+/// Errors from [`KeelClient::complete`]. Status map matches the server.
 #[derive(Debug, Error)]
-pub enum CompleteClientError {
+pub enum KeelClientError {
     #[error("complete rejected: missing or wrong secret")]
     Unauthorized,
     #[error("unknown resume token")]
@@ -57,37 +57,34 @@ pub enum CompleteClientError {
     Transport(String),
 }
 
-/// POSTs `token` + [`Resume`] to `{base}/complete`.
+/// Out-of-process SDK client. This crate implements [`Self::complete`] only.
 ///
 /// Sends [`COMPLETE_SECRET_HEADER`] when constructed with a secret.
 /// Duplicate complete is Ok (server 200 noop). Does not revive Cancelled.
 /// Does not follow redirects (stays on the URL it was given).
 #[derive(Clone)]
-pub struct CompleteClient {
+pub struct KeelClient {
     http: Client<HttpConnector, Full<Bytes>>,
     complete_url: Uri,
     secret: Option<CompleteSecret>,
     hang_bound: Duration,
 }
 
-impl CompleteClient {
+impl KeelClient {
     /// `base_url` is the server root (e.g. `http://127.0.0.1:port`), not `/complete`.
-    pub fn new(
-        base_url: impl AsRef<str>,
-        secret: CompleteSecret,
-    ) -> Result<Self, CompleteClientError> {
+    pub fn new(base_url: impl AsRef<str>, secret: CompleteSecret) -> Result<Self, KeelClientError> {
         Self::build(base_url.as_ref(), Some(secret))
     }
 
     /// Omits the secret headers. A protected server answers 401.
-    pub fn without_secret(base_url: impl AsRef<str>) -> Result<Self, CompleteClientError> {
+    pub fn without_secret(base_url: impl AsRef<str>) -> Result<Self, KeelClientError> {
         Self::build(base_url.as_ref(), None)
     }
 
-    fn build(base_url: &str, secret: Option<CompleteSecret>) -> Result<Self, CompleteClientError> {
+    fn build(base_url: &str, secret: Option<CompleteSecret>) -> Result<Self, KeelClientError> {
         let complete_url = complete_url(base_url)
             .parse::<Uri>()
-            .map_err(|e| CompleteClientError::Transport(e.to_string()))?;
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         Ok(Self {
             http: Client::builder(TokioExecutor::new()).build_http(),
             complete_url,
@@ -109,12 +106,12 @@ impl CompleteClient {
         &self,
         token: ResumeToken,
         resume: impl Into<Resume>,
-    ) -> Result<(), CompleteClientError> {
+    ) -> Result<(), KeelClientError> {
         let json = serde_json::to_vec(&CompleteBody {
             token,
             resume: resume.into(),
         })
-        .map_err(|e| CompleteClientError::Transport(e.to_string()))?;
+        .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         let mut builder = Request::builder()
             .method(Method::POST)
             .uri(self.complete_url.clone())
@@ -125,27 +122,27 @@ impl CompleteClient {
         }
         let req = builder
             .body(Full::new(Bytes::from(json)))
-            .map_err(|e| CompleteClientError::Transport(e.to_string()))?;
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         let resp = match tokio::time::timeout(self.hang_bound, self.http.request(req)).await {
             Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => return Err(CompleteClientError::Transport(e.to_string())),
-            Err(_) => return Err(CompleteClientError::Hung),
+            Ok(Err(e)) => return Err(KeelClientError::Transport(e.to_string())),
+            Err(_) => return Err(KeelClientError::Hung),
         };
         match resp.status().as_u16() {
             200 => Ok(()),
-            401 => Err(CompleteClientError::Unauthorized),
-            404 => Err(CompleteClientError::UnknownToken),
-            409 => Err(CompleteClientError::Cancelled),
-            413 => Err(CompleteClientError::PayloadTooLarge),
-            400 => Err(CompleteClientError::BadRequest),
-            other => Err(CompleteClientError::Unexpected(other)),
+            401 => Err(KeelClientError::Unauthorized),
+            404 => Err(KeelClientError::UnknownToken),
+            409 => Err(KeelClientError::Cancelled),
+            413 => Err(KeelClientError::PayloadTooLarge),
+            400 => Err(KeelClientError::BadRequest),
+            other => Err(KeelClientError::Unexpected(other)),
         }
     }
 }
 
-impl fmt::Debug for CompleteClient {
+impl fmt::Debug for KeelClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CompleteClient")
+        f.debug_struct("KeelClient")
             .field("complete_url", &self.complete_url)
             .field("secret", &self.secret)
             .field("hang_bound", &self.hang_bound)
@@ -190,7 +187,7 @@ mod tests {
     #[test]
     fn debug_redacts_secret() {
         let secret = CompleteSecret::new("s3cret").unwrap();
-        let c = CompleteClient::new("http://127.0.0.1:1", secret).unwrap();
+        let c = KeelClient::new("http://127.0.0.1:1", secret).unwrap();
         let dbg = format!("{c:?}");
         assert!(dbg.contains("CompleteSecret(..)"), "{dbg}");
         assert!(!dbg.contains("s3cret"), "{dbg}");

@@ -1,4 +1,4 @@
-//! Absences for the HTTP adapter + CompleteClient. Not AGENTS.md.
+//! Absences for the HTTP adapter + KeelClient. Not AGENTS.md.
 
 use std::fs;
 use std::path::PathBuf;
@@ -91,6 +91,7 @@ fn client_src_has_no_sqlite_schedule_or_hitl_names() {
             "SqliteStore",
             "MemoryStore",
             "StateStore",
+            "CompleteClient",
         ] {
             assert!(
                 !contains_word(&s, banned),
@@ -108,6 +109,7 @@ fn kernel_src_still_has_no_http_agent_or_hitl() {
         for banned in [
             "keel-rt-http",
             "CompleteClient",
+            "KeelClient",
             "reqwest",
             "axum",
             "hyper",
@@ -127,17 +129,22 @@ fn kernel_src_still_has_no_http_agent_or_hitl() {
 #[test]
 fn public_surface_is_complete_resume_token() {
     let lib = fs::read_to_string(crate_src().join("lib.rs")).unwrap();
-    assert!(lib.contains(
-        "pub use client::{CompleteClient, CompleteClientError, Decision, COMPLETE_HANG_BOUND}"
-    ));
+    assert!(lib
+        .contains("pub use client::{Decision, KeelClient, KeelClientError, COMPLETE_HANG_BOUND}"));
     assert!(lib.contains("pub struct CompleteBody"));
     assert!(lib.contains("pub struct CompleteSecret"));
     let client = fs::read_to_string(crate_src().join("client.rs")).unwrap();
-    assert!(client.contains("pub struct CompleteClient"));
+    assert!(client.contains("pub struct KeelClient"));
+    assert!(client.contains("pub enum KeelClientError"));
     assert!(client.contains("pub enum Decision"));
     assert!(client.contains("pub async fn complete"));
+    assert!(!client.contains("CompleteClient"));
     assert!(!client.contains("pub async fn approve"));
     assert!(!client.contains("pub async fn reject"));
+    assert!(!client.contains("pub async fn start"));
+    assert!(!client.contains("pub async fn inspect"));
+    assert!(!client.contains("pub async fn schedule"));
+    assert!(!client.contains("pub async fn claim"));
 }
 
 #[test]
@@ -173,7 +180,7 @@ fn required_client_tests_exist() {
     let client = fs::read_to_string(crate_src().join("client.rs")).unwrap();
     assert!(
         client.contains("COMPLETE_HANG_BOUND") && client.contains("tokio::time::timeout"),
-        "CompleteClient must bound a hung server"
+        "KeelClient must bound a hung server"
     );
     assert!(
         !client.contains("redirect::Policy") && !client.contains("follow_redirect"),
@@ -182,11 +189,11 @@ fn required_client_tests_exist() {
 }
 
 #[test]
-fn architecture_mermaid_names_complete_client() {
+fn architecture_mermaid_names_keel_client() {
     let arch = fs::read_to_string(root().join("docs/ARCHITECTURE.md")).unwrap();
     assert!(arch.contains("```mermaid"), "ARCHITECTURE missing mermaid");
     for name in [
-        "CompleteClient",
+        "KeelClient",
         "POST /complete",
         "Runtime::complete",
         "Decision",
@@ -194,6 +201,10 @@ fn architecture_mermaid_names_complete_client() {
     ] {
         assert!(arch.contains(name), "ARCHITECTURE missing {name}");
     }
+    assert!(
+        !arch.contains("CompleteClient"),
+        "ARCHITECTURE still names CompleteClient"
+    );
 }
 
 #[test]
