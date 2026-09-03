@@ -112,6 +112,10 @@ fn required_schedule_tests_exist() {
         "fn executor_panic_ticker_survives",
         "fn max_starts_per_wake_does_not_drop_fires",
         "fn clock_jump_backward_while_armed_does_not_fire",
+        "fn same_cron_different_definitions_both_start",
+        "fn drop_runner_at_exact_t_is_one_start_not_two",
+        "fn two_runtimes_two_schedules_each_start",
+        "fn jump_to_max_two_jobs_each_one_start",
     ] {
         assert!(tests.contains(name), "schedule.rs missing {name}");
     }
@@ -241,6 +245,56 @@ fn no_fire_history_vec() {
     for banned in ["last_fired", "fire_log", "fired_at", "history"] {
         assert!(!runner.contains(banned), "runner stores {banned}");
     }
+}
+
+#[test]
+fn architecture_mermaid_names_schedule_crate() {
+    let arch = fs::read_to_string(root().join("docs/ARCHITECTURE.md")).unwrap();
+    assert!(arch.contains("```mermaid"), "ARCHITECTURE missing mermaid");
+    for name in [
+        "keel-rt-schedule",
+        "ScheduleSpec",
+        "SpecError",
+        "ScheduleBuilder",
+        "RunningSchedule",
+        "Runtime::start",
+    ] {
+        assert!(arch.contains(name), "ARCHITECTURE missing {name}");
+    }
+    assert!(
+        arch.contains("sched --> crate"),
+        "schedule must depend on keel-rt, not reverse"
+    );
+}
+
+#[test]
+fn baseline_has_numbered_schedule_farm_release_row() {
+    let base = fs::read_to_string(root().join("benches/BASELINE.md")).unwrap();
+    assert!(
+        base.contains("## Schedule ticker"),
+        "BASELINE missing schedule section"
+    );
+    assert!(
+        base.contains("release after"),
+        "BASELINE must number release farm RSS/time"
+    );
+    assert!(base.contains("100 000") || base.contains("100000"));
+}
+
+#[test]
+fn runner_has_no_persist_emit_or_node_ready() {
+    let runner = fs::read_to_string(crate_src().join("runner.rs")).unwrap();
+    let spec = fs::read_to_string(crate_src().join("spec.rs")).unwrap();
+    for s in [&runner, &spec] {
+        for banned in ["persist", "emit", "announce", "NodeReady", "EventLog"] {
+            assert!(!s.contains(banned), "schedule src names {banned}");
+        }
+    }
+    assert!(
+        !runner.contains("fn wait_until"),
+        "WallClock must use Clock default wait_until (sleep), not override it"
+    );
+    assert!(runner.contains("clock.wait_until"));
 }
 
 #[test]

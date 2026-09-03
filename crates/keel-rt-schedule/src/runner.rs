@@ -127,15 +127,15 @@ async fn drive(
             let Some(Reverse((t, i))) = heap.peek().copied() else {
                 return;
             };
-            if nexts[i] != t {
+            // Stale, or a job whose next_after is gone (MAX): drop that
+            // entry. Do not retire the whole ticker — a sibling may still
+            // have a real T.
+            if nexts[i] != t || t == Timestamp::MAX {
                 heap.pop();
                 continue;
             }
             break t;
         };
-        if when == Timestamp::MAX {
-            return;
-        }
         clock.wait_until(when).await;
         let now = clock.now();
         let mut started = 0usize;

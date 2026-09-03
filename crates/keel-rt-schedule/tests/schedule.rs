@@ -701,3 +701,137 @@ async fn clock_jump_backward_while_armed_does_not_fire() {
     wait_starts(&starts, 1).await;
     drop(running);
 }
+
+/// Same cron string, two `new()` definitions: intern is Clone, not a cron key.
+#[tokio::test(flavor = "current_thread")]
+async fn same_cron_different_definitions_both_start() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(MON1_9.as_millis() - 1_000));
+    let a_n = Arc::new(AtomicU32::new(0));
+    let b_n = Arc::new(AtomicU32::new(0));
+    let a_s = a_n.clone();
+    let b_s = b_n.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(clock.clone())
+            .register_fn("alpha", {
+                let a_s = a_s.clone();
+                move |_ctx: ExecutionContext| {
+                    a_s.fetch_add(1, Ordering::SeqCst);
+                    async { NodeOutcome::Succeeded(Bytes::from_static(b"a")) }
+                }
+            })
+            .register_fn("beta", move |_ctx: ExecutionContext| {
+                b_s.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"b")) }
+            })
+            .build(),
+    );
+    let da = WorkflowDefinition::builder("alpha")
+        .node("x", "alpha")
+        .build()
+        .unwrap();
+    let db = WorkflowDefinition::builder("beta")
+        .node("x", "beta")
+        .build()
+        .unwrap();
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .max_starts_per_wake(1)
+        .job(ScheduleSpec::new("0 9 * * 1", "UTC", da).unwrap())
+        .job(ScheduleSpec::new("0 9 * * 1", "UTC", db).unwrap())
+        .build()
+        .run();
+    settle().await;
+    clock.set(MON1_9);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if a_n.load(Ordering::SeqCst) >= 1 && b_n.load(Ordering::SeqCst) >= 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both definitions start; intern must not merge by cron");
+    drop(running);
+}
+
+/// Drop at the fire instant: one start, same T does not double (item 7).
+#[tokio::test(flavor = "current_thread")]
+async fn drop_runner_at_exact_t_is_one_start_not_two() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(MON1_9.as_millis() - 1_000));
+    let starts = Arc::new(AtomicU32::new(0));
+    let rt = counting_runtime(clock.clone(), starts.clone());
+    let spec = ScheduleSpec::new("0 9 * * 1", "UTC", weekday_def()).unwrap();
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .job(spec)
+        .build()
+        .run();
+    settle().await;
+    clock.set(MON1_9);
+    wait_starts(&starts, 1).await;
+    drop(running);
+    clock.set(MON1_9);
+    settle().await;
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+}
+
+/// Two Runtimes, two tickers: not one mutex (item 10).
+#[tokio::test(flavor = "current_thread")]
+async fn two_runtimes_two_schedules_each_start() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(MON1_9.as_millis() - 1_000));
+    let a = Arc::new(AtomicU32::new(0));
+    let b = Arc::new(AtomicU32::new(0));
+    let ra = counting_runtime(clock.clone(), a.clone());
+    let rb = counting_runtime(clock.clone(), b.clone());
+    let sa = Schedule::builder(ra)
+        .clock(clock.clone())
+        .job(ScheduleSpec::new("0 9 * * 1", "UTC", weekday_def()).unwrap())
+        .build()
+        .run();
+    let sb = Schedule::builder(rb)
+        .clock(clock.clone())
+        .job(ScheduleSpec::new("0 9 * * 1", "UTC", weekday_def()).unwrap())
+        .build()
+        .run();
+    settle().await;
+    clock.set(MON1_9);
+    wait_starts(&a, 1).await;
+    wait_starts(&b, 1).await;
+    drop(sa);
+    drop(sb);
+}
+
+/// Jump to MAX: each spec catch-up=1. A MAX next must not retire the sibling.
+#[tokio::test(flavor = "current_thread")]
+async fn jump_to_max_two_jobs_each_one_start() {
+    let clock = Arc::new(FakeClock::new());
+    clock.set(Timestamp(0));
+    let starts = Arc::new(AtomicU32::new(0));
+    let rt = counting_runtime(clock.clone(), starts.clone());
+    let a = WorkflowDefinition::builder("a")
+        .node("work", "work")
+        .build()
+        .unwrap();
+    let b = WorkflowDefinition::builder("b")
+        .node("work", "work")
+        .build()
+        .unwrap();
+    let running = Schedule::builder(rt)
+        .clock(clock.clone())
+        .max_starts_per_wake(1)
+        .job(ScheduleSpec::new("* * * * *", "UTC", a).unwrap())
+        .job(ScheduleSpec::new("0 9 * * 1", "UTC", b).unwrap())
+        .build()
+        .run();
+    settle().await;
+    clock.set(Timestamp::MAX);
+    wait_starts(&starts, 2).await;
+    settle().await;
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    drop(running);
+}
