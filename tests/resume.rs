@@ -6,9 +6,9 @@
 use bytes::Bytes;
 use keel_rt::testing::{disable, enable, FailingStore, FakeClock, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, ClaimError, CompleteError, Event, Execution, ExecutionContext,
-    ExecutionId, ExecutionState, FnSink, Join, LeaseEpoch, MemoryStore, NodeId, NodeOutcome,
-    NodeState, OnFailure, OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime,
+    AcceptPolicy, ApplyCmd, CancelError, ClaimError, CompleteError, Event, Execution,
+    ExecutionContext, ExecutionId, ExecutionState, FnSink, Join, LeaseEpoch, MemoryStore, NodeId,
+    NodeOutcome, NodeState, OnFailure, OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime,
     SnapshotError, StateStore, StoreError, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
     DEFAULT_LEASE_TTL, SCHEMA_VERSION,
 };
@@ -1688,6 +1688,131 @@ async fn complete_after_drop_of_terminal_handle_is_duplicate_noop() {
     assert_eq!(
         rt.inspect(&id).await.unwrap().state,
         ExecutionState::Succeeded
+    );
+}
+
+/// Public surface: cancel by [`ExecutionId`], not only via the handle.
+/// HTTP start holds the handle; the adapter must not invent a second SM.
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_cancel_by_execution_id_cancels_parked_wait() {
+    let rt = Runtime::builder().build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    within(handle.wait_stable()).await;
+    rt.cancel(&id).await.expect("cancel by id");
+    within(async {
+        loop {
+            if handle.inspect().await.state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_cancel_unknown_id_is_unknown_execution() {
+    let rt = Runtime::builder().build();
+    let id = ExecutionId::parse("exec-missing").unwrap();
+    match rt.cancel(&id).await {
+        Err(CancelError::UnknownExecution) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Cite `cancel_already_terminal_is_noop` (handle). Same ApplyCmd by id.
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_cancel_already_terminal_is_noop() {
+    let rt = Runtime::builder()
+        .register_fn("next", succeed("next"))
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("next", "next")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    within(handle.wait_stable()).await;
+    assert_eq!(handle.inspect().await.state, ExecutionState::Succeeded);
+    rt.cancel(&id).await.expect("noop");
+    rt.cancel(&id).await.expect("duplicate noop");
+    assert_eq!(
+        rt.inspect(&id).await.unwrap().state,
+        ExecutionState::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_cancel_claimed_elsewhere_does_not_inject() {
+    let store = MemoryStore::new();
+    let rt_a = Runtime::builder().store(store.clone()).build();
+    let handle = rt_a
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    within(handle.wait_stable()).await;
+    let rt_b = Runtime::builder().store(store.clone()).build();
+    match rt_b.cancel(&id).await {
+        Err(CancelError::ClaimedElsewhere) => {}
+        other => panic!("B must not inject Cancel: {other:?}"),
+    }
+    assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
+    handle.cancel().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_cancel_from_store_after_engine_down_is_cancelled() {
+    let store = MemoryStore::new();
+    let id = {
+        let rt = Runtime::builder().store(store.clone()).build();
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        within(handle.wait_stable()).await;
+        within(async {
+            loop {
+                if let Some(s) = store.get(&id).await.unwrap() {
+                    if s.state == ExecutionState::Waiting {
+                        return;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        std::mem::forget(handle);
+        drop(rt);
+        id
+    };
+    let rt = Runtime::builder().store(store.clone()).build();
+    rt.cancel(&id)
+        .await
+        .expect("cancel by id after engine down");
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Cancelled
     );
 }
 

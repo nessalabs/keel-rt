@@ -18,7 +18,8 @@
 //! [`Runtime::resume_with`] + [`Recover::RetryFailed`] re-invokes Failed /
 //! TimedOut nodes; default [`Runtime::resume`] still leaves them Failed.
 //! Builtin [`Wait`] (`"wait"`) parks; [`Runtime::complete`] injects into a
-//! live drive or applies on the store then drives.
+//! live drive or applies on the store then drives. [`Runtime::cancel`]
+//! sends the same inbox Cancel as [`ExecutionHandle::cancel`] (by id).
 //! Announce via [`Event`] + [`EventSink`] (no EventLog). Persist then emit.
 //! Snapshot deadline T is `Ready { runnable_at: Some(Timestamp) }`. The Runtime
 //! drive waits via [`Clock::wait_until`]; `FakeClock` is test harness only.
@@ -49,8 +50,8 @@ pub use domain::time::Timestamp;
 pub use runtime::executor::{ExecutionContext, Executor, FunctionExecutor};
 pub use runtime::handle::ExecutionHandle;
 pub use runtime::runtime::{
-    CompleteError, ResumeError, Runtime, RuntimeBuilder, StartError, UnregisteredExecutors,
-    DEFAULT_CANCEL_BOUND,
+    CancelError, CompleteError, ResumeError, Runtime, RuntimeBuilder, StartError,
+    UnregisteredExecutors, DEFAULT_CANCEL_BOUND,
 };
 pub use runtime::sink::{EventSink, FnSink, SinkError};
 pub use runtime::store::{

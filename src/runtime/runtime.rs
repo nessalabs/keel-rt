@@ -89,6 +89,30 @@ impl From<ClaimError> for CompleteError {
     }
 }
 
+/// [`Runtime::cancel`] by [`ExecutionId`]. Same [`ApplyCmd::Cancel`] as
+/// [`ExecutionHandle::cancel`] / Drop. Already-terminal is Ok (noop) —
+/// cite `cancel_already_terminal_is_noop`. Stolen lease does not inject.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CancelError {
+    #[error("unknown execution")]
+    UnknownExecution,
+    #[error("execution claimed elsewhere")]
+    ClaimedElsewhere,
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+}
+
+impl From<ClaimError> for CancelError {
+    fn from(e: ClaimError) -> Self {
+        match e {
+            ClaimError::ClaimedElsewhere => Self::ClaimedElsewhere,
+            ClaimError::Store(s) => Self::Store(s),
+        }
+    }
+}
+
 /// Unknown [`ExecutorId`]s named by the definition. Display is a comma-separated list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnregisteredExecutors(pub Vec<ExecutorId>);
@@ -473,6 +497,53 @@ impl Runtime {
             }
         }
         self.complete_from_store(token, resume).await
+    }
+
+    /// Cancel one execution by id. Live drive: send the same [`Event::Cancel`]
+    /// as [`ExecutionHandle::cancel`] only if this process still holds the
+    /// lease. A stolen lease is [`CancelError::ClaimedElsewhere`] — do not
+    /// inject. Unknown id is [`CancelError::UnknownExecution`]. Already
+    /// terminal is Ok (kernel Cancel is a no-op; does not rewrite Succeeded).
+    pub async fn cancel(&self, execution_id: &ExecutionId) -> Result<(), CancelError> {
+        if let Some(tx) = self.live_tx(execution_id) {
+            match self.lease.claim_or_forget(execution_id).await {
+                Ok(()) => {
+                    let _ = tx.send(Event::Cancel);
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.cancel_from_store(execution_id).await
+    }
+
+    async fn cancel_from_store(&self, id: &ExecutionId) -> Result<(), CancelError> {
+        let snap = self
+            .store
+            .get(id)
+            .await?
+            .ok_or(CancelError::UnknownExecution)?;
+        if snap.state.is_terminal() {
+            return Ok(());
+        }
+        let definition = self
+            .store
+            .workflow_definition(id)
+            .await?
+            .ok_or(CancelError::UnknownExecution)?;
+        let mut exec = Execution::from_snapshot(definition, snap)?;
+        if exec.state().is_terminal() {
+            return Ok(());
+        }
+        let epoch = self.store.claim(id, &self.owner, self.clock.now()).await?;
+        exec.set_fence_epoch(epoch.0);
+        let _ = exec.apply(ApplyCmd::Cancel, self.policy.as_ref(), self.clock.now());
+        if let Err(e) = self.store.persist(&exec).await {
+            let _ = self.store.release(id, epoch).await;
+            return Err(CancelError::Store(e));
+        }
+        let _ = self.store.release(id, epoch).await;
+        Ok(())
     }
 
     fn map_complete_apply(&self, r: Result<(), ApplyError>) -> Result<(), CompleteError> {

@@ -183,11 +183,11 @@ fn public_surface_is_complete_resume_token() {
         client.contains("fn uri(")
             && client.contains("fn path_url(")
             && !client.contains("complete_url:"),
-        "start/inspect/complete must share one URI builder; no complete-only URL field"
+        "start/inspect/complete/cancel must share one URI builder; no complete-only URL field"
     );
     assert!(
-        client.contains("Out-of-process start, inspect, and complete"),
-        "client module docs must name start, not inspect+complete only"
+        client.contains("Out-of-process start, inspect, complete, and cancel"),
+        "client module docs must name start, inspect, complete, and cancel"
     );
     assert!(
         lib.contains("StatusCode::LOCKED") && lib.contains("claimed_elsewhere"),
@@ -258,8 +258,24 @@ fn public_surface_is_complete_resume_token() {
     assert!(
         !client.contains("START_HANG_BOUND")
             && !client.contains("START_SECRET_HEADER")
-            && !client.contains("start rejected"),
-        "start must not add verb-specific hang/secret/Display names"
+            && !client.contains("start rejected")
+            && !client.contains("CANCEL_HANG_BOUND")
+            && !client.contains("CANCEL_SECRET_HEADER")
+            && !client.contains("cancel rejected"),
+        "start/cancel must not add verb-specific hang/secret/Display names"
+    );
+    assert!(client.contains("pub async fn cancel"));
+    assert!(lib.contains(".route(\"/cancel/:id\""));
+    let cancel_fn = client
+        .split("pub async fn cancel(")
+        .nth(1)
+        .expect("cancel")
+        .split("    pub async fn ")
+        .next()
+        .expect("cancel body");
+    assert!(
+        cancel_fn.contains(".send(") && cancel_fn.contains("CLAIMED_ELSEWHERE"),
+        "cancel must reuse send and map 423 ClaimedElsewhere"
     );
 }
 
@@ -330,6 +346,20 @@ fn required_client_tests_exist() {
         "fn client_n_instant_http_starts_are_reaped_on_next_start",
         "fn http_start_second_runtime_new_id_is_not_steal",
         "fn client_approve_issued_token_for_running_node_leaves_wait_parked",
+        "fn client_start_wait_cancel_is_cancelled_approve_is_409",
+        "fn client_cancel_one_of_two_http_starts_leaves_other_waiting",
+        "fn client_cancel_unknown_id_is_404",
+        "fn client_cancel_already_terminal_is_noop",
+        "fn client_duplicate_cancel_is_noop",
+        "fn client_cancel_without_secret_is_401",
+        "fn client_cancel_wrong_secret_is_401",
+        "fn client_hung_cancel_is_hung_not_forever",
+        "fn client_cancel_does_not_follow_redirect_off_loopback",
+        "fn client_cancel_wire_sends_both_secret_headers",
+        "fn client_cancel_succeeds_against_bearer_only_server",
+        "fn client_cancel_fail_subtree_cancels_running_sibling",
+        "fn client_cancel_other_run_leaves_fail_subtree_sibling_running",
+        "fn client_cancel_during_approve_does_not_revive",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
     }
@@ -372,9 +402,11 @@ fn architecture_mermaid_names_keel_client() {
         "POST /complete",
         "POST /start",
         "GET /inspect",
+        "POST /cancel",
         "Runtime::complete",
         "Runtime::inspect",
         "Runtime::start",
+        "Runtime::cancel",
         "StartBody",
         "StartNode",
         "StartView",

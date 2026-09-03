@@ -1,4 +1,4 @@
-//! Out-of-process start, inspect, and complete. POSTs the same JSON
+//! Out-of-process start, inspect, complete, and cancel. POSTs the same JSON
 //! [`CompleteBody`] the server already accepts. Not a second token type.
 
 use crate::{
@@ -17,7 +17,7 @@ use std::fmt;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Bound for one start, inspect, or complete request. A hung server is
+/// Bound for one start, inspect, complete, or cancel request. A hung server is
 /// [`KeelClientError::Hung`], not a forever wait. Tokio time.
 pub const HANG_BOUND: Duration = Duration::from_secs(5);
 
@@ -39,9 +39,9 @@ impl From<Decision> for Resume {
     }
 }
 
-/// Errors from [`KeelClient::start`], [`KeelClient::inspect`], and
-/// [`KeelClient::complete`]. Status map matches the server. Display is
-/// verb-neutral for shared codes.
+/// Errors from [`KeelClient::start`], [`KeelClient::inspect`],
+/// [`KeelClient::complete`], and [`KeelClient::cancel`]. Status map matches
+/// the server. Display is verb-neutral for shared codes.
 #[derive(Debug, Error)]
 pub enum KeelClientError {
     #[error("request rejected: missing or wrong secret")]
@@ -67,11 +67,12 @@ pub enum KeelClientError {
 }
 
 /// Out-of-process SDK client. This crate implements [`Self::start`],
-/// [`Self::inspect`], and [`Self::complete`]. No schedule HTTP.
+/// [`Self::inspect`], [`Self::complete`], and [`Self::cancel`]. No schedule HTTP.
 ///
 /// Sends [`SECRET_HEADER`] and `Authorization: Bearer` when constructed
 /// with a secret. Duplicate complete is Ok (server 200 noop).
-/// Does not revive Cancelled. Does not follow redirects.
+/// Cancel of an already-terminal run is Ok (kernel noop). Does not revive
+/// Cancelled. Does not follow redirects.
 #[derive(Clone)]
 pub struct KeelClient {
     http: Client<HttpConnector, Full<Bytes>>,
@@ -100,7 +101,7 @@ impl KeelClient {
         })
     }
 
-    /// One URL builder for start / inspect / complete. No complete-only field.
+    /// One URL builder for start / inspect / complete / cancel. No verb-only field.
     fn uri(&self, path: &str) -> Result<Uri, KeelClientError> {
         path_url(&self.base, path)
             .parse::<Uri>()
@@ -261,6 +262,28 @@ impl KeelClient {
     pub async fn reject(&self, token: ResumeToken) -> Result<(), KeelClientError> {
         self.complete(token, Decision::Fail).await
     }
+
+    /// `POST /cancel/:id` — same secret and hang-bound as start / inspect /
+    /// complete. Cancels **one** execution via [`keel_rt::Runtime::cancel`].
+    /// Already-terminal is Ok (kernel Cancel is a noop). Unknown id is 404.
+    /// Another Runtime owning the run is [`KeelClientError::ClaimedElsewhere`].
+    pub async fn cancel(&self, execution_id: &ExecutionId) -> Result<(), KeelClientError> {
+        let resp = self
+            .send(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(self.uri(&format!("cancel/{}", execution_id.as_str()))?),
+                Bytes::new(),
+            )
+            .await?;
+        match resp.status().as_u16() {
+            200 => Ok(()),
+            401 => Err(KeelClientError::Unauthorized),
+            404 => Err(KeelClientError::UnknownExecution),
+            CLAIMED_ELSEWHERE => Err(KeelClientError::ClaimedElsewhere),
+            other => Err(KeelClientError::Unexpected(other)),
+        }
+    }
 }
 
 impl fmt::Debug for KeelClient {
@@ -317,6 +340,10 @@ mod tests {
         assert_eq!(
             path_url("http://127.0.0.1:9/", "inspect/exec-1"),
             "http://127.0.0.1:9/inspect/exec-1"
+        );
+        assert_eq!(
+            path_url("http://127.0.0.1:9/", "cancel/exec-1"),
+            "http://127.0.0.1:9/cancel/exec-1"
         );
     }
 

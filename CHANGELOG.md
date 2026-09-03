@@ -1,5 +1,26 @@
 # Changelog
 
+## Cancel one execution (`sdk/cancel`)
+
+[`KeelClient::cancel(execution_id)`] is `POST /cancel/:id` with the same
+[`SECRET_HEADER`] / Bearer, [`HANG_BOUND`], `send`, and `uri` as start /
+inspect / complete. No `CANCEL_HANG_BOUND` and no `cancel rejected`
+Display. The server calls [`Runtime::cancel`] — the same inbox
+[`Event::Cancel`] as [`ExecutionHandle::cancel`] / Drop. Stolen lease
+is **423 Locked** [`KeelClientError::ClaimedElsewhere`]. Unknown id is
+**404**. Already-terminal (Succeeded after approve) is **200 noop**
+(cite `cancel_already_terminal_is_noop`; does not rewrite to Cancelled).
+Duplicate cancel of Cancelled is the same noop. Cancel of one HTTP start
+leaves the other park Waiting. FailSubtree still-Running on a
+**different** execution is not cancelled. Cancel of a FailSubtree run
+cancels its Running sibling. Later approve is **409** and does not
+revive. Server-drop still Drop-cancels remaining parks
+(`client_drop_http_server_after_start_cancels_wait`). SQLite proof lives
+in `keel-rt-sqlite` (`http_sqlite_start_cancel_second_runtime_is_claimed_elsewhere`).
+Kernel `src/` grew only [`Runtime::cancel`] / [`CancelError`] — proven
+by `runtime_cancel_by_execution_id_cancels_parked_wait` (no cancel-by-id
+existed). No Agent / HTTP / HITL / EventLog types in the kernel.
+
 ## Start then approve / reject (`sdk/start-approve`)
 
 [`KeelClient::start`] is `POST /start` with kernel durable JSON

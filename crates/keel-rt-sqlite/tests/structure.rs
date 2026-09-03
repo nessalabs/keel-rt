@@ -132,6 +132,10 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         http.contains("fn http_sqlite_start_inspect_complete_two_runtimes_new_id_is_not_steal"),
         "http.rs must lock HTTP start+inspect+complete on sqlite (two Runtimes)"
     );
+    assert!(
+        http.contains("fn http_sqlite_start_cancel_second_runtime_is_claimed_elsewhere"),
+        "http.rs must lock HTTP start+cancel on sqlite (ClaimedElsewhere)"
+    );
     let cargo = fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/Cargo.toml").unwrap();
     assert!(
         cargo.contains("keel-rt-http"),

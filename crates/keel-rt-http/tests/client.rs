@@ -2926,3 +2926,571 @@ async fn client_approve_issued_token_for_running_node_leaves_wait_parked() {
     ));
     server.abort();
 }
+
+/// HTTP start wait → cancel → inspect Cancelled; later approve is 409.
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_wait_cancel_is_cancelled_approve_is_409() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client.cancel(&id).await.expect("cancel");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Cancelled");
+    let err = client
+        .approve(token, Bytes::from_static(b"gate"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::Cancelled),
+        "approve after cancel must not revive: {err:?}"
+    );
+    assert_eq!(
+        client.inspect(&id).await.expect("end").state,
+        ExecutionState::Cancelled
+    );
+    server.abort();
+}
+
+/// Cancel one of two live HTTP starts; the other park stays Waiting.
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_one_of_two_http_starts_leaves_other_waiting() {
+    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let def = WorkflowDefinition::builder("wf")
+        .node("hold", "wait")
+        .build()
+        .unwrap();
+    let a = client.start(def.clone()).await.expect("a");
+    let b = client.start(def).await.expect("b");
+    assert_ne!(a, b);
+    tokio::time::timeout(BOUND, async {
+        loop {
+            let va = client.inspect(&a).await.expect("ia");
+            let vb = client.inspect(&b).await.expect("ib");
+            if va.state == ExecutionState::Waiting && vb.state == ExecutionState::Waiting {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both parked");
+    client.cancel(&a).await.expect("cancel a");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&a).await.expect("a").state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a Cancelled");
+    assert_eq!(
+        client.inspect(&b).await.expect("b").state,
+        ExecutionState::Waiting,
+        "cancel of a must not cancel b"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_unknown_id_is_404() {
+    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = client_at(addr)
+        .cancel(&ExecutionId::parse("exec-missing").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::UnknownExecution), "{err:?}");
+    server.abort();
+}
+
+/// Cite `cancel_already_terminal_is_noop`: kernel Cancel on Succeeded is
+/// a no-op (does not rewrite to Cancelled). HTTP matches.
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_already_terminal_is_noop() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client
+        .approve(token, Bytes::from_static(b"gate"))
+        .await
+        .expect("approve");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Succeeded {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Succeeded");
+    client
+        .cancel(&id)
+        .await
+        .expect("cancel of Succeeded is noop");
+    assert_eq!(
+        client.inspect(&id).await.expect("after").state,
+        ExecutionState::Succeeded
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_duplicate_cancel_is_noop() {
+    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Waiting {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("park");
+    client.cancel(&id).await.expect("first");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Cancelled");
+    client.cancel(&id).await.expect("duplicate cancel is noop");
+    assert_eq!(
+        client.inspect(&id).await.expect("end").state,
+        ExecutionState::Cancelled
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_without_secret_is_401() {
+    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = KeelClient::without_secret(format!("http://{addr}"))
+        .unwrap()
+        .cancel(&ExecutionId::parse("exec-missing").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::Unauthorized), "{err:?}");
+    let text = err.to_string();
+    assert!(
+        !text.to_ascii_lowercase().contains("complete"),
+        "cancel 401 must be verb-neutral: {text}"
+    );
+    assert!(!text.contains("cancel rejected"), "{text}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_wrong_secret_is_401() {
+    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = KeelClient::new(
+        format!("http://{addr}"),
+        CompleteSecret::new("wrong-secret").unwrap(),
+    )
+    .unwrap()
+    .cancel(&ExecutionId::parse("exec-missing").unwrap())
+    .await
+    .unwrap_err();
+    assert!(matches!(err, KeelClientError::Unauthorized), "{err:?}");
+    assert!(!err.to_string().contains("cancel rejected"), "{err}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn client_hung_cancel_is_hung_not_forever() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _hold = tokio::spawn(async move {
+        let (_s, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let id = ExecutionId::parse("exec-hung").unwrap();
+    let mut fut = std::pin::pin!(client.cancel(&id));
+    for _ in 0..64 {
+        tokio::select! {
+            biased;
+            r = fut.as_mut() => panic!("hung cancel finished before bound: {r:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+    tokio::time::advance(HANG_BOUND + Duration::from_millis(1)).await;
+    let err = fut.await.unwrap_err();
+    assert!(matches!(err, KeelClientError::Hung), "{err:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_does_not_follow_redirect_off_loopback() {
+    let trap = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let trap_addr = trap.local_addr().unwrap();
+    let hits = Arc::new(AtomicU32::new(0));
+    let c = hits.clone();
+    let trap_task = tokio::spawn(async move {
+        if let Ok((s, _)) = trap.accept().await {
+            c.fetch_add(1, Ordering::SeqCst);
+            drop(s);
+        }
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let _ = s.read(&mut buf).await;
+        write_http(
+            &mut s,
+            302,
+            &format!("Location: http://{trap_addr}/cancel/exec-x\r\n"),
+        )
+        .await;
+    });
+    let err = client_at(addr)
+        .cancel(&ExecutionId::parse("exec-x").unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::Unexpected(302)),
+        "must not follow cancel redirect: {err:?}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "SSRF: followed to 0.0.0.0");
+    server.abort();
+    trap_task.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_wire_sends_both_secret_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = s.read(&mut buf).await.unwrap();
+        write_http(&mut s, 404, "").await;
+        buf.truncate(n);
+        buf
+    });
+    let err = client_at(addr)
+        .cancel(&ExecutionId::parse("exec-wire").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::UnknownExecution), "{err:?}");
+    let raw = String::from_utf8(server.await.unwrap()).unwrap();
+    let headers = raw.split("\r\n\r\n").next().expect("http");
+    assert!(
+        headers.starts_with("POST /cancel/exec-wire "),
+        "path/protocol: {headers}"
+    );
+    let secret_hdr = format!("{SECRET_HEADER}: {SECRET}");
+    assert!(
+        headers.to_ascii_lowercase().contains(&secret_hdr),
+        "missing {SECRET_HEADER}: {headers}"
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {SECRET}")),
+        "missing Authorization: Bearer: {headers}"
+    );
+    assert!(
+        !headers.contains('?') && !raw.contains(&format!("?{SECRET_HEADER}")),
+        "secret must not be a query string: {raw}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_succeeds_against_bearer_only_server() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = s.read(&mut buf).await.unwrap();
+        let raw = String::from_utf8_lossy(&buf[..n]);
+        let lower = raw.to_ascii_lowercase();
+        let bearer_ok = lower.contains(&format!("authorization: bearer {SECRET}"));
+        write_http(&mut s, if bearer_ok { 404 } else { 401 }, "").await;
+        bearer_ok
+    });
+    let err = client_at(addr)
+        .cancel(&ExecutionId::parse("exec-wire").unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::UnknownExecution),
+        "Bearer-only cancel server must accept KeelClient: {err:?}"
+    );
+    assert!(
+        server.await.unwrap(),
+        "cancel request lacked Authorization: Bearer"
+    );
+}
+
+/// Cancel of a FailSubtree run with a still-Running sibling cancels the
+/// whole execution (not reject / FailSubtree scope).
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_fail_subtree_cancels_running_sibling() {
+    let go = Arc::new(tokio::sync::Notify::new());
+    let gate = go.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("slow", move |_ctx: ExecutionContext| {
+                let gate = gate.clone();
+                async move {
+                    gate.notified().await;
+                    NodeOutcome::Succeeded(Bytes::from_static(b"sib"))
+                }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let def = WorkflowDefinition::builder("wf")
+        .on_failure(OnFailure::FailSubtree)
+        .node("hold", "wait")
+        .node("sib", "slow")
+        .build()
+        .unwrap();
+    let id = client.start(&def).await.expect("start");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                let hold = v.resume_token(&NodeId::new("hold")).is_some();
+                let sib_run = matches!(
+                    v.node(&NodeId::new("sib")).map(|n| &n.state),
+                    Some(InspectNodeState::Running { .. })
+                );
+                if hold && sib_run {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("mixed");
+    client.cancel(&id).await.expect("cancel");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Cancelled");
+    go.notify_one();
+    let after = client.inspect(&id).await.expect("after");
+    assert_eq!(after.state, ExecutionState::Cancelled);
+    assert!(!matches!(
+        after.node(&NodeId::new("sib")).map(|n| &n.state),
+        Some(InspectNodeState::Succeeded)
+    ));
+    server.abort();
+}
+
+/// Cancel of run B must not cancel a FailSubtree still-Running sibling on A.
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_other_run_leaves_fail_subtree_sibling_running() {
+    let go = Arc::new(tokio::sync::Notify::new());
+    let gate = go.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("slow", move |_ctx: ExecutionContext| {
+                let gate = gate.clone();
+                async move {
+                    gate.notified().await;
+                    NodeOutcome::Succeeded(Bytes::from_static(b"sib"))
+                }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let mixed = WorkflowDefinition::builder("mixed")
+        .on_failure(OnFailure::FailSubtree)
+        .node("hold", "wait")
+        .node("sib", "slow")
+        .build()
+        .unwrap();
+    let park = WorkflowDefinition::builder("park")
+        .node("hold", "wait")
+        .build()
+        .unwrap();
+    let a = client.start(&mixed).await.expect("a");
+    let b = client.start(&park).await.expect("b");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            let va = client.inspect(&a).await.expect("ia");
+            let vb = client.inspect(&b).await.expect("ib");
+            let sib_run = matches!(
+                va.node(&NodeId::new("sib")).map(|n| &n.state),
+                Some(InspectNodeState::Running { .. })
+            );
+            if sib_run && vb.state == ExecutionState::Waiting {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a running + b parked");
+    client.cancel(&b).await.expect("cancel b");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&b).await.expect("b").state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("b Cancelled");
+    let after_a = client.inspect(&a).await.expect("a after");
+    assert_eq!(after_a.state, ExecutionState::Running);
+    assert!(
+        matches!(
+            after_a.node(&NodeId::new("sib")).map(|n| &n.state),
+            Some(InspectNodeState::Running { .. })
+        ),
+        "cancel of b must not cancel a's FailSubtree sibling: {:?}",
+        after_a.node(&NodeId::new("sib")).map(|n| &n.state)
+    );
+    go.notify_one();
+    server.abort();
+}
+
+/// 0.1%: cancel vs in-flight approve. Cancelled stays Cancelled (approve
+/// 409); Succeeded stays Succeeded (cancel noop). No revive.
+#[tokio::test(flavor = "current_thread")]
+async fn client_cancel_during_approve_does_not_revive() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("next", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"next")) }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    let approve_client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let (cancelled, approved) = tokio::join!(
+        client.cancel(&id),
+        approve_client.approve(token.clone(), Bytes::from_static(b"gate"))
+    );
+    cancelled.expect("cancel returns");
+    let _ = approved;
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state.is_terminal() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal");
+    let end = client.inspect(&id).await.expect("end");
+    assert!(
+        end.state == ExecutionState::Cancelled || end.state == ExecutionState::Succeeded,
+        "race must land on one kernel terminal: {:?}",
+        end.state
+    );
+    if end.state == ExecutionState::Cancelled {
+        let err = client
+            .approve(token, Bytes::from_static(b"gate"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, KeelClientError::Cancelled),
+            "must not revive after cancel won: {err:?}"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "no downstream after cancel");
+    } else {
+        client
+            .cancel(&id)
+            .await
+            .expect("cancel of Succeeded is noop");
+        assert_eq!(
+            client.inspect(&id).await.expect("still").state,
+            ExecutionState::Succeeded
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+    server.abort();
+}
