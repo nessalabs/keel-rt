@@ -4,7 +4,7 @@
 use bytes::Bytes;
 use keel_rt::{
     ExecutionContext, ExecutionState, FakeClock, MemoryStore, NodeId, NodeOutcome, Resume, Runtime,
-    WorkflowDefinition,
+    StateStore, WorkflowDefinition,
 };
 use keel_rt_http::{
     serve_ephemeral, CompleteClient, CompleteClientError, CompleteSecret, Decision,
