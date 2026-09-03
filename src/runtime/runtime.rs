@@ -291,7 +291,7 @@ impl Runtime {
     }
 
     /// Executor ids this Runtime will accept on start, including builtin
-    /// [`crate::WAIT_ID`]. Registry keys only — not an HTTP type.
+    /// [`crate::WAIT_ID`]. Registry keys only.
     pub fn executor_ids(&self) -> Vec<ExecutorId> {
         self.registry.ids()
     }
