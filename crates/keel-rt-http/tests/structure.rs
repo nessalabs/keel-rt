@@ -155,7 +155,9 @@ fn public_surface_is_complete_resume_token() {
         "InspectNode must not have a ghost resume_token field"
     );
     assert!(
-        lib.contains("Succeeded { output: Bytes }"),
+        lib.contains("Succeeded {")
+            && lib.contains("#[serde(with = \"wire_bytes\")]")
+            && lib.contains("output: Bytes"),
         "Succeeded must own output; not a unit variant"
     );
     let inspect_node = lib
@@ -177,7 +179,8 @@ fn public_surface_is_complete_resume_token() {
         .next()
         .expect("enum body");
     assert!(
-        inspect_enum.contains("Succeeded { output: Bytes }")
+        inspect_enum.contains("Succeeded {")
+            && inspect_enum.contains("output: Bytes")
             && !inspect_enum.contains("output: Option"),
         "output belongs on Succeeded only, not Option on every variant"
     );
@@ -328,7 +331,9 @@ fn public_surface_is_complete_resume_token() {
             && !client.contains("start rejected")
             && !client.contains("CANCEL_HANG_BOUND")
             && !client.contains("CANCEL_SECRET_HEADER")
-            && !client.contains("cancel rejected"),
+            && !client.contains("cancel rejected")
+            && !client.contains("APPROVE_HANG_BOUND")
+            && !client.contains("REJECT_HANG_BOUND"),
         "start/cancel must not add verb-specific hang/secret/Display names"
     );
     assert!(client.contains("pub async fn cancel"));
@@ -408,7 +413,16 @@ fn required_client_tests_exist() {
         "fn client_start_without_secret_is_401",
         "fn client_start_wrong_secret_is_401",
         "fn client_start_unregistered_is_400_nothing_runs",
+        "fn client_start_wait_plus_missing_unregistered_is_exactly_missing",
+        "fn client_start_cycle_is_400_bad_request_not_unregistered",
         "fn client_executors_without_secret_is_401",
+        "fn client_approve_400kib_is_200_not_json_array_413",
+        "fn client_inspect_research_hold_write_outputs_are_per_node",
+        "fn two_clients_approve_and_complete_one_token_downstream_runs_once",
+        "fn client_approve_then_complete_same_token_is_noop",
+        "fn client_approve_oversized_body_is_413_does_not_complete",
+        "fn client_live_approve_after_ttl_steal_is_claimed_elsewhere",
+        "fn client_live_approve_persist_err_is_not_ok",
         "fn client_start_empty_definition_is_400",
         "fn client_start_oversized_body_is_413",
         "fn client_hung_start_is_hung_not_forever",
@@ -463,11 +477,23 @@ fn required_client_tests_exist() {
         lib.contains("fn inspect_view_json_succeeded_owns_output"),
         "Succeeded inspect JSON must own output bytes"
     );
+    assert!(
+        lib.contains("fn inspect_view_json_non_succeeded_has_no_output_or_error")
+            && lib.contains("fn inspect_view_json_1mib_succeeded_is_compact_base64")
+            && lib.contains("mod wire_bytes"),
+        "inspect output must be base64 one field; non-Succeeded must not leak"
+    );
     let complete =
         fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/tests/complete.rs").unwrap();
     assert!(
         complete.contains("fn post_claimed_elsewhere_is_423_locked_not_409"),
         "complete.rs must lock 423 Locked vs 409 Cancelled"
+    );
+    assert!(
+        complete.contains("fn post_approve_empty_body_is_400_does_not_complete")
+            && complete.contains("fn post_approve_oversized_is_413_does_not_complete")
+            && complete.contains("fn post_approve_without_secret_is_401"),
+        "raw POST /approve must lock 400/413/401"
     );
     assert!(
         tests.contains("FakeClock"),

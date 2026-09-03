@@ -30,7 +30,8 @@ has registered, plus builtin `wait`. Builtin `wait` is already on
 token once, in [`InspectNodeState::Waiting`]) — not an `ExecutionHandle`.
 Running-node tokens are omitted from the DTO type (not a cloned kernel
 `NodeState`). Result bytes live only on
-[`InspectNodeState::Succeeded { output }`].
+[`InspectNodeState::Succeeded { output }`] as one base64 field
+(not a JSON number array).
 `InspectView::resume_token` reads `InspectNodeState::Waiting { token }`.
 Unknown execution is **404**. Terminal
 and Cancelled are **200** with state; `complete` of a cancelled token is

@@ -149,11 +149,22 @@ async fn sdk_loop_approve_then_cancel_is_409() {
     })
     .await
     .expect("succeeded");
-    let wire = serde_json::to_string(&done).unwrap();
+    let wire = serde_json::to_value(&done).unwrap();
+    let write = wire["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "write")
+        .unwrap();
     assert!(
-        wire.contains("human-ok")
-            || wire.contains(&serde_json::to_string(&Bytes::from_static(b"human-ok")).unwrap()),
-        "inspect JSON after approve must show write output: {wire}"
+        write["state"]["output"].is_string(),
+        "write Succeeded output is one base64 field: {write}"
+    );
+    assert_eq!(
+        done.node(&NodeId::new("write")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"human-ok"),
+        })
     );
     assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert_eq!(last.lock().unwrap().as_ref(), b"human-ok");

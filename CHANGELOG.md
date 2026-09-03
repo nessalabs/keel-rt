@@ -10,9 +10,10 @@ sends only `durable_bytes`. Unregistered `executor_id` is **400**
 `{"error":"unregistered","executors":[...]}` — the missing ids are in
 [`KeelClientError::Unregistered`]. `GET /executors` lists
 [`Runtime::executor_ids`] (including builtin `wait`).
-`InspectNodeState::Succeeded { output }` carries result bytes;
-Waiting still owns the only token. `POST /approve` / `POST /reject`
-are thin aliases over the complete apply path. CI:
+`InspectNodeState::Succeeded { output }` carries result bytes as **one
+base64 field** (not a `[u8]` JSON array). Waiting still owns the only
+token. `POST /approve` / `POST /reject` are thin aliases over the
+complete apply path (empty approve body is **400**). CI:
 `sdk_loop_approve_then_cancel_is_409`,
 `client_start_unregistered_is_400_nothing_runs`.
 

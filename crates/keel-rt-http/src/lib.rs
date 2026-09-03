@@ -25,6 +25,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use keel_rt::{
     CancelError, CompleteError, ExecutionHandle, ExecutionId, ExecutionSnapshot, ExecutionState,
     ExecutorId, Join, NodeId, NodeState, OnFailure, Resume, ResumeToken, Runtime, StartError,
@@ -93,12 +95,58 @@ pub struct CompleteBody {
     pub resume: Resume,
 }
 
-/// `POST /approve` body: token + optional output bytes.
+/// Compact inspect / approve payload. A JSON `[u8]` array of 1 MiB is a
+/// multi-MiB bomb; this is one base64 field.
+mod wire_bytes {
+    use super::{Bytes, Engine, STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes.as_ref()))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Bytes, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        STANDARD
+            .decode(s.as_bytes())
+            .map(Bytes::from)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+mod opt_wire_bytes {
+    use super::{Bytes, Engine, STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<Bytes>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(b) => super::wire_bytes::serialize(b, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Bytes>, D::Error> {
+        match Option::<String>::deserialize(deserializer)? {
+            None => Ok(None),
+            Some(s) => STANDARD
+                .decode(s.as_bytes())
+                .map(|v| Some(Bytes::from(v)))
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+/// `POST /approve` body: token + optional output bytes (base64).
 /// Maps onto [`Decision::Complete`] → the existing complete path.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutputBody {
     pub token: ResumeToken,
-    #[serde(default)]
+    #[serde(default, with = "opt_wire_bytes")]
     pub output: Option<Bytes>,
 }
 
@@ -203,9 +251,17 @@ pub struct InspectNode {
 pub enum InspectNodeState {
     Pending,
     Ready,
-    Running { attempt: u32 },
-    Waiting { token: ResumeToken, attempt: u32 },
-    Succeeded { output: Bytes },
+    Running {
+        attempt: u32,
+    },
+    Waiting {
+        token: ResumeToken,
+        attempt: u32,
+    },
+    Succeeded {
+        #[serde(with = "wire_bytes")]
+        output: Bytes,
+    },
     Failed,
     Cancelled,
     TimedOut,
@@ -458,31 +514,45 @@ async fn complete_handler(
 }
 
 async fn approve_handler(
-    state: State<App>,
+    State(app): State<App>,
     headers: HeaderMap,
-    Json(body): Json<OutputBody>,
+    body: Bytes,
 ) -> axum::response::Response {
+    if authorize(&app, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let parsed: OutputBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
     complete_handler(
-        state,
+        State(app),
         headers,
         Json(CompleteBody {
-            token: body.token,
-            resume: Decision::Complete(body.output.unwrap_or_default()).into(),
+            token: parsed.token,
+            resume: Decision::Complete(parsed.output.unwrap_or_default()).into(),
         }),
     )
     .await
 }
 
 async fn reject_handler(
-    state: State<App>,
+    State(app): State<App>,
     headers: HeaderMap,
-    Json(body): Json<TokenBody>,
+    body: Bytes,
 ) -> axum::response::Response {
+    if authorize(&app, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let parsed: TokenBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
     complete_handler(
-        state,
+        State(app),
         headers,
         Json(CompleteBody {
-            token: body.token,
+            token: parsed.token,
             resume: Decision::Fail.into(),
         }),
     )
@@ -903,9 +973,20 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(write_json["state"]["kind"], "succeeded");
+        assert!(
+            write_json["state"]["output"].is_string(),
+            "Succeeded output is one base64 field, not a u8 array: {write_json}"
+        );
+        assert!(
+            !write_json["state"]["output"].is_array(),
+            "u8-array output is a JSON bomb: {write_json}"
+        );
+        let back: InspectView = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(
-            write_json["state"]["output"],
-            serde_json::to_value(bytes::Bytes::from_static(b"human-ok")).unwrap()
+            back.node(&write).map(|n| &n.state),
+            Some(&InspectNodeState::Succeeded {
+                output: bytes::Bytes::from_static(b"human-ok"),
+            })
         );
         assert!(write_json["state"].get("token").is_none());
         assert!(
@@ -917,6 +998,117 @@ mod tests {
         assert!(slow_json.get("resume_token").is_none());
         assert!(slow_json["state"].get("last_error").is_none());
         assert!(slow_json["state"].get("resume_token").is_none());
+    }
+
+    #[test]
+    fn inspect_view_json_non_succeeded_has_no_output_or_error() {
+        let id = keel_rt::ExecutionId::parse("exec-leak").unwrap();
+        let tok = ResumeToken::issue(id.clone(), keel_rt::NodeId::new("n"), 1);
+        let fat = bytes::Bytes::from(vec![9u8; 256]);
+        let err = keel_rt::NodeError::new("boom");
+        let states = [
+            NodeState::Pending,
+            NodeState::Ready { runnable_at: None },
+            NodeState::Running { attempt: 1 },
+            NodeState::Waiting {
+                token: tok.clone(),
+                attempt: 1,
+            },
+            NodeState::Failed,
+            NodeState::Cancelled,
+            NodeState::TimedOut,
+        ];
+        for (i, state) in states.into_iter().enumerate() {
+            let nid = keel_rt::NodeId::new(format!("n{i}"));
+            let mut snap = ExecutionSnapshot {
+                schema_version: keel_rt::SCHEMA_VERSION,
+                revision: 1,
+                execution_id: id.clone(),
+                workflow_id: keel_rt::WorkflowId::new("wf"),
+                state: ExecutionState::Running,
+                nodes: Default::default(),
+                node_order: vec![nid.clone()],
+                definition_hash: Default::default(),
+            };
+            snap.nodes.insert(
+                nid.clone(),
+                keel_rt::NodeSnapshot {
+                    state,
+                    output: Some(fat.clone()),
+                    attempt: 1,
+                    resume_token: Some(tok.clone()),
+                    last_error: Some(err.clone()),
+                },
+            );
+            let view = InspectView::from_snapshot(&snap);
+            let node_json = serde_json::to_value(&view.node(&nid).unwrap().state).unwrap();
+            if matches!(
+                view.node(&nid).unwrap().state,
+                InspectNodeState::Waiting { .. }
+            ) {
+                assert!(node_json.get("token").is_some(), "{node_json}");
+            } else {
+                assert!(node_json.get("token").is_none(), "{node_json}");
+            }
+            assert!(
+                node_json.get("output").is_none(),
+                "non-Succeeded must not own output: {node_json}"
+            );
+            assert!(
+                node_json.get("last_error").is_none() && node_json.get("resume_token").is_none(),
+                "inspect must not dump last_error/resume_token: {node_json}"
+            );
+            let wire = serde_json::to_string(&view).unwrap();
+            assert!(!wire.contains("boom"), "Failed reason leaked: {wire}");
+            assert!(
+                !wire.contains("[9,") && !wire.contains("[9,"),
+                "fat snapshot output leaked as array: {wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn inspect_view_json_1mib_succeeded_is_compact_base64() {
+        let id = keel_rt::ExecutionId::parse("exec-fat").unwrap();
+        let write = keel_rt::NodeId::new("write");
+        let fat = bytes::Bytes::from(vec![0x5au8; 1024 * 1024]);
+        let mut snap = ExecutionSnapshot {
+            schema_version: keel_rt::SCHEMA_VERSION,
+            revision: 1,
+            execution_id: id,
+            workflow_id: keel_rt::WorkflowId::new("wf"),
+            state: ExecutionState::Succeeded,
+            nodes: Default::default(),
+            node_order: vec![write.clone()],
+            definition_hash: Default::default(),
+        };
+        snap.nodes.insert(
+            write.clone(),
+            keel_rt::NodeSnapshot {
+                state: NodeState::Succeeded,
+                output: Some(fat.clone()),
+                attempt: 1,
+                resume_token: None,
+                last_error: None,
+            },
+        );
+        let view = InspectView::from_snapshot(&snap);
+        let json = serde_json::to_vec(&view).expect("json");
+        assert!(
+            json.len() < 1024 * 1024 * 4 / 3 + 4096,
+            "1MiB Succeeded must not explode as a u8 JSON array: {} B",
+            json.len()
+        );
+        let text = String::from_utf8_lossy(&json);
+        assert!(
+            !text.contains("[90,") && !text.contains("[90,"),
+            "Succeeded output must not be a number array"
+        );
+        let back: InspectView = serde_json::from_slice(&json).unwrap();
+        match &back.node(&write).unwrap().state {
+            InspectNodeState::Succeeded { output } => assert_eq!(output, &fat),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
