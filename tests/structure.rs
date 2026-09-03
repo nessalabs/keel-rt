@@ -389,6 +389,8 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "resume_with_retry_failed_persist_err_leaves_failed_then_retry_works",
         "hitl_live_handle_retry_failed_is_already_active",
         "retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes",
+        "retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many",
+        "retry_failed_fail_fast_diamond_times_n",
         "complete_from_second_task_unblocks_wait_and_downstream_sees_bytes",
         "complete_after_drop_handle_does_not_revive",
         "complete_from_store_after_engine_down_unblocks_wait",
