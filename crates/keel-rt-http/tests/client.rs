@@ -1960,7 +1960,22 @@ async fn client_start_fail_subtree_keeps_running_sibling() {
         .unwrap();
     assert_eq!(def.on_failure(), OnFailure::FailSubtree);
     assert_eq!(def.join_of(&NodeId::new("join")), Some(Join::AllDone));
-    let id = client.start(&def).await.expect("start");
+    let via_from = StartBody::from(&def);
+    assert_eq!(
+        via_from.on_failure,
+        OnFailure::FailSubtree,
+        "From<&WorkflowDefinition> must not strip on_failure"
+    );
+    assert_eq!(
+        via_from
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::new("join"))
+            .map(|n| n.join),
+        Some(Join::AllDone),
+        "From<&WorkflowDefinition> must not strip join"
+    );
+    let id = client.start(&def).await.expect("start via From");
     let token = tokio::time::timeout(BOUND, async {
         loop {
             if let Ok(v) = client.inspect(&id).await {
@@ -2067,6 +2082,65 @@ async fn client_drop_http_server_after_start_cancels_wait() {
     })
     .await
     .expect("server drop must Drop-cancel the held handle");
+}
+
+/// After inspect sees Succeeded, reap consumes the handle. Aborting the
+/// server must not Cancel a run that already finished.
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_terminal_survives_server_drop() {
+    let store = MemoryStore::new();
+    let clock = Arc::new(FakeClock::new());
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(clock)
+            .store(store.clone())
+            .register_fn("next", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("next", "next")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if v.state == ExecutionState::Succeeded {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("succeeded");
+    drop(client);
+    server.abort();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(s) = store.get(&id).await.unwrap() {
+                assert_ne!(
+                    s.state,
+                    ExecutionState::Cancelled,
+                    "reaped terminal must not Drop-cancel"
+                );
+                if s.state == ExecutionState::Succeeded {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Succeeded must survive server drop");
 }
 
 /// Two HTTP servers, one MemoryStore: a new start id is not a steal.

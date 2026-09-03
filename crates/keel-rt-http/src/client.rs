@@ -1,5 +1,5 @@
-//! Out-of-process inspect + complete. POSTs the same JSON [`CompleteBody`]
-//! the server already accepts. Not a second token type.
+//! Out-of-process start, inspect, and complete. POSTs the same JSON
+//! [`CompleteBody`] the server already accepts. Not a second token type.
 
 use crate::{
     CompleteBody, CompleteSecret, InspectView, StartBody, StartView, CLAIMED_ELSEWHERE,
@@ -76,13 +76,12 @@ pub enum KeelClientError {
 pub struct KeelClient {
     http: Client<HttpConnector, Full<Bytes>>,
     base: String,
-    complete_url: Uri,
     secret: Option<CompleteSecret>,
     hang_bound: Duration,
 }
 
 impl KeelClient {
-    /// `base_url` is the server root (e.g. `http://127.0.0.1:port`), not `/complete`.
+    /// `base_url` is the server root (e.g. `http://127.0.0.1:port`), not a route.
     pub fn new(base_url: impl AsRef<str>, secret: CompleteSecret) -> Result<Self, KeelClientError> {
         Self::build(base_url.as_ref(), Some(secret))
     }
@@ -93,17 +92,19 @@ impl KeelClient {
     }
 
     fn build(base_url: &str, secret: Option<CompleteSecret>) -> Result<Self, KeelClientError> {
-        let base = base_url.trim_end_matches('/').to_string();
-        let complete_url = complete_url(&base)
-            .parse::<Uri>()
-            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         Ok(Self {
             http: Client::builder(TokioExecutor::new()).build_http(),
-            base,
-            complete_url,
+            base: base_url.trim_end_matches('/').to_string(),
             secret,
             hang_bound: HANG_BOUND,
         })
+    }
+
+    /// One URL builder for start / inspect / complete. No complete-only field.
+    fn uri(&self, path: &str) -> Result<Uri, KeelClientError> {
+        path_url(&self.base, path)
+            .parse::<Uri>()
+            .map_err(|e| KeelClientError::Transport(e.to_string()))
     }
 
     /// Override [`HANG_BOUND`] for this client.
@@ -149,14 +150,11 @@ impl KeelClient {
     ) -> Result<ExecutionId, KeelClientError> {
         let json = serde_json::to_vec(&definition.into())
             .map_err(|e| KeelClientError::Transport(e.to_string()))?;
-        let url = format!("{}/start", self.base)
-            .parse::<Uri>()
-            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         let resp = self
             .send(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(url)
+                    .uri(self.uri("start")?)
                     .header(CONTENT_TYPE, "application/json")
                     .header(CONTENT_LENGTH, json.len()),
                 Bytes::from(json),
@@ -186,12 +184,11 @@ impl KeelClient {
         &self,
         execution_id: &ExecutionId,
     ) -> Result<InspectView, KeelClientError> {
-        let url = format!("{}/inspect/{}", self.base, execution_id.as_str())
-            .parse::<Uri>()
-            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
         let resp = self
             .send(
-                Request::builder().method(Method::GET).uri(url),
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(self.uri(&format!("inspect/{}", execution_id.as_str()))?),
                 Bytes::new(),
             )
             .await?;
@@ -229,7 +226,7 @@ impl KeelClient {
             .send(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(self.complete_url.clone())
+                    .uri(self.uri("complete")?)
                     .header(CONTENT_TYPE, "application/json")
                     .header(CONTENT_LENGTH, json.len()),
                 Bytes::from(json),
@@ -269,15 +266,19 @@ impl KeelClient {
 impl fmt::Debug for KeelClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KeelClient")
-            .field("complete_url", &self.complete_url)
+            .field("base", &self.base)
             .field("secret", &self.secret)
             .field("hang_bound", &self.hang_bound)
             .finish()
     }
 }
 
-fn complete_url(base: &str) -> String {
-    format!("{}/complete", base.trim_end_matches('/'))
+fn path_url(base: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 #[cfg(test)]
@@ -304,14 +305,18 @@ mod tests {
     }
 
     #[test]
-    fn complete_url_trims_trailing_slash() {
+    fn path_url_trims_trailing_slash() {
         assert_eq!(
-            complete_url("http://127.0.0.1:9"),
+            path_url("http://127.0.0.1:9", "complete"),
             "http://127.0.0.1:9/complete"
         );
         assert_eq!(
-            complete_url("http://127.0.0.1:9/"),
-            "http://127.0.0.1:9/complete"
+            path_url("http://127.0.0.1:9/", "/start"),
+            "http://127.0.0.1:9/start"
+        );
+        assert_eq!(
+            path_url("http://127.0.0.1:9/", "inspect/exec-1"),
+            "http://127.0.0.1:9/inspect/exec-1"
         );
     }
 

@@ -8,15 +8,20 @@
 snapshot dump and not a second graph language. FailSubtree / AllDone
 survive the wire (`client_start_fail_subtree_keeps_running_sibling`).
 The server calls [`Runtime::start`] and **holds live handles** so Drop
-does not cancel; terminals are reaped (`reap_started_consumes_terminal_handles`).
-Dropping the server still Drop-cancels parks
-(`client_drop_http_server_after_start_cancels_wait`). The client
+does not cancel; terminals are `wait()`-consumed on push / inspect /
+complete (`hold_started_consumes_already_terminal`,
+`reap_started_consumes_terminal_handles`). Dropping the server still
+Drop-cancels parks (`client_drop_http_server_after_start_cancels_wait`)
+and does not cancel a reaped terminal
+(`client_start_terminal_survives_server_drop`). The client
 returns the new [`ExecutionId`]. Each call is a new run
 (`client_two_starts_are_distinct_ids`); a second Runtime's new id is
 not a steal (`http_start_second_runtime_new_id_is_not_steal`).
 Unregistered / empty definition is **400**; oversized **413**; missing
 secret **401** (verb-neutral Display; no `START_*` names). Same
-[`SECRET_HEADER`] / [`HANG_BOUND`] / `send` as inspect and complete.
+[`SECRET_HEADER`] / [`HANG_BOUND`] / `send` / `uri` as inspect and
+complete. [`CompleteSecret`] stays named for historical
+`x-keel-complete`; it is the secret on every route.
 
 [`KeelClient::approve`] / [`KeelClient::reject`] POST the existing
 `/complete` body: `Decision::Complete(bytes)` and `Decision::Fail`

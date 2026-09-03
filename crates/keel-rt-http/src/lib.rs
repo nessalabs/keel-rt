@@ -46,7 +46,11 @@ pub const CLAIMED_ELSEWHERE: u16 = 423;
 /// Same header on start, inspect, and complete. Wire name is historical.
 pub const SECRET_HEADER: &str = "x-keel-complete";
 
-/// Shared secret for the adapter. Not identity. Empty is rejected.
+/// Shared secret for **every** adapter route (start, inspect, complete).
+///
+/// The type is still `CompleteSecret` because the wire header is historical
+/// [`SECRET_HEADER`] (`x-keel-complete`). Renaming the type would fork it
+/// from that header. It is not a complete-only credential. Empty is rejected.
 #[derive(Clone)]
 pub struct CompleteSecret(Arc<str>);
 
@@ -258,8 +262,10 @@ fn secrets_equal(expected: &str, got: &[u8]) -> bool {
 }
 
 /// Drop-cancel only applies while we still hold the handle. Consume
-/// terminals with [`ExecutionHandle::wait`] so the vec does not grow
-/// without bound. Live parks stay held until the server drops.
+/// terminals with [`ExecutionHandle::wait`] so a finished run does not
+/// live until process death. Do **not** `spawn(handle.wait())` for a live
+/// park: `wait` sets `consumed` immediately, so aborting that task would
+/// not Drop-cancel. Live parks stay in the vec until the server drops.
 async fn reap_started(started: &Mutex<Vec<ExecutionHandle>>) {
     let batch = {
         let mut g = started.lock().unwrap_or_else(|p| p.into_inner());
@@ -277,6 +283,20 @@ async fn reap_started(started: &Mutex<Vec<ExecutionHandle>>) {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .extend(kept);
+}
+
+/// Reap terminals already in the vec, then either consume a terminal
+/// start or hold a live park.
+async fn hold_started(started: &Mutex<Vec<ExecutionHandle>>, handle: ExecutionHandle) {
+    reap_started(started).await;
+    if handle.inspect().await.state.is_terminal() {
+        let _ = handle.wait().await;
+    } else {
+        started
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(handle);
+    }
 }
 
 fn authorize(app: &App, headers: &HeaderMap) -> Result<(), StatusCode> {
@@ -301,11 +321,7 @@ async fn start_handler(
     match app.runtime.start(def) {
         Ok(handle) => {
             let execution_id = handle.execution_id().clone();
-            reap_started(&app.started).await;
-            app.started
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(handle);
+            hold_started(&app.started, handle).await;
             Json(StartView { execution_id }).into_response()
         }
         Err(StartError::UnregisteredExecutors(_)) => StatusCode::BAD_REQUEST.into_response(),
@@ -319,10 +335,12 @@ async fn inspect_handler(
 ) -> Result<Json<InspectView>, StatusCode> {
     authorize(&app, &headers)?;
     let id = ExecutionId::parse(&id).map_err(|_| StatusCode::NOT_FOUND)?;
-    match app.runtime.inspect(&id).await {
+    let result = match app.runtime.inspect(&id).await {
         Some(snap) => Ok(Json(InspectView::from_snapshot(&snap))),
         None => Err(StatusCode::NOT_FOUND),
-    }
+    };
+    reap_started(&app.started).await;
+    result
 }
 
 #[derive(Serialize)]
@@ -743,6 +761,37 @@ mod tests {
             started.lock().unwrap().len(),
             0,
             "terminal handles must be consumed, not held until process drop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hold_started_consumes_already_terminal() {
+        let rt = Runtime::builder()
+            .register_fn("next", |_ctx: keel_rt::ExecutionContext| async {
+                keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(b"ok"))
+            })
+            .build();
+        let started = Mutex::new(Vec::new());
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("next", "next")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        for _ in 0..64 {
+            if rt.inspect(&id).await.is_some_and(|s| s.state.is_terminal()) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        hold_started(&started, handle).await;
+        assert_eq!(
+            started.lock().unwrap().len(),
+            0,
+            "terminal start must be wait()-consumed on push, not held"
         );
     }
 }

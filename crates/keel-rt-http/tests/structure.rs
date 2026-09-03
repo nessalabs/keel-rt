@@ -180,6 +180,16 @@ fn public_surface_is_complete_resume_token() {
         "inspect and complete must share one send path"
     );
     assert!(
+        client.contains("fn uri(")
+            && client.contains("fn path_url(")
+            && !client.contains("complete_url:"),
+        "start/inspect/complete must share one URI builder; no complete-only URL field"
+    );
+    assert!(
+        client.contains("Out-of-process start, inspect, and complete"),
+        "client module docs must name start, not inspect+complete only"
+    );
+    assert!(
         lib.contains("StatusCode::LOCKED") && lib.contains("claimed_elsewhere"),
         "complete must return 423 Locked with claimed_elsewhere body"
     );
@@ -203,10 +213,20 @@ fn public_surface_is_complete_resume_token() {
     );
     assert!(
         lib.contains("fn reap_started")
-            && lib.contains("fn reap_started_consumes_terminal_handles"),
+            && lib.contains("fn hold_started")
+            && lib.contains("fn reap_started_consumes_terminal_handles")
+            && lib.contains("fn hold_started_consumes_already_terminal"),
         "HTTP start must reap terminal handles so the vec is not process-lifetime"
     );
     assert!(lib.contains("fn start_body_is_durable_bytes_not_snapshot"));
+    assert!(
+        !lib.contains("fn start_body_is_narrow_not_snapshot"),
+        "narrow-not-snapshot must not lock omitted on_failure/join"
+    );
+    assert!(
+        lib.contains("serde_json::from_slice(&def.durable_bytes())"),
+        "From<&WorkflowDefinition> must be durable_bytes, not id/nodes/edges only"
+    );
     assert!(lib.contains("pub struct StartView"));
     assert!(lib.contains(".route(\"/start\""));
     let start_fn = client
@@ -289,6 +309,7 @@ fn required_client_tests_exist() {
         "fn client_start_inspect_reject_fails_execution",
         "fn client_start_fail_subtree_keeps_running_sibling",
         "fn client_drop_http_server_after_start_cancels_wait",
+        "fn client_start_terminal_survives_server_drop",
         "fn http_start_second_runtime_new_id_is_not_steal",
         "fn client_approve_issued_token_for_running_node_leaves_wait_parked",
     ] {
