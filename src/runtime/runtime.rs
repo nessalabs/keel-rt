@@ -92,7 +92,7 @@ impl From<ClaimError> for CompleteError {
 /// [`Runtime::cancel`] by [`ExecutionId`]. Not [`CompleteError`]: unknown
 /// is an execution (not a resume token), and cancel of Cancelled/Succeeded
 /// is Ok (noop), not `CompleteError::Cancelled`. Lease/store variants
-/// match complete so HTTP can map 423 the same way.
+/// match complete so a sibling adapter can map 423 the same way.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CancelError {
     #[error("unknown execution")]
