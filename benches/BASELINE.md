@@ -10,8 +10,8 @@ MemoryStore no-timer column stays the inspect SHA (all four ≤10% vs wait-gate)
 
 | # | path | N | release | notes |
 |---|---|---:|---|---|
-| 1 | `KeelClient::cancel` | 1 | **pending** median | n=7; loopback empty body |
-| 2 | `Runtime::cancel` | 1 | **pending** median | in-process; HTTP is the floor |
+| 1 | `KeelClient::cancel` | 1 | **0.034 ms** median | n=7; loopback empty body |
+| 2 | `Runtime::cancel` | 1 | **0.002 ms** median | in-process; HTTP ~17× (loopback) |
 
 No `CANCEL_HANG_BOUND`. Cancel is id-only (route body limit 0).
 
