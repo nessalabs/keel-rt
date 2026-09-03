@@ -86,6 +86,11 @@ fn client_src_has_no_sqlite_schedule_or_hitl_names() {
             "Human",
             "Approve",
             "Reject",
+            "claim",
+            "lease",
+            "SqliteStore",
+            "MemoryStore",
+            "StateStore",
         ] {
             assert!(
                 !contains_word(&s, banned),
@@ -146,6 +151,12 @@ fn required_client_tests_exist() {
         "fn client_duplicate_complete_is_noop",
         "fn client_oversized_body_is_413_does_not_complete",
         "fn two_client_completes_one_token_downstream_runs_once",
+        "fn client_wire_is_complete_body_and_secret_header",
+        "fn client_does_not_follow_redirect_off_loopback",
+        "fn client_hung_server_is_hung_not_forever",
+        "fn client_drop_server_mid_post_is_transport_token_untouched",
+        "fn client_drop_inflight_does_not_complete",
+        "fn client_decision_fail_fails_execution",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
     }
@@ -156,6 +167,15 @@ fn required_client_tests_exist() {
     assert!(
         !tests.contains("std::thread::sleep") && !tests.contains("tokio::time::sleep"),
         "client tests must not wall-sleep"
+    );
+    let client = fs::read_to_string(crate_src().join("client.rs")).unwrap();
+    assert!(
+        client.contains("COMPLETE_HANG_BOUND") && client.contains("tokio::time::timeout"),
+        "CompleteClient must bound a hung server"
+    );
+    assert!(
+        !client.contains("redirect::Policy") && !client.contains("follow_redirect"),
+        "client must not install a redirect follower"
     );
 }
 

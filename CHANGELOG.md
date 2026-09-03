@@ -8,9 +8,11 @@ resume }` the server already accepts (`X-Keel-Complete`). Optional
 [`Resume`] (Succeeded / Failed / Reinvoke) — not a second token or
 state machine. Missing/wrong secret is still 401; cancelled token 409
 (complete does not revive); duplicate complete is 200 noop; body > 1
-MiB is 413. In-process complete stays [`Runtime::complete`]. Kernel
-`src/` is unchanged. The kernel does not depend on this crate. Not
-sqlite, not a schedule ticker, not forms or identity.
+MiB is 413. A hung server is [`CompleteClientError::Hung`] after
+[`COMPLETE_HANG_BOUND`] (5s); the client does not follow redirects
+off the given URL. In-process complete stays [`Runtime::complete`].
+Kernel `src/` is unchanged. The kernel does not depend on this crate.
+Not sqlite, not a lease, not a schedule ticker, not forms or identity.
 
 ## Schedule ticker (`sdk/schedule`)
 

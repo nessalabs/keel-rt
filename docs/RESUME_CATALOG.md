@@ -74,6 +74,11 @@ Sqlite adapter lines are not kernel `src/`.
 | `CompleteClient` missing/wrong secret | 401 Unauthorized; does not complete | `test: client_without_secret_is_401` `test: client_wrong_secret_is_401` |
 | `CompleteClient` after drop handle | 409 Cancelled; does not revive | `test: client_after_drop_handle_is_409_does_not_revive` |
 | `CompleteClient` duplicate / oversized | 200 noop / 413; snapshot stays Waiting | `test: client_duplicate_complete_is_noop` `test: client_oversized_body_is_413_does_not_complete` |
+| `CompleteClient` wire protocol | `POST /complete` + `CompleteBody` + `X-Keel-Complete`; not query/Bearer | `test: client_wire_is_complete_body_and_secret_header` |
+| `CompleteClient` no redirect | 302 to `0.0.0.0` is Unexpected(302); trap is not hit | `test: client_does_not_follow_redirect_off_loopback` |
+| `CompleteClient` hung server | `Hung` at `COMPLETE_HANG_BOUND`; paused time, no wall sleep | `test: client_hung_server_is_hung_not_forever` |
+| `CompleteClient` drop mid-POST | drop server → Transport, token unused; drop inflight → still Waiting | `test: client_drop_server_mid_post_is_transport_token_untouched` `test: client_drop_inflight_does_not_complete` |
+| `Decision::Fail` via client | fail-fast Failed; maps onto Resume only | `test: client_decision_fail_fails_execution` |
 | HTTP missing/wrong secret | 401; does not complete | `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` `test: post_query_secret_is_still_401` |
 | HTTP oversized body | 413/400; snapshot stays Waiting | `test: post_oversized_body_is_413_does_not_complete` |
 | HTTP replay after success / cancel | 200 noop / 409 Cancelled | `test: post_duplicate_complete_is_200_noop` `test: post_after_cancel_is_409_does_not_revive` |

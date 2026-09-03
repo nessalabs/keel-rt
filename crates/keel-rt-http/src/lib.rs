@@ -7,7 +7,7 @@
 
 mod client;
 
-pub use client::{CompleteClient, CompleteClientError, Decision};
+pub use client::{CompleteClient, CompleteClientError, Decision, COMPLETE_HANG_BOUND};
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::AUTHORIZATION;

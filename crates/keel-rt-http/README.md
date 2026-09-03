@@ -12,7 +12,11 @@ Default bind is **`127.0.0.1`** (`DEFAULT_BIND` / `serve` / `serve_ephemeral`).
 (`MAX_COMPLETE_BODY`) is **413** and does not call `complete`.
 
 The other process uses [`CompleteClient`] — same JSON, no hand-rolled
-request. In-process complete stays `Runtime::complete`.
+request. The client sends `X-Keel-Complete` (not a query string), does
+not follow redirects, and fails [`CompleteClientError::Hung`] if the
+server is silent past [`COMPLETE_HANG_BOUND`] (5s, tokio time).
+In-process complete stays `Runtime::complete`. The client does not
+open sqlite or take a store lease.
 
 ```
 POST /complete

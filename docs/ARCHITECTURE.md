@@ -118,6 +118,7 @@ classDiagram
   class CompleteClient {
     +new(base_url, CompleteSecret)
     +without_secret(base_url)
+    +hang_bound(Duration)
     +complete(token, Resume)
   }
   class Decision {
