@@ -160,6 +160,8 @@ fn required_client_tests_exist() {
         "fn client_duplicate_complete_is_noop",
         "fn client_oversized_body_is_413_does_not_complete",
         "fn two_client_completes_one_token_downstream_runs_once",
+        "fn two_keel_clients_one_token_downstream_runs_once",
+        "fn client_complete_succeeds_against_bearer_only_server",
         "fn client_wire_is_complete_body_and_secret_header",
         "fn client_does_not_follow_redirect_off_loopback",
         "fn client_hung_server_is_hung_not_forever",

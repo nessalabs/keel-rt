@@ -4,7 +4,7 @@
 use crate::{CompleteBody, CompleteSecret, COMPLETE_SECRET_HEADER};
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::{Method, Request, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -59,7 +59,9 @@ pub enum KeelClientError {
 
 /// Out-of-process SDK client. This crate implements [`Self::complete`] only.
 ///
-/// Sends [`COMPLETE_SECRET_HEADER`] when constructed with a secret.
+/// Sends [`COMPLETE_SECRET_HEADER`] and `Authorization: Bearer` when
+/// constructed with a secret. A server that copies only one of those
+/// still accepts [`Self::complete`].
 /// Duplicate complete is Ok (server 200 noop). Does not revive Cancelled.
 /// Does not follow redirects (stays on the URL it was given).
 #[derive(Clone)]
@@ -118,7 +120,9 @@ impl KeelClient {
             .header(CONTENT_TYPE, "application/json")
             .header(CONTENT_LENGTH, json.len());
         if let Some(secret) = &self.secret {
-            builder = builder.header(COMPLETE_SECRET_HEADER, secret.as_str());
+            builder = builder
+                .header(COMPLETE_SECRET_HEADER, secret.as_str())
+                .header(AUTHORIZATION, format!("Bearer {}", secret.as_str()));
         }
         let req = builder
             .body(Full::new(Bytes::from(json)))

@@ -4,7 +4,8 @@
 
 [`keel-rt-http::KeelClient`] is the out-of-process SDK client;
 [`KeelClient::complete`] POSTs the same `CompleteBody` `{ token, resume }`
-the server already accepts (`X-Keel-Complete`). Optional
+the server already accepts (`X-Keel-Complete` and
+`Authorization: Bearer`). Optional
 [`Decision::{Complete(Bytes), Fail, Reinvoke}`] maps onto existing
 [`Resume`] (Succeeded / Failed / Reinvoke) — not a second token or
 state machine. Missing/wrong secret is still 401; cancelled token 409

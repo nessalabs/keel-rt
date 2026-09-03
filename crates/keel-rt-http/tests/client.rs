@@ -315,6 +315,67 @@ async fn two_client_completes_one_token_downstream_runs_once() {
     server.abort();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn two_keel_clients_one_token_downstream_runs_once() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let clock = Arc::new(FakeClock::new());
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(clock)
+            .register_fn("next", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"next")) }
+            })
+            .build(),
+    );
+    let (handle, token) = park_wait(&rt).await;
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let a = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let b = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let resume = Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate")));
+    let (ra, rb) = tokio::join!(
+        a.complete(
+            token.clone(),
+            Decision::Complete(Bytes::from_static(b"gate"))
+        ),
+        b.complete(token, resume)
+    );
+    assert!(ra.is_ok() || rb.is_ok(), "a={ra:?} b={rb:?}");
+    assert_eq!(
+        tokio::time::timeout(BOUND, handle.wait())
+            .await
+            .expect("wait"),
+        ExecutionState::Succeeded
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "no double downstream");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_complete_succeeds_against_bearer_only_server() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = s.read(&mut buf).await.unwrap();
+        let raw = String::from_utf8_lossy(&buf[..n]);
+        let lower = raw.to_ascii_lowercase();
+        let bearer_ok = lower.contains(&format!("authorization: bearer {SECRET}"));
+        write_http(&mut s, if bearer_ok { 200 } else { 401 }, "").await;
+        bearer_ok
+    });
+    client_at(addr)
+        .complete(dummy_token(), Resume::Reinvoke)
+        .await
+        .expect("KeelClient::complete must satisfy a Bearer-only server");
+    assert!(
+        server.await.unwrap(),
+        "request lacked Authorization: Bearer"
+    );
+}
+
 fn dummy_token() -> keel_rt::ResumeToken {
     keel_rt::ResumeToken::issue(
         keel_rt::ExecutionId::parse("exec-wire").unwrap(),
@@ -367,8 +428,10 @@ async fn client_wire_is_complete_body_and_secret_header() {
         "missing {COMPLETE_SECRET_HEADER}: {headers}"
     );
     assert!(
-        !headers.to_ascii_lowercase().contains("authorization:"),
-        "client sends X-Keel-Complete, not Bearer: {headers}"
+        headers
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {SECRET}")),
+        "missing Authorization: Bearer: {headers}"
     );
     assert!(
         !headers.contains('?') && !raw.contains(&format!("?{COMPLETE_SECRET_HEADER}")),
