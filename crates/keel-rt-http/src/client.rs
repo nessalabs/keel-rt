@@ -1,7 +1,10 @@
 //! Out-of-process inspect + complete. POSTs the same JSON [`CompleteBody`]
 //! the server already accepts. Not a second token type.
 
-use crate::{CompleteBody, CompleteSecret, InspectView, CLAIMED_ELSEWHERE, SECRET_HEADER};
+use crate::{
+    CompleteBody, CompleteSecret, InspectView, StartBody, StartView, CLAIMED_ELSEWHERE,
+    SECRET_HEADER,
+};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
@@ -14,7 +17,7 @@ use std::fmt;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Bound for one inspect or complete request. A hung server is
+/// Bound for one start, inspect, or complete request. A hung server is
 /// [`KeelClientError::Hung`], not a forever wait. Tokio time.
 pub const HANG_BOUND: Duration = Duration::from_secs(5);
 
@@ -36,8 +39,9 @@ impl From<Decision> for Resume {
     }
 }
 
-/// Errors from [`KeelClient::inspect`] and [`KeelClient::complete`].
-/// Status map matches the server. Display is verb-neutral for shared codes.
+/// Errors from [`KeelClient::start`], [`KeelClient::inspect`], and
+/// [`KeelClient::complete`]. Status map matches the server. Display is
+/// verb-neutral for shared codes.
 #[derive(Debug, Error)]
 pub enum KeelClientError {
     #[error("request rejected: missing or wrong secret")]
@@ -62,8 +66,8 @@ pub enum KeelClientError {
     Transport(String),
 }
 
-/// Out-of-process SDK client. This crate implements [`Self::inspect`] and
-/// [`Self::complete`]. No start / schedule HTTP.
+/// Out-of-process SDK client. This crate implements [`Self::start`],
+/// [`Self::inspect`], and [`Self::complete`]. No schedule HTTP.
 ///
 /// Sends [`SECRET_HEADER`] and `Authorization: Bearer` when constructed
 /// with a secret. Duplicate complete is Ok (server 200 noop).
@@ -134,6 +138,46 @@ impl KeelClient {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(e)) => Err(KeelClientError::Transport(e.to_string())),
             Err(_) => Err(KeelClientError::Hung),
+        }
+    }
+
+    /// `POST /start` — same secret and hang-bound as inspect / complete.
+    /// Returns the new [`ExecutionId`]. Each call is a new run.
+    pub async fn start(
+        &self,
+        definition: impl Into<StartBody>,
+    ) -> Result<ExecutionId, KeelClientError> {
+        let json = serde_json::to_vec(&definition.into())
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        let url = format!("{}/start", self.base)
+            .parse::<Uri>()
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        let resp = self
+            .send(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(url)
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(CONTENT_LENGTH, json.len()),
+                Bytes::from(json),
+            )
+            .await?;
+        match resp.status().as_u16() {
+            200 => {
+                let bytes = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
+                    .to_bytes();
+                let view: StartView = serde_json::from_slice(&bytes)
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+                Ok(view.execution_id)
+            }
+            401 => Err(KeelClientError::Unauthorized),
+            413 => Err(KeelClientError::PayloadTooLarge),
+            400 => Err(KeelClientError::BadRequest),
+            other => Err(KeelClientError::Unexpected(other)),
         }
     }
 

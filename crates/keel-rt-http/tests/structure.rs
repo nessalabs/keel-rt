@@ -192,11 +192,29 @@ fn public_surface_is_complete_resume_token() {
         "InspectView must not be an ExecutionHandle (no cancel / Drop-cancel)"
     );
     assert!(!client.contains("CompleteClient"));
-    assert!(!client.contains("pub async fn approve"));
-    assert!(!client.contains("pub async fn reject"));
-    assert!(!client.contains("pub async fn start"));
+    assert!(client.contains("pub async fn start"));
+    assert!(lib.contains("pub struct StartBody"));
+    assert!(lib.contains("pub struct StartView"));
+    assert!(lib.contains(".route(\"/start\""));
+    let start_fn = client
+        .split("pub async fn start(")
+        .nth(1)
+        .expect("start")
+        .split("    pub async fn ")
+        .next()
+        .expect("start body");
+    assert!(
+        start_fn.contains(".send(") && !start_fn.contains("CLAIMED_ELSEWHERE"),
+        "start must reuse send and must not invent a steal"
+    );
     assert!(!client.contains("pub async fn schedule"));
     assert!(!client.contains("pub async fn claim"));
+    assert!(
+        !client.contains("START_HANG_BOUND")
+            && !client.contains("START_SECRET_HEADER")
+            && !client.contains("start rejected"),
+        "start must not add verb-specific hang/secret/Display names"
+    );
 }
 
 #[test]
@@ -236,6 +254,18 @@ fn required_client_tests_exist() {
         "fn client_inspect_wire_sends_both_secret_headers",
         "fn client_inspect_succeeds_against_bearer_only_server",
         "fn client_inspect_401_error_text_does_not_say_complete",
+        "fn client_start_inspect_complete_unblocks_wait",
+        "fn client_start_then_inspect_is_waiting_not_cancelled",
+        "fn client_two_starts_are_distinct_ids",
+        "fn client_start_without_secret_is_401",
+        "fn client_start_wrong_secret_is_401",
+        "fn client_start_unregistered_is_400_nothing_runs",
+        "fn client_start_empty_definition_is_400",
+        "fn client_start_oversized_body_is_413",
+        "fn client_hung_start_is_hung_not_forever",
+        "fn client_start_does_not_follow_redirect_off_loopback",
+        "fn client_start_wire_sends_both_secret_headers",
+        "fn client_start_succeeds_against_bearer_only_server",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
     }
@@ -276,9 +306,13 @@ fn architecture_mermaid_names_keel_client() {
     for name in [
         "KeelClient",
         "POST /complete",
+        "POST /start",
         "GET /inspect",
         "Runtime::complete",
         "Runtime::inspect",
+        "Runtime::start",
+        "StartBody",
+        "StartView",
         "InspectView",
         "InspectNodeState",
         "Decision",

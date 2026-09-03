@@ -1,9 +1,12 @@
-//! Thin HTTP adapter. Another process POSTs a token + [`Resume`]; this
-//! process calls [`Runtime::complete`]. No forms, no identity.
+//! Thin HTTP adapter. Another process starts a run, inspects for a wait
+//! token, then POSTs that token + [`Resume`]. This process calls
+//! [`Runtime::start`] / [`Runtime::inspect`] / [`Runtime::complete`].
+//! No forms, no identity.
 //!
 //! A shared secret is required. Default bind is `127.0.0.1` only.
-//! [`KeelClient::inspect`] + [`KeelClient::complete`] is the out-of-process
-//! wait round-trip. Kernel `keel-rt` does not depend on this crate.
+//! [`KeelClient::start`] + [`KeelClient::inspect`] + [`KeelClient::complete`]
+//! is the out-of-process wait round-trip. Kernel `keel-rt` does not depend
+//! on this crate.
 
 mod client;
 
@@ -17,20 +20,21 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use keel_rt::{
-    CompleteError, ExecutionId, ExecutionSnapshot, ExecutionState, NodeId, NodeState, Resume,
-    ResumeToken, Runtime,
+    CompleteError, ExecutionHandle, ExecutionId, ExecutionSnapshot, ExecutionState, ExecutorId,
+    NodeId, NodeState, Resume, ResumeToken, Runtime, StartError, WorkflowDefinition, WorkflowId,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Default listen address: loopback, ephemeral port. Never `0.0.0.0`.
 pub const DEFAULT_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
-/// JSON larger than this is not accepted. Oversized body does not call `complete`.
-pub const MAX_COMPLETE_BODY: usize = 1024 * 1024;
+/// JSON larger than this is not accepted. Oversized body does not call start
+/// or complete.
+pub const MAX_BODY: usize = 1024 * 1024;
 
 /// `POST /complete` when another Runtime holds the execution
 /// (`CompleteError::ClaimedElsewhere`). **423 Locked**. Not 400 (malformed
@@ -38,10 +42,10 @@ pub const MAX_COMPLETE_BODY: usize = 1024 * 1024;
 pub const CLAIMED_ELSEWHERE: u16 = 423;
 
 /// Shared-secret header (alternative to `Authorization: Bearer …`).
-/// Same header on inspect and complete. Wire name is historical.
+/// Same header on start, inspect, and complete. Wire name is historical.
 pub const SECRET_HEADER: &str = "x-keel-complete";
 
-/// Shared secret for `POST /complete`. Not identity. Empty is rejected.
+/// Shared secret for the adapter. Not identity. Empty is rejected.
 #[derive(Clone)]
 pub struct CompleteSecret(Arc<str>);
 
@@ -76,6 +80,78 @@ impl fmt::Debug for CompleteSecret {
 pub struct CompleteBody {
     pub token: ResumeToken,
     pub resume: Resume,
+}
+
+/// Narrow start request. Not a [`WorkflowDefinition`] dump (no join /
+/// on_failure / hash). Server builds the kernel definition with defaults.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartBody {
+    pub workflow_id: WorkflowId,
+    pub nodes: Vec<StartNode>,
+    pub edges: Vec<StartEdge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartNode {
+    pub id: NodeId,
+    pub executor_id: ExecutorId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartEdge {
+    pub from: NodeId,
+    pub to: NodeId,
+}
+
+/// `POST /start` response. [`Runtime::start`] returns a handle; HTTP returns
+/// the new [`ExecutionId`] (the handle stays on the server so Drop does not
+/// cancel).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartView {
+    pub execution_id: ExecutionId,
+}
+
+impl From<&WorkflowDefinition> for StartBody {
+    fn from(def: &WorkflowDefinition) -> Self {
+        Self {
+            workflow_id: def.id().clone(),
+            nodes: def
+                .nodes()
+                .iter()
+                .map(|n| StartNode {
+                    id: n.id.clone(),
+                    executor_id: n.executor_id.clone(),
+                })
+                .collect(),
+            edges: def
+                .edges()
+                .iter()
+                .map(|e| StartEdge {
+                    from: e.from.clone(),
+                    to: e.to.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<WorkflowDefinition> for StartBody {
+    fn from(def: WorkflowDefinition) -> Self {
+        Self::from(&def)
+    }
+}
+
+impl StartBody {
+    fn into_definition(self) -> Result<WorkflowDefinition, keel_rt::DefinitionError> {
+        let mut b = WorkflowDefinition::builder(self.workflow_id);
+        for n in self.nodes {
+            b = b.node(n.id, n.executor_id);
+        }
+        for e in self.edges {
+            b = b.edge(e.from, e.to);
+        }
+        b.build()
+    }
 }
 
 /// Read-only view of an execution for `GET /inspect/:id`.
@@ -161,15 +237,23 @@ impl InspectView {
 struct App {
     runtime: Arc<Runtime>,
     secret: CompleteSecret,
+    /// [`Runtime::start`] returns a handle; Drop cancels. Hold them here.
+    started: Arc<Mutex<Vec<ExecutionHandle>>>,
 }
 
-/// Router a caller can nest or serve. Paths: `POST /complete`, `GET /inspect/:id`.
+/// Router a caller can nest or serve. Paths: `POST /start`, `GET /inspect/:id`,
+/// `POST /complete`.
 pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
     Router::new()
+        .route("/start", post(start_handler))
         .route("/complete", post(complete_handler))
         .route("/inspect/:id", get(inspect_handler))
-        .layer(DefaultBodyLimit::max(MAX_COMPLETE_BODY))
-        .with_state(App { runtime, secret })
+        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .with_state(App {
+            runtime,
+            secret,
+            started: Arc::new(Mutex::new(Vec::new())),
+        })
 }
 
 fn provided_secret(headers: &HeaderMap) -> Option<&[u8]> {
@@ -196,6 +280,31 @@ fn authorize(app: &App, headers: &HeaderMap) -> Result<(), StatusCode> {
     match provided_secret(headers) {
         Some(got) if secrets_equal(app.secret.as_str(), got) => Ok(()),
         _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+async fn start_handler(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<StartBody>,
+) -> axum::response::Response {
+    if authorize(&app, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let def = match body.into_definition() {
+        Ok(def) => def,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match app.runtime.start(def) {
+        Ok(handle) => {
+            let execution_id = handle.execution_id().clone();
+            app.started
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(handle);
+            Json(StartView { execution_id }).into_response()
+        }
+        Err(StartError::UnregisteredExecutors(_)) => StatusCode::BAD_REQUEST.into_response(),
     }
 }
 
@@ -269,6 +378,28 @@ pub async fn serve_ephemeral(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_body_is_narrow_not_snapshot() {
+        let def = WorkflowDefinition::builder("wf")
+            .node("hold", "wait")
+            .node("next", "next")
+            .edge("hold", "next")
+            .build()
+            .unwrap();
+        let body = StartBody::from(&def);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["workflow_id"], "wf");
+        assert!(json.get("on_failure").is_none());
+        assert!(json["nodes"][0].get("join").is_none());
+        assert!(json.get("nodes").unwrap().as_array().unwrap()[0]
+            .get("state")
+            .is_none());
+        assert!(json.get("resume_token").is_none());
+        let back = body.into_definition().unwrap();
+        assert_eq!(back.id(), def.id());
+        assert_eq!(back.nodes().len(), 2);
+    }
 
     #[test]
     fn body_round_trips() {

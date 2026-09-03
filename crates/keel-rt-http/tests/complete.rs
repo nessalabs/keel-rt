@@ -7,8 +7,7 @@ use keel_rt::{
     StateStore, WorkflowDefinition,
 };
 use keel_rt_http::{
-    serve_ephemeral, CompleteBody, CompleteSecret, CLAIMED_ELSEWHERE, MAX_COMPLETE_BODY,
-    SECRET_HEADER,
+    serve_ephemeral, CompleteBody, CompleteSecret, CLAIMED_ELSEWHERE, MAX_BODY, SECRET_HEADER,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -396,7 +395,7 @@ async fn post_oversized_body_is_413_does_not_complete() {
     );
     let (handle, _token) = park_wait(&rt).await;
     let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
-    let huge = vec![b'x'; MAX_COMPLETE_BODY + 1];
+    let huge = vec![b'x'; MAX_BODY + 1];
     let extra = format!("{SECRET_HEADER}: {SECRET}\r\n");
     let status = post_raw(addr, &extra, &huge).await;
     assert!(status == 413 || status == 400, "got {status}");

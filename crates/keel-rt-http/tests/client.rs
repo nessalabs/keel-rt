@@ -8,7 +8,7 @@ use keel_rt::{
 };
 use keel_rt_http::{
     serve_ephemeral, CompleteBody, CompleteSecret, Decision, InspectNodeState, KeelClient,
-    KeelClientError, CLAIMED_ELSEWHERE, HANG_BOUND, MAX_COMPLETE_BODY, SECRET_HEADER,
+    KeelClientError, StartBody, CLAIMED_ELSEWHERE, HANG_BOUND, MAX_BODY, SECRET_HEADER,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -1153,7 +1153,7 @@ async fn client_oversized_body_is_413_does_not_complete() {
     let rt = runtime_with_next();
     let (handle, token) = park_wait(&rt).await;
     let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
-    let huge = Bytes::from(vec![1u8; MAX_COMPLETE_BODY]);
+    let huge = Bytes::from(vec![1u8; MAX_BODY]);
     let err = client_at(addr)
         .complete(token, Resume::Complete(NodeOutcome::Succeeded(huge)))
         .await
@@ -1500,5 +1500,324 @@ async fn client_decision_fail_fails_execution() {
         tokio::time::timeout(BOUND, handle.wait()).await.unwrap(),
         ExecutionState::Failed
     );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_inspect_complete_unblocks_wait() {
+    let rt = runtime_echo_hold();
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = tokio::time::timeout(BOUND, client.start(wait_then_next()))
+        .await
+        .expect("start bound")
+        .expect("start");
+    let view = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if v.state == ExecutionState::Waiting
+                    && v.resume_token(&NodeId::new("hold")).is_some()
+                {
+                    return v;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("park via inspect");
+    assert_eq!(view.execution_id, id);
+    let token = view
+        .resume_token(&NodeId::new("hold"))
+        .cloned()
+        .expect("wait token");
+    client
+        .complete(
+            token,
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate"))),
+        )
+        .await
+        .expect("complete");
+    let done = tokio::time::timeout(BOUND, async {
+        loop {
+            let v = client.inspect(&id).await.expect("inspect done");
+            if v.state.is_terminal() {
+                return v;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal");
+    assert_eq!(done.state, ExecutionState::Succeeded);
+    let snap = rt.inspect(&id).await.expect("server snapshot");
+    assert_eq!(
+        snap.node(&NodeId::new("next"))
+            .and_then(|n| n.output.clone()),
+        Some(Bytes::from_static(b"gate"))
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_then_inspect_is_waiting_not_cancelled() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let view = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if v.state == ExecutionState::Waiting {
+                    return v;
+                }
+                assert_ne!(
+                    v.state,
+                    ExecutionState::Cancelled,
+                    "HTTP start must hold the handle; Drop-cancel is not start"
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("waiting");
+    assert!(view.resume_token(&NodeId::new("hold")).is_some());
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_two_starts_are_distinct_ids() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let a = client.start(wait_then_next()).await.expect("a");
+    let b = client.start(wait_then_next()).await.expect("b");
+    assert_ne!(a, b, "Runtime::start is a new execution each call");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_without_secret_is_401() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = KeelClient::without_secret(format!("http://{addr}"))
+        .unwrap()
+        .start(wait_then_next())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::Unauthorized), "{err:?}");
+    assert!(
+        !err.to_string().to_ascii_lowercase().contains("complete"),
+        "start 401 must reuse verb-neutral Display: {err}"
+    );
+    assert!(
+        !err.to_string().contains("start rejected"),
+        "do not add a start-only Display: {err}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_wrong_secret_is_401() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = KeelClient::new(
+        format!("http://{addr}"),
+        CompleteSecret::new("wrong-secret").unwrap(),
+    )
+    .unwrap()
+    .start(wait_then_next())
+    .await
+    .unwrap_err();
+    assert!(matches!(err, KeelClientError::Unauthorized), "{err:?}");
+    assert!(
+        !err.to_string().to_ascii_lowercase().contains("complete"),
+        "start 401 must reuse verb-neutral Display: {err}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_unregistered_is_400_nothing_runs() {
+    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let def = WorkflowDefinition::builder("wf")
+        .node("work", "missing-exec")
+        .build()
+        .unwrap();
+    let err = client_at(addr).start(def).await.unwrap_err();
+    assert!(matches!(err, KeelClientError::BadRequest), "{err:?}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_empty_definition_is_400() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = client_at(addr)
+        .start(StartBody {
+            workflow_id: keel_rt::WorkflowId::new("wf"),
+            nodes: vec![],
+            edges: vec![],
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::BadRequest), "{err:?}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_oversized_body_is_413() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let mut nodes = Vec::new();
+    let pad = "n".repeat(64);
+    while nodes.len() * 80 < MAX_BODY {
+        nodes.push(keel_rt_http::StartNode {
+            id: NodeId::new(format!("{pad}-{}", nodes.len())),
+            executor_id: keel_rt::ExecutorId::new("wait"),
+        });
+    }
+    let err = client_at(addr)
+        .start(StartBody {
+            workflow_id: keel_rt::WorkflowId::new("huge"),
+            nodes,
+            edges: vec![],
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::PayloadTooLarge), "{err:?}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn client_hung_start_is_hung_not_forever() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _hold = tokio::spawn(async move {
+        let (_s, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let mut fut = std::pin::pin!(client.start(wait_then_next()));
+    for _ in 0..64 {
+        tokio::select! {
+            biased;
+            r = fut.as_mut() => panic!("hung start finished before bound: {r:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+    tokio::time::advance(HANG_BOUND + Duration::from_millis(1)).await;
+    let err = fut.await.unwrap_err();
+    assert!(matches!(err, KeelClientError::Hung), "{err:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_does_not_follow_redirect_off_loopback() {
+    let trap = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let trap_addr = trap.local_addr().unwrap();
+    let hits = Arc::new(AtomicU32::new(0));
+    let c = hits.clone();
+    let trap_task = tokio::spawn(async move {
+        if let Ok((s, _)) = trap.accept().await {
+            c.fetch_add(1, Ordering::SeqCst);
+            drop(s);
+        }
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let _ = s.read(&mut buf).await;
+        write_http(
+            &mut s,
+            302,
+            &format!("Location: http://{trap_addr}/start\r\n"),
+        )
+        .await;
+    });
+    let err = client_at(addr).start(wait_then_next()).await.unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::Unexpected(302)),
+        "must not follow start redirect: {err:?}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "SSRF: followed to 0.0.0.0");
+    server.abort();
+    trap_task.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_wire_sends_both_secret_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = s.read(&mut buf).await.unwrap();
+        write_http(&mut s, 400, "").await;
+        buf.truncate(n);
+        buf
+    });
+    let err = client_at(addr).start(wait_then_next()).await.unwrap_err();
+    assert!(matches!(err, KeelClientError::BadRequest), "{err:?}");
+    let raw = String::from_utf8(server.await.unwrap()).unwrap();
+    let headers = raw.split("\r\n\r\n").next().expect("http");
+    assert!(
+        headers.starts_with("POST /start "),
+        "path/protocol: {headers}"
+    );
+    let secret_hdr = format!("{SECRET_HEADER}: {SECRET}");
+    assert!(
+        headers.to_ascii_lowercase().contains(&secret_hdr),
+        "missing {SECRET_HEADER}: {headers}"
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {SECRET}")),
+        "missing Authorization: Bearer: {headers}"
+    );
+    assert!(
+        !headers.contains('?') && !raw.contains(&format!("?{SECRET_HEADER}")),
+        "secret must not be a query string: {raw}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_succeeds_against_bearer_only_server() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let expected = ExecutionId::parse("exec-started").unwrap();
+    let reply = expected.clone();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = s.read(&mut buf).await.unwrap();
+        let raw = String::from_utf8_lossy(&buf[..n]);
+        let headers = raw.split("\r\n\r\n").next().unwrap();
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: bearer {SECRET}")),
+            "{headers}"
+        );
+        let body = serde_json::to_vec(&keel_rt_http::StartView {
+            execution_id: reply,
+        })
+        .unwrap();
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        s.write_all(head.as_bytes()).await.unwrap();
+        s.write_all(&body).await.unwrap();
+    });
+    let id = client_at(addr)
+        .start(wait_then_next())
+        .await
+        .expect("start");
+    assert_eq!(id, expected);
     server.abort();
 }
