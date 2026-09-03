@@ -2,10 +2,11 @@
 //! Same protocol as `complete.rs`. No wall sleep.
 
 use bytes::Bytes;
+use keel_rt::testing::NoRefreshHeartbeat;
 use keel_rt::{
     ExecutionContext, ExecutionId, ExecutionState, FakeClock, Join, MemoryStore, NodeId,
     NodeOutcome, NodeState, OnFailure, Resume, ResumeToken, Runtime, StateStore,
-    WorkflowDefinition,
+    WorkflowDefinition, DEFAULT_LEASE_TTL,
 };
 use keel_rt_http::{
     serve_ephemeral, CompleteBody, CompleteSecret, Decision, InspectNodeState, KeelClient,
@@ -3647,5 +3648,64 @@ async fn client_cancel_with_body_is_413_does_not_cancel() {
         "body dump must not cancel"
     );
     handle.cancel().await;
+    server.abort();
+}
+
+/// HTTP cancel after TTL steal must re-claim. A's live_tx must not inject.
+#[tokio::test(flavor = "current_thread")]
+async fn client_live_cancel_after_ttl_steal_is_claimed_elsewhere() {
+    let store = NoRefreshHeartbeat {
+        inner: MemoryStore::new(),
+    };
+    let clock = Arc::new(FakeClock::new());
+    let rt_a = Arc::new(
+        Runtime::builder()
+            .clock(clock.clone())
+            .store(store.clone())
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt_a.clone(), secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Waiting {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("park");
+    clock.advance(DEFAULT_LEASE_TTL);
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let rt_b = Runtime::builder().store(store.clone()).clock(clock).build();
+    let hb = rt_b
+        .resume(&id)
+        .await
+        .expect("B claims after TTL while A HTTP handle is still live");
+    let err = client.cancel(&id).await.unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::ClaimedElsewhere),
+        "KeelClient cancel after steal must not inject: {err:?}"
+    );
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Waiting
+    );
+    assert_eq!(
+        client.inspect(&id).await.expect("still").state,
+        ExecutionState::Waiting
+    );
+    drop(hb);
     server.abort();
 }

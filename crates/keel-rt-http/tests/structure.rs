@@ -382,6 +382,7 @@ fn required_client_tests_exist() {
         "fn client_http_cancel_reaps_handle_server_drop_is_noop",
         "fn client_cancel_in_process_waiting_without_http_hold",
         "fn client_cancel_with_body_is_413_does_not_cancel",
+        "fn client_live_cancel_after_ttl_steal_is_claimed_elsewhere",
     ] {
         assert!(tests.contains(name), "client.rs missing {name}");
     }

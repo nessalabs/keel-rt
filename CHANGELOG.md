@@ -9,9 +9,11 @@ Display. The server calls [`Runtime::cancel`] — the same inbox
 [`Event::Cancel`] / [`ApplyCmd::Cancel`] as [`ExecutionHandle::cancel`] /
 Drop. Live cancel **waits persist-then-emit** (`inject_cancel`); persist
 Err is not Ok (`live_cancel_persist_err_is_not_ok`) — the PR #7 live
-complete hole. Stolen lease is **423 Locked**
-[`KeelClientError::ClaimedElsewhere`]
-(`live_cancel_after_ttl_steal_is_claimed_elsewhere`). Unknown id is
+complete hole. Live inspect after persist Err is still Waiting
+(`live_cancel_persist_err_inspect_is_waiting`) — store is resume truth.
+Stolen lease is **423 Locked** [`KeelClientError::ClaimedElsewhere`]
+(`live_cancel_after_ttl_steal_is_claimed_elsewhere`,
+`client_live_cancel_after_ttl_steal_is_claimed_elsewhere`). Unknown id is
 **404**. Already-terminal (Succeeded after approve) is **200 noop**
 (cite `cancel_already_terminal_is_noop`; does not rewrite to Cancelled).
 Duplicate cancel of Cancelled is the same noop. A cancel **body** is

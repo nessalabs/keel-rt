@@ -115,12 +115,13 @@ Sqlite adapter lines are not kernel `src/`.
 | `ResumeToken` nonce | 128-bit mix; not sequential ints; not guessable from id | `test: resume_tokens_are_not_sequential_ints` `test: guessed_sequential_nonces_do_not_complete` |
 | Token binds execution | A's token does not complete B | `test: complete_token_from_a_does_not_apply_to_b` |
 | persist Err on complete | snapshot stays Waiting; retry works; complete Ok only after persist Ok | `test: complete_store_persist_err_is_store` `test: live_complete_persist_err_is_not_ok` |
+| persist Err on cancel | store stays Waiting; live inspect is Waiting (not in-memory Cancelled); retry works | `test: live_cancel_persist_err_is_not_ok` `test: live_cancel_persist_err_inspect_is_waiting` `test: handle_cancel_persist_err_inspect_is_waiting` `test: runtime_cancel_store_persist_err_is_store` |
 | Wait is not Ready{T} | clock advance does not auto-complete | `test: wait_is_waiting_not_ready_t_and_clock_does_not_complete` |
 | complete vs fail-fast cancel | Cancelled; does not revive | `test: complete_while_fail_fast_already_cancelled_wait` |
 | 256 concurrent waits then complete | hang bound still cancels | `test: complete_256_wait_nodes_then_hang_bound_cancels` |
 | Two Runtimes one file both complete | A owns; B `ClaimedElsewhere`; drop A (or TTL) then B Ok | `test: two_runtimes_same_file_both_may_complete` |
 | Live `complete` after TTL steal | A still has a handle; B claimed; A `complete` is `ClaimedElsewhere` (no inject, no downstream) | `test: live_complete_after_ttl_steal_is_claimed_elsewhere` |
-| Live `cancel` after TTL steal | A still has live_tx; B claimed; A `cancel` is `ClaimedElsewhere` (no inject) | `test: live_cancel_after_ttl_steal_is_claimed_elsewhere` |
+| Live `cancel` after TTL steal | A still has live_tx; B claimed; A `cancel` is `ClaimedElsewhere` (no inject) | `test: live_cancel_after_ttl_steal_is_claimed_elsewhere` `test: client_live_cancel_after_ttl_steal_is_claimed_elsewhere` |
 | Handle `resume` after TTL steal | A’s `ExecutionHandle::resume` is ClaimedElsewhere-equivalent; no inject, no downstream | `test: handle_resume_after_ttl_steal_is_claimed_elsewhere` |
 | Crash after Running persist | file reopens (no leaked lock); Running re-invoked | `test: crash_after_running_persist_releases_lock_and_reinvokes` `test: crash_during_b_running_reinvokes_b_not_a` |
 | Drop handle after Running persist | **graph** cancel; resume stays Cancelled (not crash) | `test: drop_handle_after_running_persist_cancels_not_reinvoke` |

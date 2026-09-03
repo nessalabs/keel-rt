@@ -4,13 +4,15 @@
 //! `cargo test --test resume -- --test-threads=1`
 
 use bytes::Bytes;
-use keel_rt::testing::{disable, enable, FailingStore, FakeClock, ScriptedExecutor, WorkflowTest};
+use keel_rt::testing::{
+    disable, enable, FailingStore, FakeClock, NoRefreshHeartbeat, ScriptedExecutor, WorkflowTest,
+};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, CancelError, ClaimError, CompleteError, Event, Execution,
-    ExecutionContext, ExecutionId, ExecutionState, FnSink, Join, LeaseEpoch, MemoryStore, NodeId,
-    NodeOutcome, NodeState, OnFailure, OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime,
-    SnapshotError, StateStore, StoreError, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
-    DEFAULT_LEASE_TTL, SCHEMA_VERSION,
+    AcceptPolicy, ApplyCmd, CancelError, CompleteError, Event, Execution, ExecutionContext,
+    ExecutionId, ExecutionState, FnSink, Join, MemoryStore, NodeId, NodeOutcome, NodeState,
+    OnFailure, Recover, Resume, ResumeError, RetryPolicy, Runtime, SnapshotError, StateStore,
+    StoreError, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND, DEFAULT_LEASE_TTL,
+    SCHEMA_VERSION,
 };
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,67 +102,6 @@ async fn shared_memory_store_second_runtime_resume_is_claimed_elsewhere() {
     }
     handle.cancel().await;
     within(handle.wait()).await;
-}
-
-/// Heartbeat succeeds but does not extend the lease, so TTL steal can
-/// happen while A's drive (and live_tx) is still running.
-#[derive(Clone)]
-struct NoRefreshHeartbeat {
-    inner: MemoryStore,
-}
-
-#[async_trait::async_trait]
-impl StateStore for NoRefreshHeartbeat {
-    async fn put(&self, snapshot: &keel_rt::ExecutionSnapshot) -> Result<(), StoreError> {
-        self.inner.put(snapshot).await
-    }
-    async fn get(
-        &self,
-        id: &ExecutionId,
-    ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
-        self.inner.get(id).await
-    }
-    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
-        self.inner.persist(exec).await
-    }
-    async fn persist_with_events(
-        &self,
-        exec: &Execution,
-        events: &[Event],
-    ) -> Result<(), StoreError> {
-        self.inner.persist_with_events(exec, events).await
-    }
-    async fn workflow_definition(
-        &self,
-        id: &ExecutionId,
-    ) -> Result<Option<WorkflowDefinition>, StoreError> {
-        self.inner.workflow_definition(id).await
-    }
-    async fn claim(
-        &self,
-        id: &ExecutionId,
-        owner: &OwnerId,
-        now: Timestamp,
-    ) -> Result<LeaseEpoch, ClaimError> {
-        self.inner.claim(id, owner, now).await
-    }
-    async fn heartbeat(
-        &self,
-        _id: &ExecutionId,
-        _epoch: LeaseEpoch,
-        _now: Timestamp,
-    ) -> Result<(), ClaimError> {
-        Ok(())
-    }
-    async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
-        self.inner.release(id, epoch).await
-    }
-    fn release_now(&self, id: &ExecutionId, epoch: LeaseEpoch) {
-        self.inner.release_now(id, epoch);
-    }
-    fn release_owner_now(&self, owner: &OwnerId) {
-        self.inner.release_owner_now(owner);
-    }
 }
 
 /// After TTL steal, A's live_tx must not inject Complete while B owns.
@@ -2302,8 +2243,113 @@ async fn live_cancel_persist_err_is_not_ok() {
         ExecutionState::Waiting,
         "persist Err must not announce Cancelled"
     );
+    assert_eq!(
+        handle.inspect().await.state,
+        ExecutionState::Waiting,
+        "live handle inspect must not report Cancelled before persist Ok"
+    );
+    assert_eq!(
+        rt.inspect(&id).await.map(|s| s.state),
+        Some(ExecutionState::Waiting),
+        "Runtime::inspect live must match store, not in-memory Cancelled"
+    );
     disable("store.put");
     rt.cancel(&id).await.expect("retry after persist Ok");
+    within(async {
+        loop {
+            if handle.inspect().await.state == ExecutionState::Cancelled {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+
+/// Persist Err must not leave live inspect Cancelled while the store is Waiting.
+#[tokio::test(flavor = "current_thread")]
+async fn live_cancel_persist_err_inspect_is_waiting() {
+    let store = Arc::new(FailingStore::fail_on_nth_put(0));
+    let rt = Runtime::builder()
+        .store_arc(store.clone() as Arc<dyn StateStore>)
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    within(handle.wait_stable()).await;
+    enable("store.put", 1);
+    match rt.cancel(&id).await {
+        Err(CancelError::Apply(_)) | Err(CancelError::Store(_)) => {}
+        other => panic!("cancel Ok only after persist Ok, got {other:?}"),
+    }
+    let store_snap = store.get(&id).await.unwrap().unwrap();
+    assert_eq!(store_snap.state, ExecutionState::Waiting);
+    assert!(matches!(
+        store_snap.node(&NodeId::new("hold")).unwrap().state,
+        NodeState::Waiting { .. }
+    ));
+    let live = handle.inspect().await;
+    assert_eq!(
+        live.state,
+        ExecutionState::Waiting,
+        "live inspect must not report Cancelled when persist Err"
+    );
+    assert!(matches!(
+        live.node(&NodeId::new("hold")).unwrap().state,
+        NodeState::Waiting { .. }
+    ));
+    assert_eq!(
+        rt.inspect(&id).await.map(|s| s.state),
+        Some(ExecutionState::Waiting)
+    );
+    disable("store.put");
+    handle.cancel().await;
+    within(handle.wait()).await;
+}
+
+/// Handle cancel is the same ApplyCmd. Persist Err must not Cancelled-inspect.
+#[tokio::test(flavor = "current_thread")]
+async fn handle_cancel_persist_err_inspect_is_waiting() {
+    let store = Arc::new(FailingStore::fail_on_nth_put(0));
+    let rt = Runtime::builder()
+        .store_arc(store.clone() as Arc<dyn StateStore>)
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    within(handle.wait_stable()).await;
+    enable("store.put", 1);
+    handle.cancel().await;
+    within(async {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            assert_ne!(
+                handle.inspect().await.state,
+                ExecutionState::Cancelled,
+                "handle cancel persist Err must not inspect Cancelled"
+            );
+        }
+    })
+    .await;
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Waiting
+    );
+    assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
+    disable("store.put");
+    handle.cancel().await;
     within(async {
         loop {
             if handle.inspect().await.state == ExecutionState::Cancelled {

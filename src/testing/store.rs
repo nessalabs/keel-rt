@@ -119,6 +119,64 @@ impl StateStore for FailingStore {
     }
 }
 
+/// Heartbeat succeeds but does not extend the lease, so TTL steal can
+/// happen while a drive (and `live_tx`) is still running.
+#[derive(Clone)]
+pub struct NoRefreshHeartbeat {
+    pub inner: MemoryStore,
+}
+
+#[async_trait]
+impl StateStore for NoRefreshHeartbeat {
+    async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+        self.inner.put(snapshot).await
+    }
+    async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
+        self.inner.get(id).await
+    }
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.inner.persist(exec).await
+    }
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[crate::domain::events::Event],
+    ) -> Result<(), StoreError> {
+        self.inner.persist_with_events(exec, events).await
+    }
+    async fn workflow_definition(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<WorkflowDefinition>, StoreError> {
+        self.inner.workflow_definition(id).await
+    }
+    async fn claim(
+        &self,
+        id: &ExecutionId,
+        owner: &OwnerId,
+        now: crate::domain::time::Timestamp,
+    ) -> Result<LeaseEpoch, ClaimError> {
+        self.inner.claim(id, owner, now).await
+    }
+    async fn heartbeat(
+        &self,
+        _id: &ExecutionId,
+        _epoch: LeaseEpoch,
+        _now: crate::domain::time::Timestamp,
+    ) -> Result<(), ClaimError> {
+        Ok(())
+    }
+    async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
+        self.inner.release(id, epoch).await
+    }
+    fn release_now(&self, id: &ExecutionId, epoch: LeaseEpoch) {
+        self.inner.release_now(id, epoch);
+    }
+    fn release_owner_now(&self, owner: &OwnerId) {
+        self.inner.release_owner_now(owner);
+    }
+}
+
 /// Records every persist in order. Optional get sequence for scripted reads.
 #[derive(Clone, Default)]
 pub struct SequenceStore {
