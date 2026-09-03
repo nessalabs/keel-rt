@@ -3883,7 +3883,8 @@ async fn client_live_cancel_after_ttl_steal_is_claimed_elsewhere() {
 /// is 1 MiB. Complete must send the same compact field as approve / inspect.
 #[tokio::test(flavor = "current_thread")]
 async fn client_complete_400kib_is_200_not_json_array_413() {
-    let rt = runtime_echo_hold();
+    // Small downstream: two 400 KiB echo outputs would exceed inspect MAX_BODY.
+    let rt = runtime_with_next();
     let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
     let client = client_at(addr);
     let id = client.start(wait_then_next()).await.expect("start");
@@ -3935,13 +3936,13 @@ async fn client_complete_400kib_is_200_not_json_array_413() {
     .expect("done");
     assert_eq!(
         done.node(&NodeId::new("hold")).map(|n| &n.state),
-        Some(&InspectNodeState::Succeeded {
-            output: payload.clone(),
-        })
+        Some(&InspectNodeState::Succeeded { output: payload })
     );
     assert_eq!(
         done.node(&NodeId::new("next")).map(|n| &n.state),
-        Some(&InspectNodeState::Succeeded { output: payload })
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"next"),
+        })
     );
     server.abort();
 }
@@ -4000,7 +4001,8 @@ async fn client_inspect_over_max_body_is_413() {
 /// is 1 MiB. Approve must send one base64 field and succeed.
 #[tokio::test(flavor = "current_thread")]
 async fn client_approve_400kib_is_200_not_json_array_413() {
-    let rt = runtime_echo_hold();
+    // Small downstream: two 400 KiB echo outputs would exceed inspect MAX_BODY.
+    let rt = runtime_with_next();
     let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
     let client = client_at(addr);
     let id = client.start(wait_then_next()).await.expect("start");
@@ -4034,13 +4036,13 @@ async fn client_approve_400kib_is_200_not_json_array_413() {
     .expect("done");
     assert_eq!(
         done.node(&NodeId::new("hold")).map(|n| &n.state),
-        Some(&InspectNodeState::Succeeded {
-            output: payload.clone(),
-        })
+        Some(&InspectNodeState::Succeeded { output: payload })
     );
     assert_eq!(
         done.node(&NodeId::new("next")).map(|n| &n.state),
-        Some(&InspectNodeState::Succeeded { output: payload })
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"next"),
+        })
     );
     server.abort();
 }
