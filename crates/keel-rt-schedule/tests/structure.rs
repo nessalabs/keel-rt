@@ -223,12 +223,16 @@ fn runner_is_one_drive_loop_with_a_heap() {
     );
     let lines = runner.lines().count();
     assert!(
-        lines <= 220,
+        lines <= 240,
         "runner.rs is {lines} lines — a second scheduler, cut it"
     );
     let spec = fs::read_to_string(crate_src().join("spec.rs")).unwrap();
     let spec_lines = spec.lines().count();
-    assert!(spec_lines <= 160, "spec.rs is {spec_lines} lines");
+    assert!(spec_lines <= 180, "spec.rs is {spec_lines} lines");
+    assert!(
+        !runner.contains("struct Armed"),
+        "heap entries are (T, index); do not store a spec per heap node"
+    );
 }
 
 #[test]

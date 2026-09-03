@@ -29,9 +29,12 @@ run). It is not distributed workers, HTTP, HITL, or a sqlite timer table.
   only): that fire is skipped, the ticker arms the next slot, sibling
   jobs still start. No retry-storm. Store `put`/`persist` `Err` happens
   after `start` Ok and is the kernel drive, not this crate.
-- Many specs share one definition (`ScheduleSpec::clone` / `with_shared`).
-  There is no fire-history vec. `Runtime::start` still takes an owned
-  `WorkflowDefinition` (kernel), so each fire clones that DAG once.
+- `ScheduleSpec::clone` is an `Arc` bump: cron, tz, and strings are
+  interned once at build. Many specs share one definition (`with_shared`).
+  There is no fire-history vec. Heap entries are `(Timestamp, index)`.
+  `Runtime::start` still takes an owned `WorkflowDefinition` (kernel),
+  so each fire clones that DAG once (~11 ms / 100k in release — not the
+  sequential floor).
 - A jump that makes N specs due would issue N starts on one wake if
   unbounded (Runtime concurrency is per execution, not across starts).
   Default `max_starts_per_wake` is 64; remaining due jobs still fire

@@ -11,14 +11,20 @@ use thiserror::Error;
 /// One reusable definition on a 5-field cron in an IANA timezone.
 /// The definition is not scheduled on [`WorkflowDefinition`].
 ///
-/// Many specs may share one definition via [`Clone`] (`Arc` inside).
+/// [`Clone`] is an `Arc` bump: cron, tz, and strings are interned once at
+/// build (not copied per armed spec or per tick).
 #[derive(Clone, Debug)]
 pub struct ScheduleSpec {
+    inner: Arc<SpecInner>,
+}
+
+#[derive(Debug)]
+struct SpecInner {
     cron: Cron,
     tz: Tz,
     definition: Arc<WorkflowDefinition>,
-    expr: String,
-    tz_name: String,
+    expr: Arc<str>,
+    tz_name: Arc<str>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -47,36 +53,39 @@ impl ScheduleSpec {
         tz: impl Into<String>,
         definition: Arc<WorkflowDefinition>,
     ) -> Result<Self, SpecError> {
-        let expr = cron.into();
-        let tz_name = tz.into();
+        let expr: Arc<str> = cron.into().into();
+        let tz_name: Arc<str> = tz.into().into();
         let found = expr.split_whitespace().count();
         if found != 5 {
             return Err(SpecError::CronFields { found });
         }
-        let parsed = Cron::new(&expr)
+        let parsed = Cron::new(expr.as_ref())
             .with_seconds_optional()
             .parse()
             .map_err(|e| SpecError::Cron(e.to_string()))?;
-        let tz = Tz::from_str(&tz_name).map_err(|_| SpecError::Timezone(tz_name.clone()))?;
+        let tz =
+            Tz::from_str(tz_name.as_ref()).map_err(|_| SpecError::Timezone(tz_name.to_string()))?;
         Ok(Self {
-            cron: parsed,
-            tz,
-            definition,
-            expr,
-            tz_name,
+            inner: Arc::new(SpecInner {
+                cron: parsed,
+                tz,
+                definition,
+                expr,
+                tz_name,
+            }),
         })
     }
 
     pub fn cron_expr(&self) -> &str {
-        &self.expr
+        &self.inner.expr
     }
 
     pub fn timezone(&self) -> &str {
-        &self.tz_name
+        &self.inner.tz_name
     }
 
     pub fn definition(&self) -> &WorkflowDefinition {
-        &self.definition
+        &self.inner.definition
     }
 
     /// Next fire strictly after `now`. None if the expression never fires again
@@ -94,8 +103,8 @@ impl ScheduleSpec {
     ///   not both copies of the same local minute.
     pub fn next_after(&self, now: Timestamp) -> Option<Timestamp> {
         let utc = DateTime::<Utc>::from_timestamp_millis(i64::try_from(now.as_millis()).ok()?)?;
-        let local = utc.with_timezone(&self.tz);
-        let next = self.cron.find_next_occurrence(&local, false).ok()?;
+        let local = utc.with_timezone(&self.inner.tz);
+        let next = self.inner.cron.find_next_occurrence(&local, false).ok()?;
         let ms = next.with_timezone(&Utc).timestamp_millis();
         if ms < 0 {
             return None;

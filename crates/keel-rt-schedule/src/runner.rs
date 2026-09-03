@@ -103,11 +103,6 @@ impl Drop for RunningSchedule {
     }
 }
 
-struct Armed {
-    spec: ScheduleSpec,
-    next: Timestamp,
-}
-
 async fn drive(
     runtime: Arc<Runtime>,
     clock: Arc<dyn Clock>,
@@ -115,23 +110,24 @@ async fn drive(
     max_starts_per_wake: usize,
 ) {
     let now = clock.now();
-    let mut armed: Vec<Armed> = jobs
-        .into_iter()
-        .filter_map(|spec| {
-            let next = spec.next_after(now)?;
-            Some(Armed { spec, next })
-        })
-        .collect();
-    let mut heap: BinaryHeap<Reverse<(Timestamp, usize)>> = BinaryHeap::with_capacity(armed.len());
-    for (i, job) in armed.iter().enumerate() {
-        heap.push(Reverse((job.next, i)));
+    let mut specs: Vec<ScheduleSpec> = Vec::new();
+    let mut nexts: Vec<Timestamp> = Vec::new();
+    for spec in jobs {
+        if let Some(next) = spec.next_after(now) {
+            specs.push(spec);
+            nexts.push(next);
+        }
+    }
+    let mut heap: BinaryHeap<Reverse<(Timestamp, usize)>> = BinaryHeap::with_capacity(specs.len());
+    for (i, &t) in nexts.iter().enumerate() {
+        heap.push(Reverse((t, i)));
     }
     loop {
         let when = loop {
             let Some(Reverse((t, i))) = heap.peek().copied() else {
                 return;
             };
-            if armed[i].next != t {
+            if nexts[i] != t {
                 heap.pop();
                 continue;
             }
@@ -147,7 +143,7 @@ async fn drive(
             let Some(Reverse((t, i))) = heap.peek().copied() else {
                 break;
             };
-            if armed[i].next != t {
+            if nexts[i] != t {
                 heap.pop();
                 continue;
             }
@@ -156,7 +152,9 @@ async fn drive(
             }
             heap.pop();
             // Catch-up=1: one start, then next from now (not each missed slot).
-            match runtime.start(armed[i].spec.definition().clone()) {
+            // Drop handle cancels (kernel). wait() consumes so the fire
+            // lives; a detached task-per-start is not a second engine.
+            match runtime.start(specs[i].definition().clone()) {
                 Ok(handle) => {
                     tokio::spawn(async move {
                         handle.wait().await;
@@ -164,8 +162,8 @@ async fn drive(
                 }
                 Err(_) => {}
             }
-            let next = armed[i].spec.next_after(now).unwrap_or(Timestamp::MAX);
-            armed[i].next = next;
+            let next = specs[i].next_after(now).unwrap_or(Timestamp::MAX);
+            nexts[i] = next;
             if next != Timestamp::MAX {
                 heap.push(Reverse((next, i)));
             }
