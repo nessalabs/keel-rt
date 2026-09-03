@@ -80,6 +80,7 @@ Sqlite adapter lines are not kernel `src/`.
 | complete vs fail-fast cancel | Cancelled; does not revive | `test: complete_while_fail_fast_already_cancelled_wait` |
 | 256 concurrent waits then complete | hang bound still cancels | `test: complete_256_wait_nodes_then_hang_bound_cancels` |
 | Two Runtimes one file both complete | A owns; B `ClaimedElsewhere`; drop A (or TTL) then B Ok | `test: two_runtimes_same_file_both_may_complete` |
+| Live `complete` after TTL steal | A still has a handle; B claimed; A `complete` is `ClaimedElsewhere` (no inject, no downstream) | `test: live_complete_after_ttl_steal_is_claimed_elsewhere` |
 | Crash after Running persist | file reopens (no leaked lock); Running re-invoked | `test: crash_after_running_persist_releases_lock_and_reinvokes` `test: crash_during_b_running_reinvokes_b_not_a` |
 | Drop handle after Running persist | **graph** cancel; resume stays Cancelled (not crash) | `test: drop_handle_after_running_persist_cancels_not_reinvoke` |
 | Fat `Bytes` snapshot | MemoryStore refcount; sqlite JSON copy preserves bytes | `test: fat_bytes_resume_join_is_refcount` `test: fat_bytes_sqlite_round_trip_preserves_bytes` `test: fat_payloads_64kib_times_eight_persist_resume` `test: fat_payloads_64kib_times_32_persist_resume_within_bound` `test: fat_bytes_join_input_is_refcount_not_copy` |

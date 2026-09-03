@@ -210,6 +210,8 @@ async fn drive(
     clock: Arc<dyn Clock>,
     cancel_bound: Duration,
     tx: EventTx,
+    active: Arc<Mutex<ActiveSet>>,
+    execution_id: ExecutionId,
 ) {
     let mut cancel_bound_guard = CancelBoundGuard::new();
     loop {
@@ -219,7 +221,16 @@ async fn drive(
         if matches!(event, Event::Cancel) {
             cancel_bound_guard.arm(tx.clone(), cancel_bound);
         }
+        // Start/Heartbeat returning true is a lost claim — drop live_tx so
+        // a later complete goes through the store/claim path, not inject.
+        let drop_live = matches!(event, Event::Start | Event::Heartbeat);
         if scheduler.handle_event(event).await {
+            if drop_live {
+                active
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&execution_id);
+            }
             break;
         }
     }
@@ -285,6 +296,8 @@ impl Runtime {
             self.clock.clone(),
             self.cancel_bound,
             tx.clone(),
+            self.active.clone(),
+            execution_id.clone(),
         ));
         Ok(ExecutionHandle {
             execution_id,
@@ -398,6 +411,8 @@ impl Runtime {
             self.clock.clone(),
             self.cancel_bound,
             tx.clone(),
+            self.active.clone(),
+            execution_id.clone(),
         ));
         Ok(ExecutionHandle {
             execution_id: execution_id.clone(),
@@ -428,13 +443,33 @@ impl Runtime {
     }
 
     /// Complete or reinvoke a Waiting node. Live drive: inject (no second
-    /// scheduler). Otherwise load the snapshot, apply, persist, then drive.
+    /// scheduler) only if this process still holds the lease. A stolen
+    /// lease is [`CompleteError::ClaimedElsewhere`] — do not inject.
+    /// Otherwise load the snapshot, apply, persist, then drive.
     /// Does not revive [`ExecutionState::Cancelled`].
     pub async fn complete(&self, token: ResumeToken, resume: Resume) -> Result<(), CompleteError> {
-        if let Some(tx) = self.live_tx(token.execution_id()) {
-            return self.map_complete_apply(inject::inject_resume(&tx, token, resume).await);
+        let id = token.execution_id();
+        if let Some(tx) = self.live_tx(id) {
+            match self.store.claim(id, &self.owner, self.clock.now()).await {
+                Ok(_) => {
+                    return self
+                        .map_complete_apply(inject::inject_resume(&tx, token, resume).await);
+                }
+                Err(ClaimError::ClaimedElsewhere) => {
+                    self.forget_live(id);
+                    return Err(CompleteError::ClaimedElsewhere);
+                }
+                Err(ClaimError::Store(s)) => return Err(CompleteError::Store(s)),
+            }
         }
         self.complete_from_store(token, resume).await
+    }
+
+    fn forget_live(&self, id: &ExecutionId) {
+        self.active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(id);
     }
 
     fn map_complete_apply(&self, r: Result<(), ApplyError>) -> Result<(), CompleteError> {

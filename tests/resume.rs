@@ -6,10 +6,11 @@
 use bytes::Bytes;
 use keel_rt::testing::{disable, enable, FailingStore, FakeClock, ScriptedExecutor, WorkflowTest};
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
-    ExecutionState, FnSink, Join, MemoryStore, NodeId, NodeOutcome, NodeState, OnFailure, Recover,
-    Resume, ResumeError, RetryPolicy, Runtime, SnapshotError, StateStore, StoreError, Timestamp,
-    WorkflowDefinition, DEFAULT_CANCEL_BOUND, SCHEMA_VERSION,
+    AcceptPolicy, ApplyCmd, ClaimError, CompleteError, Event, Execution, ExecutionContext,
+    ExecutionId, ExecutionState, FnSink, Join, LeaseEpoch, MemoryStore, NodeId, NodeOutcome,
+    NodeState, OnFailure, OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime,
+    SnapshotError, StateStore, StoreError, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
+    DEFAULT_LEASE_TTL, SCHEMA_VERSION,
 };
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,6 +100,150 @@ async fn shared_memory_store_second_runtime_resume_is_claimed_elsewhere() {
     }
     handle.cancel().await;
     within(handle.wait()).await;
+}
+
+/// Heartbeat succeeds but does not extend the lease, so TTL steal can
+/// happen while A's drive (and live_tx) is still running.
+#[derive(Clone)]
+struct NoRefreshHeartbeat {
+    inner: MemoryStore,
+}
+
+#[async_trait::async_trait]
+impl StateStore for NoRefreshHeartbeat {
+    async fn put(&self, snapshot: &keel_rt::ExecutionSnapshot) -> Result<(), StoreError> {
+        self.inner.put(snapshot).await
+    }
+    async fn get(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<keel_rt::ExecutionSnapshot>, StoreError> {
+        self.inner.get(id).await
+    }
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.inner.persist(exec).await
+    }
+    async fn persist_with_events(
+        &self,
+        exec: &Execution,
+        events: &[Event],
+    ) -> Result<(), StoreError> {
+        self.inner.persist_with_events(exec, events).await
+    }
+    async fn workflow_definition(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<WorkflowDefinition>, StoreError> {
+        self.inner.workflow_definition(id).await
+    }
+    async fn claim(
+        &self,
+        id: &ExecutionId,
+        owner: &OwnerId,
+        now: Timestamp,
+    ) -> Result<LeaseEpoch, ClaimError> {
+        self.inner.claim(id, owner, now).await
+    }
+    async fn heartbeat(
+        &self,
+        _id: &ExecutionId,
+        _epoch: LeaseEpoch,
+        _now: Timestamp,
+    ) -> Result<(), ClaimError> {
+        Ok(())
+    }
+    async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
+        self.inner.release(id, epoch).await
+    }
+    fn release_now(&self, id: &ExecutionId, epoch: LeaseEpoch) {
+        self.inner.release_now(id, epoch);
+    }
+    fn release_owner_now(&self, owner: &OwnerId) {
+        self.inner.release_owner_now(owner);
+    }
+}
+
+/// After TTL steal, A's live_tx must not inject Complete while B owns.
+#[tokio::test(flavor = "current_thread")]
+async fn live_complete_after_ttl_steal_is_claimed_elsewhere() {
+    let store = NoRefreshHeartbeat {
+        inner: MemoryStore::new(),
+    };
+    let clock = Arc::new(FakeClock::new());
+    let next_runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let next = next_runs.clone();
+    let rt_a = Runtime::builder()
+        .store(store.clone())
+        .clock(clock.clone())
+        .register_fn("next", move |_ctx: ExecutionContext| {
+            next.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) }
+        })
+        .build();
+    let handle = rt_a.start(wait_then_next()).unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait_stable()).await, ExecutionState::Waiting);
+    let token = handle
+        .inspect()
+        .await
+        .node(&NodeId::new("hold"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .expect("token");
+    clock.advance(DEFAULT_LEASE_TTL);
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let rt_b = Runtime::builder()
+        .store(store.clone())
+        .clock(clock.clone())
+        .register_fn("next", succeed("next"))
+        .build();
+    let hb = rt_b
+        .resume(&id)
+        .await
+        .expect("B claims after TTL while A handle is still live");
+    match rt_a
+        .complete(
+            token.clone(),
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate"))),
+        )
+        .await
+    {
+        Err(CompleteError::ClaimedElsewhere)
+        | Err(CompleteError::Store(StoreError::StaleEpoch { .. })) => {}
+        Err(CompleteError::UnknownToken) => panic!("must not be UnknownToken"),
+        Ok(()) => panic!("live complete after steal must not be Ok"),
+        Err(e) => panic!("expected ClaimedElsewhere / StaleEpoch, got {e}"),
+    }
+    assert_eq!(
+        next_runs.load(Ordering::SeqCst),
+        0,
+        "A must not dispatch downstream after steal"
+    );
+    let snap = store.get(&id).await.unwrap().unwrap();
+    assert_eq!(snap.state, ExecutionState::Waiting);
+    assert!(matches!(
+        snap.node(&NodeId::new("hold")).unwrap().state,
+        NodeState::Waiting { .. }
+    ));
+    rt_b.complete(
+        token,
+        Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate"))),
+    )
+    .await
+    .expect("owner B completes");
+    assert_eq!(within(hb.wait()).await, ExecutionState::Succeeded);
+    assert_eq!(next_runs.load(Ordering::SeqCst), 0);
+    let snap = store.get(&id).await.unwrap().unwrap();
+    assert_eq!(snap.state, ExecutionState::Succeeded);
+    assert_eq!(
+        snap.node(&NodeId::new("next"))
+            .and_then(|n| n.output.clone()),
+        Some(Bytes::from_static(b"ok"))
+    );
+    // Keep A's handle live until B finished; Drop now is Cancel on terminal.
+    drop(handle);
 }
 
 #[tokio::test(flavor = "current_thread")]
