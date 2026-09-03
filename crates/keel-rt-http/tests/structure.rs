@@ -214,9 +214,11 @@ fn public_surface_is_complete_resume_token() {
     assert!(
         lib.contains("fn hold_if_live")
             && lib.contains("fn drop_held_if_terminal")
+            && lib.contains("fn reap_held_terminals")
             && lib.contains("fn drop_held_if_terminal_keeps_waiting")
-            && lib.contains("fn hold_if_live_skips_terminal_snapshot"),
-        "HTTP hold is snapshot is_terminal only; live parks stay held"
+            && lib.contains("fn hold_if_live_skips_terminal_snapshot")
+            && lib.contains("fn reap_held_terminals_clears_n_finished_keeps_park"),
+        "HTTP hold is snapshot is_terminal only; reap on next start; live parks stay held"
     );
     let prod = lib.split("#[cfg(test)]").next().expect("prod");
     assert!(
@@ -321,9 +323,11 @@ fn required_client_tests_exist() {
         "fn client_approve_after_http_start_server_drop_is_409",
         "fn client_approve_after_fail_fast_other_node_is_409",
         "fn client_duplicate_approve_is_noop",
+        "fn client_approve_after_terminal_handle_drop_is_200_noop",
         "fn client_inspect_during_approve_does_not_double_apply",
         "fn client_drop_http_server_after_start_cancels_wait",
         "fn client_start_terminal_survives_server_drop",
+        "fn client_n_instant_http_starts_are_reaped_on_next_start",
         "fn http_start_second_runtime_new_id_is_not_steal",
         "fn client_approve_issued_token_for_running_node_leaves_wait_parked",
     ] {

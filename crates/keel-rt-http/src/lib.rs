@@ -287,6 +287,26 @@ fn drop_held_if_terminal(started: &Mutex<Vec<ExecutionHandle>>, id: &ExecutionId
         .retain(|h| h.execution_id() != id);
 }
 
+/// Snapshot-only: drop held handles whose execution is already terminal.
+/// Called on the next start so N finished runs do not sit until process drop.
+async fn reap_held_terminals(runtime: &Runtime, started: &Mutex<Vec<ExecutionHandle>>) {
+    let ids: Vec<ExecutionId> = {
+        started
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|h| h.execution_id().clone())
+            .collect()
+    };
+    for id in ids {
+        let terminal = runtime
+            .inspect(&id)
+            .await
+            .is_some_and(|s| s.state.is_terminal());
+        drop_held_if_terminal(started, &id, terminal);
+    }
+}
+
 fn authorize(app: &App, headers: &HeaderMap) -> Result<(), StatusCode> {
     match provided_secret(headers) {
         Some(got) if secrets_equal(app.secret.as_str(), got) => Ok(()),
@@ -309,6 +329,7 @@ async fn start_handler(
     match app.runtime.start(def) {
         Ok(handle) => {
             let execution_id = handle.execution_id().clone();
+            reap_held_terminals(&app.runtime, &app.started).await;
             let terminal = handle.inspect().await.state.is_terminal();
             hold_if_live(&app.started, handle, terminal);
             Json(StartView { execution_id }).into_response()
@@ -786,6 +807,74 @@ mod tests {
         assert_eq!(
             rt.inspect(&id).await.unwrap().state,
             ExecutionState::Succeeded
+        );
+    }
+
+    /// N finished handles forced into the vec (start raced before terminal)
+    /// plus one park. Snapshot-only reap leaves only the park.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reap_held_terminals_clears_n_finished_keeps_park() {
+        const N: usize = 8;
+        let rt = Runtime::builder()
+            .register_fn("next", |_ctx: keel_rt::ExecutionContext| async {
+                keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(b"ok"))
+            })
+            .build();
+        let started = Mutex::new(Vec::new());
+        let mut finished = Vec::new();
+        for _ in 0..N {
+            let handle = rt
+                .start(
+                    WorkflowDefinition::builder("wf")
+                        .node("next", "next")
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            finished.push(handle.execution_id().clone());
+            started
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(handle);
+        }
+        for id in &finished {
+            let mut snap = rt.inspect(id).await.unwrap();
+            for _ in 0..256 {
+                if snap.state.is_terminal() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+                snap = rt.inspect(id).await.unwrap();
+            }
+            assert!(snap.state.is_terminal(), "instant node must finish");
+        }
+        let park = rt
+            .start(
+                WorkflowDefinition::builder("park")
+                    .node("hold", "wait")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let park_id = park.execution_id().clone();
+        assert_eq!(park.wait_stable().await, ExecutionState::Waiting);
+        started.lock().unwrap_or_else(|p| p.into_inner()).push(park);
+        reap_held_terminals(&rt, &started).await;
+        {
+            let held = started.lock().unwrap();
+            assert_eq!(held.len(), 1, "N terminals reaped; live park stays");
+            assert_eq!(held[0].execution_id(), &park_id);
+        }
+        for id in &finished {
+            assert_eq!(
+                rt.inspect(id).await.unwrap().state,
+                ExecutionState::Succeeded,
+                "reap Drop of a terminal handle must not Cancel"
+            );
+        }
+        assert_eq!(
+            rt.inspect(&park_id).await.unwrap().state,
+            ExecutionState::Waiting
         );
     }
 }

@@ -1645,6 +1645,52 @@ async fn complete_after_drop_handle_does_not_revive() {
     assert_eq!(snap.state, ExecutionState::Cancelled);
 }
 
+/// Drop of a **terminal** handle (Cancel + Shutdown, consumed=false) must
+/// not poison duplicate complete. Live-park drop stays Cancelled (above).
+#[tokio::test(flavor = "current_thread")]
+async fn complete_after_drop_of_terminal_handle_is_duplicate_noop() {
+    let rt = Runtime::builder().build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    within(handle.wait_stable()).await;
+    let token = handle
+        .inspect()
+        .await
+        .node(&NodeId::new("hold"))
+        .unwrap()
+        .resume_token
+        .clone()
+        .expect("token");
+    let resume = Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate")));
+    rt.complete(token.clone(), resume.clone())
+        .await
+        .expect("first");
+    within(async {
+        loop {
+            if handle.inspect().await.state == ExecutionState::Succeeded {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    drop(handle);
+    rt.complete(token, resume)
+        .await
+        .expect("duplicate after terminal Drop is noop, not Apply");
+    assert_eq!(
+        rt.inspect(&id).await.unwrap().state,
+        ExecutionState::Succeeded
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn complete_from_store_after_engine_down_unblocks_wait() {
     let store = MemoryStore::new();

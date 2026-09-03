@@ -2469,29 +2469,80 @@ async fn client_duplicate_approve_is_noop() {
         .approve(token.clone(), Bytes::from_static(b"gate"))
         .await
         .expect("first");
-    let second = client.approve(token, Bytes::from_static(b"again")).await;
-    assert!(
-        second.is_ok()
-            || matches!(
-                second,
-                Err(KeelClientError::BadRequest | KeelClientError::UnknownToken)
-            ),
-        "duplicate must not revive or re-run: {second:?}"
-    );
     tokio::time::timeout(BOUND, async {
         loop {
-            if client.inspect(&id).await.expect("i").state.is_terminal() {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Succeeded {
                 return;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("done");
+    .expect("succeeded + reap");
+    client
+        .approve(token, Bytes::from_static(b"gate"))
+        .await
+        .expect("duplicate after terminal handle drop is 200 noop");
     assert_eq!(
         client.inspect(&id).await.expect("end").state,
         ExecutionState::Succeeded
     );
+    server.abort();
+}
+
+/// After inspect sees Succeeded the handle is dropped. Same-token approve
+/// must stay 200 noop (not Apply/400). Live-park drop stays 409.
+#[tokio::test(flavor = "current_thread")]
+async fn client_approve_after_terminal_handle_drop_is_200_noop() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("next", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"next")) }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client
+        .approve(token.clone(), Bytes::from_static(b"gate"))
+        .await
+        .expect("first");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Succeeded {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reaped");
+    client
+        .approve(token, Bytes::from_static(b"gate"))
+        .await
+        .expect("200 after terminal handle drop");
+    assert_eq!(
+        client.inspect(&id).await.expect("end").state,
+        ExecutionState::Succeeded
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "no second downstream");
     server.abort();
 }
 
@@ -2587,6 +2638,97 @@ async fn client_drop_http_server_after_start_cancels_wait() {
     })
     .await
     .expect("server drop must Drop-cancel the held handle");
+}
+
+/// N instant HTTP starts, no inspect of those ids, then one more start
+/// reaps terminals. Abort cancels only the live park; N stay Succeeded.
+#[tokio::test(flavor = "current_thread")]
+async fn client_n_instant_http_starts_are_reaped_on_next_start() {
+    const N: usize = 8;
+    let store = MemoryStore::new();
+    let clock = Arc::new(FakeClock::new());
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(clock)
+            .store(store.clone())
+            .register_fn("next", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let def = WorkflowDefinition::builder("wf")
+        .node("next", "next")
+        .build()
+        .unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..N {
+        ids.push(client.start(def.clone()).await.expect("start"));
+    }
+    tokio::time::timeout(BOUND, async {
+        loop {
+            let mut n = 0;
+            for id in &ids {
+                if let Some(s) = store.get(id).await.unwrap() {
+                    if s.state == ExecutionState::Succeeded {
+                        n += 1;
+                    }
+                }
+            }
+            if n == N {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("N succeeded with no inspect of those ids");
+    let park = client
+        .start(
+            WorkflowDefinition::builder("park")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("next start reaps terminals");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&park).await {
+                if v.state == ExecutionState::Waiting {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("park");
+    drop(client);
+    server.abort();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            for id in &ids {
+                if let Some(s) = store.get(id).await.unwrap() {
+                    assert_ne!(
+                        s.state,
+                        ExecutionState::Cancelled,
+                        "reaped terminal must not Drop-cancel"
+                    );
+                    assert_eq!(s.state, ExecutionState::Succeeded);
+                }
+            }
+            if let Some(s) = store.get(&park).await.unwrap() {
+                if s.state == ExecutionState::Cancelled {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("park Cancelled; N still Succeeded");
 }
 
 /// After inspect sees Succeeded, reap consumes the handle. Aborting the
