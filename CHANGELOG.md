@@ -7,12 +7,15 @@
 `id`, `on_failure`, nodes `{id, executor_id, join}`, edges — not a
 snapshot dump and not a second graph language. FailSubtree / AllDone
 survive the wire (`client_start_fail_subtree_keeps_running_sibling`).
-The server calls [`Runtime::start`] and **holds live handles** so Drop
-does not cancel; terminals are `wait()`-consumed on push / inspect /
-complete (`hold_started_consumes_already_terminal`,
-`reap_started_consumes_terminal_handles`). Dropping the server still
-Drop-cancels parks (`client_drop_http_server_after_start_cancels_wait`)
-and does not cancel a reaped terminal
+The server calls [`Runtime::start`] and **holds the handle iff the
+snapshot is not terminal** (`hold_if_live` / `drop_held_if_terminal`).
+No `wait` / `wait_stable` in the adapter — those are a second status
+machine. FailSubtree reject returns while the sibling is still Running
+and later server-drop still cancels it
+(`client_fail_subtree_reject_returns_and_server_drop_cancels_sibling`).
+Dropping the server Drop-cancels parks
+(`client_drop_http_server_after_start_cancels_wait`) and does not
+Cancel a terminal already dropped
 (`client_start_terminal_survives_server_drop`). The client
 returns the new [`ExecutionId`]. Each call is a new run
 (`client_two_starts_are_distinct_ids`); a second Runtime's new id is

@@ -212,11 +212,16 @@ fn public_surface_is_complete_resume_token() {
         "StartBody must be kernel durable JSON, not a second graph language"
     );
     assert!(
-        lib.contains("fn reap_started")
-            && lib.contains("fn hold_started")
-            && lib.contains("fn reap_started_consumes_terminal_handles")
-            && lib.contains("fn hold_started_consumes_already_terminal"),
-        "HTTP start must reap terminal handles so the vec is not process-lifetime"
+        lib.contains("fn hold_if_live")
+            && lib.contains("fn drop_held_if_terminal")
+            && lib.contains("fn drop_held_if_terminal_keeps_waiting")
+            && lib.contains("fn hold_if_live_skips_terminal_snapshot"),
+        "HTTP hold is snapshot is_terminal only; live parks stay held"
+    );
+    let prod = lib.split("#[cfg(test)]").next().expect("prod");
+    assert!(
+        !prod.contains("wait_stable") && !prod.contains(".wait("),
+        "HTTP must not infer live vs terminal via wait / wait_stable"
     );
     assert!(lib.contains("fn start_body_is_durable_bytes_not_snapshot"));
     assert!(
@@ -308,6 +313,15 @@ fn required_client_tests_exist() {
         "fn client_start_inspect_approve_unblocks_wait",
         "fn client_start_inspect_reject_fails_execution",
         "fn client_start_fail_subtree_keeps_running_sibling",
+        "fn client_fail_subtree_reject_returns_and_server_drop_cancels_sibling",
+        "fn client_start_reinvoke_old_token_does_not_approve",
+        "fn client_approve_then_reject_does_not_fail_succeeded",
+        "fn client_reject_then_approve_does_not_revive",
+        "fn two_approves_one_token_downstream_runs_once",
+        "fn client_approve_after_http_start_server_drop_is_409",
+        "fn client_approve_after_fail_fast_other_node_is_409",
+        "fn client_duplicate_approve_is_noop",
+        "fn client_inspect_during_approve_does_not_double_apply",
         "fn client_drop_http_server_after_start_cancels_wait",
         "fn client_start_terminal_survives_server_drop",
         "fn http_start_second_runtime_new_id_is_not_steal",

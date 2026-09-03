@@ -261,42 +261,30 @@ fn secrets_equal(expected: &str, got: &[u8]) -> bool {
         == 0
 }
 
-/// Drop-cancel only applies while we still hold the handle. Consume
-/// terminals with [`ExecutionHandle::wait`] so a finished run does not
-/// live until process death. Do **not** `spawn(handle.wait())` for a live
-/// park: `wait` sets `consumed` immediately, so aborting that task would
-/// not Drop-cancel. Live parks stay in the vec until the server drops.
-async fn reap_started(started: &Mutex<Vec<ExecutionHandle>>) {
-    let batch = {
-        let mut g = started.lock().unwrap_or_else(|p| p.into_inner());
-        std::mem::take(&mut *g)
-    };
-    let mut kept = Vec::with_capacity(batch.len());
-    for handle in batch {
-        if handle.inspect().await.state.is_terminal() {
-            let _ = handle.wait().await;
-        } else {
-            kept.push(handle);
-        }
+/// Hold iff the snapshot is not terminal. Dropping a terminal handle
+/// sends Cancel, which is a no-op on an already-finished run. Do not
+/// park on the handle: consuming wait marks the handle used (server-drop
+/// would not cancel a live park); the stable-wait helper also returns
+/// on Waiting (reaping a park drops the cancel token). Kernel snapshot
+/// `state.is_terminal()` is the only signal.
+fn hold_if_live(started: &Mutex<Vec<ExecutionHandle>>, handle: ExecutionHandle, terminal: bool) {
+    if terminal {
+        return;
     }
     started
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .extend(kept);
+        .push(handle);
 }
 
-/// Reap terminals already in the vec, then either consume a terminal
-/// start or hold a live park.
-async fn hold_started(started: &Mutex<Vec<ExecutionHandle>>, handle: ExecutionHandle) {
-    reap_started(started).await;
-    if handle.inspect().await.state.is_terminal() {
-        let _ = handle.wait().await;
-    } else {
-        started
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(handle);
+fn drop_held_if_terminal(started: &Mutex<Vec<ExecutionHandle>>, id: &ExecutionId, terminal: bool) {
+    if !terminal {
+        return;
     }
+    started
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|h| h.execution_id() != id);
 }
 
 fn authorize(app: &App, headers: &HeaderMap) -> Result<(), StatusCode> {
@@ -321,7 +309,8 @@ async fn start_handler(
     match app.runtime.start(def) {
         Ok(handle) => {
             let execution_id = handle.execution_id().clone();
-            hold_started(&app.started, handle).await;
+            let terminal = handle.inspect().await.state.is_terminal();
+            hold_if_live(&app.started, handle, terminal);
             Json(StartView { execution_id }).into_response()
         }
         Err(StartError::UnregisteredExecutors(_)) => StatusCode::BAD_REQUEST.into_response(),
@@ -335,12 +324,13 @@ async fn inspect_handler(
 ) -> Result<Json<InspectView>, StatusCode> {
     authorize(&app, &headers)?;
     let id = ExecutionId::parse(&id).map_err(|_| StatusCode::NOT_FOUND)?;
-    let result = match app.runtime.inspect(&id).await {
-        Some(snap) => Ok(Json(InspectView::from_snapshot(&snap))),
+    match app.runtime.inspect(&id).await {
+        Some(snap) => {
+            drop_held_if_terminal(&app.started, &id, snap.state.is_terminal());
+            Ok(Json(InspectView::from_snapshot(&snap)))
+        }
         None => Err(StatusCode::NOT_FOUND),
-    };
-    reap_started(&app.started).await;
-    result
+    }
 }
 
 #[derive(Serialize)]
@@ -356,9 +346,15 @@ async fn complete_handler(
     if authorize(&app, &headers).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let id = body.token.execution_id().clone();
     match app.runtime.complete(body.token, body.resume).await {
         Ok(()) => {
-            reap_started(&app.started).await;
+            let terminal = app
+                .runtime
+                .inspect(&id)
+                .await
+                .is_some_and(|s| s.state.is_terminal());
+            drop_held_if_terminal(&app.started, &id, terminal);
             StatusCode::OK.into_response()
         }
         Err(CompleteError::UnknownToken) => StatusCode::NOT_FOUND.into_response(),
@@ -720,7 +716,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn reap_started_consumes_terminal_handles() {
+    async fn drop_held_if_terminal_keeps_waiting() {
         let rt = Runtime::builder().build();
         let started = Mutex::new(Vec::new());
         let handle = rt
@@ -731,16 +727,17 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
+        let id = handle.execution_id().clone();
         assert_eq!(handle.wait_stable().await, ExecutionState::Waiting);
-        let token = handle
-            .inspect()
-            .await
+        let snap = handle.inspect().await;
+        assert!(!snap.state.is_terminal());
+        let token = snap
             .node(&keel_rt::NodeId::new("hold"))
             .and_then(|n| n.resume_token.clone())
             .unwrap();
-        started.lock().unwrap().push(handle);
-        reap_started(&started).await;
-        assert_eq!(started.lock().unwrap().len(), 1, "parked wait stays held");
+        hold_if_live(&started, handle, snap.state.is_terminal());
+        drop_held_if_terminal(&started, &id, snap.state.is_terminal());
+        assert_eq!(started.lock().unwrap().len(), 1, "Waiting stays held");
         rt.complete(
             token,
             Resume::Complete(keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(
@@ -749,23 +746,17 @@ mod tests {
         )
         .await
         .unwrap();
-        let id = started.lock().unwrap()[0].execution_id().clone();
-        for _ in 0..64 {
-            if rt.inspect(&id).await.is_some_and(|s| s.state.is_terminal()) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        reap_started(&started).await;
+        let done = rt.inspect(&id).await.unwrap();
+        drop_held_if_terminal(&started, &id, done.state.is_terminal());
         assert_eq!(
             started.lock().unwrap().len(),
             0,
-            "terminal handles must be consumed, not held until process drop"
+            "terminal snapshot drops the handle; Running/Waiting must not"
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hold_started_consumes_already_terminal() {
+    async fn hold_if_live_skips_terminal_snapshot() {
         let rt = Runtime::builder()
             .register_fn("next", |_ctx: keel_rt::ExecutionContext| async {
                 keel_rt::NodeOutcome::Succeeded(bytes::Bytes::from_static(b"ok"))
@@ -781,17 +772,20 @@ mod tests {
             )
             .unwrap();
         let id = handle.execution_id().clone();
+        let mut snap = handle.inspect().await;
         for _ in 0..64 {
-            if rt.inspect(&id).await.is_some_and(|s| s.state.is_terminal()) {
+            if snap.state.is_terminal() {
                 break;
             }
             tokio::task::yield_now().await;
+            snap = handle.inspect().await;
         }
-        hold_started(&started, handle).await;
+        assert!(snap.state.is_terminal(), "instant node must finish");
+        hold_if_live(&started, handle, snap.state.is_terminal());
+        assert_eq!(started.lock().unwrap().len(), 0);
         assert_eq!(
-            started.lock().unwrap().len(),
-            0,
-            "terminal start must be wait()-consumed on push, not held"
+            rt.inspect(&id).await.unwrap().state,
+            ExecutionState::Succeeded
         );
     }
 }

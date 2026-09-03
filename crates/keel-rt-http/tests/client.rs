@@ -2039,6 +2039,511 @@ async fn client_start_fail_subtree_keeps_running_sibling() {
     server.abort();
 }
 
+/// FailSubtree reject must not reap the handle: complete returns while
+/// the sibling is still Running, and later server-drop still cancels it.
+#[tokio::test(flavor = "current_thread")]
+async fn client_fail_subtree_reject_returns_and_server_drop_cancels_sibling() {
+    let go = Arc::new(tokio::sync::Notify::new());
+    let gate = go.clone();
+    let store = MemoryStore::new();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .store(store.clone())
+            .register_fn("slow", move |_ctx: ExecutionContext| {
+                let gate = gate.clone();
+                async move {
+                    gate.notified().await;
+                    NodeOutcome::Succeeded(Bytes::from_static(b"sib"))
+                }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let def = WorkflowDefinition::builder("wf")
+        .on_failure(OnFailure::FailSubtree)
+        .node("hold", "wait")
+        .node("sib", "slow")
+        .build()
+        .unwrap();
+    let id = client.start(&def).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                let hold = v.resume_token(&NodeId::new("hold")).cloned();
+                let sib_run = matches!(
+                    v.node(&NodeId::new("sib")).map(|n| &n.state),
+                    Some(InspectNodeState::Running { .. })
+                );
+                if let (Some(tok), true) = (hold, sib_run) {
+                    return tok;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("mixed");
+    tokio::time::timeout(BOUND, client.reject(token))
+        .await
+        .expect("reject must not hang on the running sibling")
+        .expect("reject");
+    let after = client.inspect(&id).await.expect("after reject");
+    assert_eq!(after.state, ExecutionState::Running);
+    assert!(
+        matches!(
+            after.node(&NodeId::new("sib")).map(|n| &n.state),
+            Some(InspectNodeState::Running { .. })
+        ),
+        "FailSubtree sibling must still be Running: {:?}",
+        after.node(&NodeId::new("sib")).map(|n| &n.state)
+    );
+    drop(client);
+    server.abort();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(s) = store.get(&id).await.unwrap() {
+                if s.state == ExecutionState::Cancelled {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("held handle Drop-cancels the still-running sibling");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_reinvoke_old_token_does_not_approve() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    let old = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client
+        .complete(old.clone(), Resume::Reinvoke)
+        .await
+        .expect("reinvoke");
+    let fresh = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    if t != &old {
+                        return t.clone();
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("new token");
+    let err = client
+        .approve(old, Bytes::from_static(b"stale"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            KeelClientError::UnknownToken | KeelClientError::BadRequest
+        ),
+        "old token after Reinvoke must not approve: {err:?}"
+    );
+    let still = client.inspect(&id).await.expect("still");
+    assert_eq!(still.state, ExecutionState::Waiting);
+    client
+        .approve(fresh, Bytes::from_static(b"ok"))
+        .await
+        .expect("fresh");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_approve_then_reject_does_not_fail_succeeded() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client
+        .approve(token.clone(), Bytes::from_static(b"gate"))
+        .await
+        .expect("approve");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state.is_terminal() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("done");
+    let second = client.reject(token).await;
+    assert!(
+        second.is_ok()
+            || matches!(
+                second,
+                Err(KeelClientError::UnknownToken
+                    | KeelClientError::Cancelled
+                    | KeelClientError::BadRequest)
+            ),
+        "second decision must not invent a new error: {second:?}"
+    );
+    let snap = client.inspect(&id).await.expect("after");
+    assert_eq!(snap.state, ExecutionState::Succeeded);
+    assert!(matches!(
+        snap.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(InspectNodeState::Succeeded)
+    ));
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_reject_then_approve_does_not_revive() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client.reject(token.clone()).await.expect("reject");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Failed {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed");
+    let second = client.approve(token, Bytes::from_static(b"late")).await;
+    assert!(
+        second.is_ok()
+            || matches!(
+                second,
+                Err(KeelClientError::UnknownToken
+                    | KeelClientError::Cancelled
+                    | KeelClientError::BadRequest)
+            ),
+        "{second:?}"
+    );
+    let snap = client.inspect(&id).await.expect("after");
+    assert_eq!(snap.state, ExecutionState::Failed);
+    assert!(matches!(
+        snap.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(InspectNodeState::Failed)
+    ));
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn two_approves_one_token_downstream_runs_once() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("next", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"next")) }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let a = client_at(addr);
+    let b = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let id = a.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = a.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    let (ra, rb) = tokio::join!(
+        a.approve(token.clone(), Bytes::from_static(b"gate")),
+        b.approve(token, Bytes::from_static(b"gate"))
+    );
+    assert!(ra.is_ok() || rb.is_ok(), "a={ra:?} b={rb:?}");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if a.inspect(&id).await.expect("i").state.is_terminal() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("done");
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "no double downstream");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_approve_after_http_start_server_drop_is_409() {
+    let store = MemoryStore::new();
+    let clock = Arc::new(FakeClock::new());
+    let rt = Arc::new(Runtime::builder().clock(clock).store(store.clone()).build());
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    drop(client);
+    server.abort();
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(s) = store.get(&id).await.unwrap() {
+                if s.state == ExecutionState::Cancelled {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop cancelled");
+    let (addr2, server2) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = client_at(addr2)
+        .approve(token, Bytes::from_static(b"late"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::Cancelled), "{err:?}");
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Cancelled
+    );
+    server2.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_approve_after_fail_fast_other_node_is_409() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let def = WorkflowDefinition::builder("wf")
+        .node("hold", "wait")
+        .node("boom", "wait")
+        .build()
+        .unwrap();
+    let id = client.start(def).await.expect("start");
+    let (hold_tok, boom_tok) = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                let hold = v.resume_token(&NodeId::new("hold")).cloned();
+                let boom = v.resume_token(&NodeId::new("boom")).cloned();
+                if let (Some(h), Some(b)) = (hold, boom) {
+                    return (h, b);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both waiting");
+    client.reject(boom_tok).await.expect("fail-fast boom");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state == ExecutionState::Failed {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed");
+    let err = client
+        .approve(hold_tok, Bytes::from_static(b"nope"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            KeelClientError::Cancelled | KeelClientError::UnknownToken
+        ),
+        "approve must not succeed a fail-fast-cancelled wait: {err:?}"
+    );
+    let snap = client.inspect(&id).await.expect("after");
+    assert_eq!(snap.state, ExecutionState::Failed);
+    assert!(!matches!(
+        snap.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(InspectNodeState::Succeeded)
+    ));
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_duplicate_approve_is_noop() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client
+        .approve(token.clone(), Bytes::from_static(b"gate"))
+        .await
+        .expect("first");
+    let second = client.approve(token, Bytes::from_static(b"again")).await;
+    assert!(
+        second.is_ok()
+            || matches!(
+                second,
+                Err(KeelClientError::BadRequest | KeelClientError::UnknownToken)
+            ),
+        "duplicate must not revive or re-run: {second:?}"
+    );
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state.is_terminal() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("done");
+    assert_eq!(
+        client.inspect(&id).await.expect("end").state,
+        ExecutionState::Succeeded
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_inspect_during_approve_does_not_double_apply() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("next", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"next")) }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    let inspect_client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let (view, approved) = tokio::join!(
+        inspect_client.inspect(&id),
+        client.approve(token, Bytes::from_static(b"gate"))
+    );
+    view.expect("inspect during approve");
+    approved.expect("approve");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state.is_terminal() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("done");
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "no double-apply");
+    server.abort();
+}
+
 /// Dropping the HTTP server drops App → remaining handles Drop-cancel live parks.
 #[tokio::test(flavor = "current_thread")]
 async fn client_drop_http_server_after_start_cancels_wait() {
