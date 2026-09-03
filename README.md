@@ -77,6 +77,10 @@ on one sqlite file take a store lease (`claim` / epoch); the other
 binary does not open the file while the owner lives. **Drop handle
 cancels. Drop Runtime releases the lease.**
 
+`keel-rt-schedule` is a sibling ticker: a 5-field cron + IANA timezone
+calls `Runtime::start` on each fire (new `ExecutionId`). It is not
+kernel `Ready { runnable_at }`. Drop the runner to stop further starts.
+
 `start` returns a handle when you need `wait_stable` + token `resume` or
 inspect. `wait()` is terminal only; Waiting is not done.
 Unknown executor ids fail at `start` (named in the error) — nothing runs.

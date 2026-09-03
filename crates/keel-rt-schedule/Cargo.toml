@@ -1,0 +1,21 @@
+[package]
+name = "keel-rt-schedule"
+version = "0.1.0"
+edition = "2021"
+description = "in-process cron ticker: each tick Runtime::start (not the kernel)"
+license = "MIT"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4.39", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+croner = "2.1"
+keel-rt = { path = "../.." }
+thiserror = "2.0.9"
+async-trait = "0.1"
+tokio = { version = "1.43", features = ["rt", "macros", "sync", "time"] }
+
+[dev-dependencies]
+bytes = { version = "1.9", features = ["serde"] }
+keel-rt = { path = "../..", features = ["test-util"] }
+tokio = { version = "1.43", features = ["full", "test-util"] }

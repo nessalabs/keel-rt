@@ -35,6 +35,7 @@ jobs:
           cargo test -p keel-rt-sqlite --lib --test resume --test structure \
             -- --test-threads=1
           cargo test -p keel-rt-http -- --test-threads=1
+          cargo test -p keel-rt-schedule -- --test-threads=1
 
   adversarial:
     runs-on: ubuntu-latest

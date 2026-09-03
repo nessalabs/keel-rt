@@ -84,12 +84,51 @@ flowchart TB
     Dtime[time]
   end
 
+  subgraph siblings["sibling crates (depend on keel-rt, not reverse)"]
+    sqlite[keel-rt-sqlite]
+    http[keel-rt-http]
+    sched[keel-rt-schedule]
+  end
+
   ROOT --> testing
   ROOT --> runtime
   ROOT --> domain
   testing --> runtime
   testing --> domain
   runtime --> domain
+  sqlite --> crate
+  http --> crate
+  sched --> crate
+```
+
+`keel-rt-schedule` is `ScheduleSpec` → `next_after` → `Clock::wait_until` →
+`Runtime::start` → arm next. Drop `RunningSchedule` stops further starts.
+The kernel does not depend on this crate.
+
+```mermaid
+classDiagram
+  class ScheduleSpec {
+    cron 5-field
+    tz IANA
+    definition Arc
+    +next_after(now) Timestamp
+  }
+  class SpecError
+  class Schedule {
+    +builder(Runtime) ScheduleBuilder
+    +run() RunningSchedule
+  }
+  class ScheduleBuilder
+  class RunningSchedule {
+    Drop stops further starts
+  }
+  class Runtime {
+    +start(WorkflowDefinition) Handle
+  }
+  Schedule --> ScheduleSpec
+  Schedule --> ScheduleBuilder
+  Schedule --> RunningSchedule
+  Schedule --> Runtime : start each fire
 ```
 
 ### (b) Public run-loop types

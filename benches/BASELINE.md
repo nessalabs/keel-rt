@@ -4,6 +4,44 @@ Machine: Cloud Agent VM (x86_64, 4× Intel Xeon). Profile: `cargo test` (debug),
 `--test-threads=1`. ScriptedExecutor succeed-immediately (zero user work).
 Median of 7 iterations unless noted.
 
+## Schedule ticker (`sdk/schedule`, 2026-09-03)
+
+Sibling crate. One drive loop + next-T min-heap. `NoopStore`, FakeClock,
+isolated `cargo test -p keel-rt-schedule --release --test stress <name> -- --nocapture --test-threads=1`.
+VmRSS from `/proc/self/status`. Kernel `src/` unchanged.
+
+### Release farm (this SHA vs `91ff187` before intern)
+
+| # | path | N | starts | release before (`91ff187`) | release after (intern) | RSS after |
+|---|---|---:|---:|---:|---:|---|
+| 1 | missed-tick storm | 200 000 periods | **1** | 0.034 ms / 5.5 MiB | 0.039 ms / 5.5 MiB | — |
+| 2 | sequential one-period walk | 100 000 | 100 000 | 593.8 ms / 5.5 MiB | 612.9 ms / 5.4 MiB | +0 B 10k→100k |
+| 3 | armed specs, one fire | 10 000 | 10 000 | 73.3 ms / arm 12.3 → 15.8 MiB | 70.6 ms / arm 6.0 → 9.4 MiB | |
+| 4 | armed specs, one fire | 100 000 | 100 000 | 711.7 ms / arm **73.4** (+68.2) → 77.0 MiB | 699.9 ms / arm **8.6** (+3.4) → **12.1 MiB** | ~36 B/spec |
+
+### Hot-path split (release, 100k, `tests/profile.rs`)
+
+| slice | before intern | after intern |
+|---|---:|---:|
+| `next_after` (croner) | 32.0 ms | 32.0 ms |
+| `WorkflowDefinition::clone` | 10.6 ms | 10.0 ms |
+| `ScheduleSpec::clone` × N (arm) | 42.1 ms / spec 288 B / RSS +68.8 MiB | **1.07 ms** / spec **8 B** / RSS +0.8 MiB |
+| `Runtime::start` + `spawn(wait)` | 1311 ms | 738 ms (same process noise) |
+| `Runtime::start` + drop handle | 1326 ms | 1620 ms |
+
+`Runtime::start` is the sequential floor (~0.6 s / 100k). Definition clone
+is ~10 ms / 100k — **no** kernel `start-from-Arc` (Execution already
+stores `Arc`; one owned clone at the `start` boundary is not the cost).
+Drop handle **cancels** (kernel); `spawn(wait)` is not the time pile.
+Catch-up of 200k periods is one `next_after`, not a walk of missed slots.
+
+Debug (same machine, after intern, for the earlier rows): sequential
+~4.6 s; armed 100k ~3 s. Do not compare debug to release.
+
+Remaining floor: kernel `start` (new execution + drive spawn). Croner
+`next_after` is 32 ms / 100k. Arming interned clones is ~36 B/spec
+(heap `(T, index)` + `Arc`). 100k unique fat definitions would dominate.
+
 ## Wait / gate (`sdk/wait-gate`, 2026-09-02)
 
 `ResumeToken::issue` mixes a process key with a counter (no per-token
