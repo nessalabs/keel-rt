@@ -70,6 +70,16 @@ Sqlite adapter lines are not kernel `src/`.
 | Engine-down complete (new Runtime, same store) | lease released or expired; new Runtime claims; apply + persist + drive | `test: complete_from_store_after_engine_down_unblocks_wait` `test: complete_after_sqlite_kill_new_runtime_unblocks_wait` |
 | Shared MemoryStore, second Runtime resume | `ClaimedElsewhere` | `test: shared_memory_store_second_runtime_resume_is_claimed_elsewhere` |
 | HTTP adapter `POST /complete` | another process → `Runtime::complete`; secret required; loopback default | `test: post_complete_unblocks_wait_node` `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` (crate `keel-rt-http`) |
+| `KeelClient::complete` same JSON | other binary POSTs token + Resume; Decision maps onto Resume | `test: client_complete_unblocks_wait_node` `test: client_decision_complete_unblocks_wait_node` |
+| `KeelClient::complete` missing/wrong secret | 401 Unauthorized; does not complete | `test: client_without_secret_is_401` `test: client_wrong_secret_is_401` |
+| `KeelClient::complete` after drop handle | 409 Cancelled; does not revive | `test: client_after_drop_handle_is_409_does_not_revive` |
+| `KeelClient::complete` duplicate / oversized | 200 noop / 413; snapshot stays Waiting | `test: client_duplicate_complete_is_noop` `test: client_oversized_body_is_413_does_not_complete` |
+| `KeelClient` wire protocol | `POST /complete` + `CompleteBody` + `X-Keel-Complete` and Bearer; not query | `test: client_wire_is_complete_body_and_secret_header` `test: client_complete_succeeds_against_bearer_only_server` |
+| two `KeelClient` values one token | Decision vs Resume same bytes; downstream once | `test: two_keel_clients_one_token_downstream_runs_once` |
+| `KeelClient` no redirect | 302 to `0.0.0.0` is Unexpected(302); trap is not hit | `test: client_does_not_follow_redirect_off_loopback` |
+| `KeelClient` hung server | `Hung` at `COMPLETE_HANG_BOUND`; paused time, no wall sleep | `test: client_hung_server_is_hung_not_forever` |
+| `KeelClient` drop mid-POST | drop server → Transport, token unused; drop inflight → still Waiting | `test: client_drop_server_mid_post_is_transport_token_untouched` `test: client_drop_inflight_does_not_complete` |
+| `Decision::Fail` via client | fail-fast Failed; maps onto Resume only | `test: client_decision_fail_fails_execution` |
 | HTTP missing/wrong secret | 401; does not complete | `test: post_without_secret_is_401` `test: post_wrong_secret_is_401` `test: post_query_secret_is_still_401` |
 | HTTP oversized body | 413/400; snapshot stays Waiting | `test: post_oversized_body_is_413_does_not_complete` |
 | HTTP replay after success / cancel | 200 noop / 409 Cancelled | `test: post_duplicate_complete_is_200_noop` `test: post_after_cancel_is_409_does_not_revive` |

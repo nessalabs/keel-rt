@@ -2,7 +2,12 @@
 //! process calls [`Runtime::complete`]. No forms, no identity.
 //!
 //! A shared secret is required. Default bind is `127.0.0.1` only.
+//! [`KeelClient::complete`] POSTs the same JSON from the other process.
 //! Kernel `keel-rt` does not depend on this crate.
+
+mod client;
+
+pub use client::{Decision, KeelClient, KeelClientError, COMPLETE_HANG_BOUND};
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::AUTHORIZATION;
@@ -20,7 +25,7 @@ use thiserror::Error;
 /// Default listen address: loopback, ephemeral port. Never `0.0.0.0`.
 pub const DEFAULT_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
-/// Reject JSON larger than this. Oversized body does not call `complete`.
+/// JSON larger than this is not accepted. Oversized body does not call `complete`.
 pub const MAX_COMPLETE_BODY: usize = 1024 * 1024;
 
 /// Shared-secret header (alternative to `Authorization: Bearer …`).

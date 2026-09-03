@@ -11,6 +11,14 @@ Default bind is **`127.0.0.1`** (`DEFAULT_BIND` / `serve` / `serve_ephemeral`).
 `0.0.0.0` only via explicit `serve_on`. Body larger than **1 MiB**
 (`MAX_COMPLETE_BODY`) is **413** and does not call `complete`.
 
+The other process uses [`KeelClient::complete`] — same JSON, no
+hand-rolled request. The client sends `X-Keel-Complete` and
+`Authorization: Bearer` (not a query string), does not follow redirects,
+and fails [`KeelClientError::Hung`]
+if the server is silent past [`COMPLETE_HANG_BOUND`] (5s, tokio time).
+In-process complete stays `Runtime::complete`. The client does not
+open sqlite or take a store lease.
+
 ```
 POST /complete
 Authorization: Bearer <secret>
@@ -22,6 +30,12 @@ Content-Type: application/json
 ```rust
 let secret = keel_rt_http::CompleteSecret::new(std::env::var("KEEL_COMPLETE_SECRET")?)?;
 keel_rt_http::serve(runtime, secret).await?;
+```
+
+```rust
+let client = keel_rt_http::KeelClient::new("http://127.0.0.1:port", secret)?;
+client.complete(token, Resume::Complete(NodeOutcome::Succeeded(bytes))).await?;
+// or Decision::Complete(bytes) / Fail / Reinvoke — maps onto Resume
 ```
 
 Serve `keel_rt_http::router(Arc<Runtime>, secret)` or `serve` / `serve_on` /

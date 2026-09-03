@@ -1,5 +1,21 @@
 # Changelog
 
+## Complete client (`sdk/complete`)
+
+[`keel-rt-http::KeelClient`] is the out-of-process SDK client;
+[`KeelClient::complete`] POSTs the same `CompleteBody` `{ token, resume }`
+the server already accepts (`X-Keel-Complete` and
+`Authorization: Bearer`). Optional
+[`Decision::{Complete(Bytes), Fail, Reinvoke}`] maps onto existing
+[`Resume`] (Succeeded / Failed / Reinvoke) — not a second token or
+state machine. Missing/wrong secret is still 401; cancelled token 409
+(complete does not revive); duplicate complete is 200 noop; body > 1
+MiB is 413. A hung server is [`KeelClientError::Hung`] after
+[`COMPLETE_HANG_BOUND`] (5s); the client does not follow redirects
+off the given URL. In-process complete stays [`Runtime::complete`].
+Kernel `src/` is unchanged. The kernel does not depend on this crate.
+Not sqlite, not a lease, not a schedule ticker, not forms or identity.
+
 ## Schedule ticker (`sdk/schedule`)
 
 Sibling crate [`keel-rt-schedule`]: 5-field cron + IANA timezone, driven
