@@ -1,5 +1,35 @@
 # Changelog
 
+## Cancel one execution (`sdk/cancel`)
+
+[`KeelClient::cancel(execution_id)`] is `POST /cancel/:id` with the same
+[`SECRET_HEADER`] / Bearer, [`HANG_BOUND`], `send`, and `uri` as start /
+inspect / complete. No `CANCEL_HANG_BOUND` and no `cancel rejected`
+Display. The server calls [`Runtime::cancel`] — the same inbox
+[`Event::Cancel`] / [`ApplyCmd::Cancel`] as [`ExecutionHandle::cancel`] /
+Drop. Live cancel **waits persist-then-emit** (`inject_cancel`); persist
+Err is not Ok (`live_cancel_persist_err_is_not_ok`) — the PR #7 live
+complete hole. Live inspect after persist Err is still Waiting
+(`live_cancel_persist_err_inspect_is_waiting`) — store is resume truth.
+Stolen lease is **423 Locked** [`KeelClientError::ClaimedElsewhere`]
+(`live_cancel_after_ttl_steal_is_claimed_elsewhere`,
+`client_live_cancel_after_ttl_steal_is_claimed_elsewhere`). Unknown id is
+**404**. Already-terminal (Succeeded after approve) is **200 noop**
+(cite `cancel_already_terminal_is_noop`; does not rewrite to Cancelled).
+Duplicate cancel of Cancelled is the same noop. A cancel **body** is
+**413** and does not cancel (`client_cancel_with_body_is_413_does_not_cancel`).
+HTTP cancel reaps the held handle; server-drop is a second Cancel on
+terminal (`runtime_cancel_then_drop_handle_is_noop`). Cancel of one HTTP
+start leaves the other park Waiting. FailSubtree still-Running on a
+**different** execution is not cancelled. Cancel of a FailSubtree run
+cancels its Running sibling. Later approve is **409** and does not
+revive. Server-drop still Drop-cancels remaining parks
+(`client_drop_http_server_after_start_cancels_wait`). SQLite proof lives
+in `keel-rt-sqlite` (`http_sqlite_start_cancel_second_runtime_is_claimed_elsewhere`).
+`CancelError` is not `CompleteError`: unknown is an execution, terminal
+cancel is Ok. Lease/store variants match so HTTP maps 423 the same.
+No Agent / HTTP / HITL / EventLog types in the kernel.
+
 ## Start then approve / reject (`sdk/start-approve`)
 
 [`KeelClient::start`] is `POST /start` with kernel durable JSON

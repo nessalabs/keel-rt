@@ -97,3 +97,79 @@ async fn http_sqlite_start_inspect_complete_two_runtimes_new_id_is_not_steal() {
     sb.abort();
     let _ = std::fs::remove_file(&path);
 }
+
+/// HTTP start + cancel on one sqlite file. Second Runtime complete/cancel
+/// is ClaimedElsewhere. New id is not a steal.
+#[tokio::test(flavor = "current_thread")]
+async fn http_sqlite_start_cancel_second_runtime_is_claimed_elsewhere() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let clock = Arc::new(FakeClock::new());
+    let a = Arc::new(
+        Runtime::builder()
+            .clock(clock.clone())
+            .store(store.clone())
+            .build(),
+    );
+    let b = Arc::new(Runtime::builder().clock(clock).store(store.clone()).build());
+    let (addr_a, sa) = serve_ephemeral(a, secret()).await.unwrap();
+    let (addr_b, sb) = serve_ephemeral(b, secret()).await.unwrap();
+    let ca = KeelClient::new(format!("http://{addr_a}"), secret()).unwrap();
+    let cb = KeelClient::new(format!("http://{addr_b}"), secret()).unwrap();
+    let def = WorkflowDefinition::builder("wf")
+        .node("hold", "wait")
+        .build()
+        .unwrap();
+    let id_a = ca.start(def.clone()).await.expect("start a");
+    let id_b = cb.start(def).await.expect("start b");
+    assert_ne!(id_a, id_b, "new id is a new execution, not a steal of a");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = ca.inspect(&id_a).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("inspect a token");
+    let err = cb.cancel(&id_a).await.unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::ClaimedElsewhere),
+        "B cancel of A's id is ClaimedElsewhere, not inject: {err:?}"
+    );
+    let err = cb
+        .complete(
+            token.clone(),
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"steal"))),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::ClaimedElsewhere),
+        "B complete of A's token is ClaimedElsewhere: {err:?}"
+    );
+    ca.cancel(&id_a).await.expect("owner cancels");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(s) = store.get(&id_a).await.unwrap() {
+                if s.state == ExecutionState::Cancelled {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owner persist Cancelled");
+    assert_eq!(
+        cb.inspect(&id_b).await.expect("b").state,
+        ExecutionState::Waiting,
+        "cancel of a must not cancel b"
+    );
+    sa.abort();
+    sb.abort();
+    let _ = std::fs::remove_file(&path);
+}

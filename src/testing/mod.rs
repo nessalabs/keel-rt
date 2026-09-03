@@ -18,4 +18,4 @@ pub use faults::{FaultySink, FlakyThen, NetFault};
 pub use harness::{TestRun, WorkflowTest};
 pub use recording::RecordingSink;
 pub use scripted::{ScriptedAction, ScriptedExecutor};
-pub use store::{FailingStore, SequenceStore};
+pub use store::{FailingStore, NoRefreshHeartbeat, SequenceStore};

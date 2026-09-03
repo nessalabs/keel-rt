@@ -106,13 +106,15 @@ flowchart TB
 `WorkflowDefinition::durable_bytes` (`id`, `on_failure`, nodes with
 `join`, edges) — not a snapshot dump. Live handles stay on the server
 so Drop does not cancel; terminals are reaped. GETs `InspectView` from
-`GET /inspect/:id`, then POSTs `CompleteBody` to `POST /complete`.
-`approve` / `reject` are `Decision::Complete` / `Decision::Fail` through
-the same complete path — not extra routes. Same secret. The server wraps
-[`Runtime::start`] / [`Runtime::inspect`] / [`Runtime::complete`]. No HTTP
-types in kernel `src/`. `InspectView` JSON carries the wait token once
+`GET /inspect/:id`, then POSTs `CompleteBody` to `POST /complete`, or
+`POST /cancel/:id` (`Runtime::cancel` by id — same inbox Cancel as
+handle Drop). `approve` / `reject` are `Decision::Complete` /
+`Decision::Fail` through the same complete path — not extra routes.
+Same secret. The server wraps [`Runtime::start`] / [`Runtime::inspect`]
+/ [`Runtime::complete`] / [`Runtime::cancel`]. No HTTP types in kernel
+`src/`. `InspectView` JSON carries the wait token once
 (`InspectNodeState::Waiting { token }`, not a cloned kernel `NodeState`).
-`POST /complete` ClaimedElsewhere is
+`POST /complete` and `POST /cancel/:id` ClaimedElsewhere is
 **423 Locked** `{"error":"claimed_elsewhere"}` (not 400, not 409).
 
 ```mermaid
@@ -122,13 +124,16 @@ flowchart LR
   httpStart["keel-rt-http POST /start"]
   httpGet["keel-rt-http GET /inspect"]
   httpPost["keel-rt-http POST /complete"]
+  httpCancel["keel-rt-http POST /cancel"]
   rts["Runtime::start"]
   rti["Runtime::inspect"]
   rtc["Runtime::complete"]
+  rtx["Runtime::cancel"]
   other --> client
   client --> httpStart --> rts
   client --> httpGet --> rti
   client --> httpPost --> rtc
+  client --> httpCancel --> rtx
 ```
 
 ```mermaid
@@ -142,6 +147,7 @@ classDiagram
     +complete(token, Resume)
     +approve(token, Bytes)
     +reject(token)
+    +cancel(execution_id)
   }
   class StartBody {
     id
@@ -383,7 +389,7 @@ edit `scheduler.rs`.
 | Snapshot resume / CAS                        | `restore.rs` + `Runtime::resume`           | event replay              |
 | RetryFailed recover                          | `apply` + `Runtime::resume_with`           | `handle.resume` (token)   |
 | Wait / gate complete                         | `Wait` + `Runtime::complete`               | HTTP crate (secret/bind)  |
-| Out-of-process start + inspect + complete    | `keel-rt-http` `KeelClient` / `StartBody` / `InspectView` | resume / schedule HTTP |
+| Out-of-process start + inspect + complete + cancel | `keel-rt-http` `KeelClient` / `StartBody` / `InspectView` / `Runtime::cancel` | resume / schedule HTTP |
 | Runtime inspect by id                        | `Runtime::inspect` (live or store)         | HTTP / HITL types         |
 | Cancel, wait, token-resume, inspect          | `handle` + `inject::Event`                 | domain types              |
 | Ready-queue / permits / spawn                | `scheduler` + `spawn`                      | `Policy`                  |

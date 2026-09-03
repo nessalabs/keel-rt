@@ -242,14 +242,39 @@ impl Scheduler {
                     }
                 }
             }
-            Event::Cancel => {
+            Event::Cancel { reply } => {
                 self.cancel.cancel();
                 self.spawn.abort_all();
                 self.apply_cmd(ApplyCmd::Cancel);
-                self.persist_then_emit().await;
+                if self.persist_then_emit().await {
+                    if let Some(r) = reply {
+                        let _ = r.send(Ok(()));
+                    }
+                } else if let Some(r) = reply {
+                    let _ = r.send(Err(crate::domain::state::ApplyError::Illegal(
+                        "persist failed".into(),
+                    )));
+                }
             }
             Event::Inspect { reply } => {
-                let _ = reply.send(self.exec.snapshot());
+                // Uncommitted Cancelled is not resume truth: persist Err
+                // must not let live inspect report Cancelled while the
+                // store is still Waiting. Watch/Shutdown still keep the
+                // apply-then-persist complete contract.
+                if self.exec.state() == ExecutionState::Cancelled
+                    && self.exec.revision() != self.last_persisted
+                {
+                    match self.store.get(self.exec.id()).await {
+                        Ok(Some(snap)) => {
+                            let _ = reply.send(snap);
+                        }
+                        _ => {
+                            let _ = reply.send(self.exec.snapshot());
+                        }
+                    }
+                } else {
+                    let _ = reply.send(self.exec.snapshot());
+                }
             }
             Event::Timer { node_id } => {
                 self.apply_cmd(ApplyCmd::RetryDue { node_id });

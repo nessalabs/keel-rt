@@ -15,8 +15,9 @@ use tokio_util::sync::CancellationToken;
 /// can inject without a handle.
 pub(crate) type ActiveSet = HashMap<ExecutionId, EventTx>;
 
-/// Shared claim / forget_live gate used by [`crate::Runtime::complete`] and
-/// [`ExecutionHandle::resume`]. One path — do not fork a second machine.
+/// Shared claim / forget_live gate used by [`crate::Runtime::complete`],
+/// [`crate::Runtime::cancel`], and [`ExecutionHandle::resume`]. One path —
+/// do not fork a second machine.
 pub(crate) struct LeaseGate {
     store: Arc<dyn StateStore>,
     owner: OwnerId,
@@ -117,7 +118,7 @@ impl ExecutionHandle {
 
     pub async fn cancel(&self) {
         self.cancel.cancel();
-        let _ = self.tx.send(Event::Cancel);
+        let _ = self.tx.send(Event::Cancel { reply: None });
     }
 
     pub async fn resume(&self, token: ResumeToken, resume: Resume) -> Result<(), ApplyError> {
@@ -182,7 +183,7 @@ impl Drop for ExecutionHandle {
         if !self.consumed {
             self.dropped.store(true, Ordering::SeqCst);
             self.cancel.cancel();
-            let _ = self.tx.send(Event::Cancel);
+            let _ = self.tx.send(Event::Cancel { reply: None });
         }
         let _ = self.tx.send(Event::Shutdown);
     }

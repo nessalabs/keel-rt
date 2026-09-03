@@ -89,6 +89,33 @@ impl From<ClaimError> for CompleteError {
     }
 }
 
+/// [`Runtime::cancel`] by [`ExecutionId`]. Not [`CompleteError`]: unknown
+/// is an execution (not a resume token), and cancel of Cancelled/Succeeded
+/// is Ok (noop), not `CompleteError::Cancelled`. Lease/store variants
+/// match complete so a sibling adapter can map 423 the same way.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CancelError {
+    #[error("unknown execution")]
+    UnknownExecution,
+    #[error("execution claimed elsewhere")]
+    ClaimedElsewhere,
+    #[error(transparent)]
+    Apply(#[from] ApplyError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+}
+
+impl From<ClaimError> for CancelError {
+    fn from(e: ClaimError) -> Self {
+        match e {
+            ClaimError::ClaimedElsewhere => Self::ClaimedElsewhere,
+            ClaimError::Store(s) => Self::Store(s),
+        }
+    }
+}
+
 /// Unknown [`ExecutorId`]s named by the definition. Display is a comma-separated list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnregisteredExecutors(pub Vec<ExecutorId>);
@@ -218,7 +245,7 @@ async fn drive(
         let timer = scheduler.next_deadline();
         let heartbeat = scheduler.next_heartbeat();
         let event = next_drive_event(&mut rx, clock.as_ref(), timer, heartbeat).await;
-        if matches!(event, Event::Cancel) {
+        if matches!(event, Event::Cancel { .. }) {
             cancel_bound_guard.arm(tx.clone(), cancel_bound);
         }
         // Start/Heartbeat returning true is a lost claim — drop live_tx so
@@ -473,6 +500,49 @@ impl Runtime {
             }
         }
         self.complete_from_store(token, resume).await
+    }
+
+    /// Cancel one execution by id. Live drive: same inbox [`Event::Cancel`]
+    /// as [`ExecutionHandle::cancel`], after a lease refresh. Persist
+    /// Err is not Ok (same class as [`Self::complete`] / `inject_resume`).
+    /// A stolen lease is [`CancelError::ClaimedElsewhere`] — do not inject.
+    pub async fn cancel(&self, execution_id: &ExecutionId) -> Result<(), CancelError> {
+        if let Some(tx) = self.live_tx(execution_id) {
+            match self.lease.claim_or_forget(execution_id).await {
+                Ok(()) => return inject::inject_cancel(&tx).await.map_err(CancelError::Apply),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.cancel_from_store(execution_id).await
+    }
+
+    async fn cancel_from_store(&self, id: &ExecutionId) -> Result<(), CancelError> {
+        let snap = self
+            .store
+            .get(id)
+            .await?
+            .ok_or(CancelError::UnknownExecution)?;
+        if snap.state.is_terminal() {
+            return Ok(());
+        }
+        let definition = self
+            .store
+            .workflow_definition(id)
+            .await?
+            .ok_or(CancelError::UnknownExecution)?;
+        let mut exec = Execution::from_snapshot(definition, snap)?;
+        if exec.state().is_terminal() {
+            return Ok(());
+        }
+        let epoch = self.store.claim(id, &self.owner, self.clock.now()).await?;
+        exec.set_fence_epoch(epoch.0);
+        let _ = exec.apply(ApplyCmd::Cancel, self.policy.as_ref(), self.clock.now());
+        if let Err(e) = self.store.persist(&exec).await {
+            let _ = self.store.release(id, epoch).await;
+            return Err(CancelError::Store(e));
+        }
+        let _ = self.store.release(id, epoch).await;
+        Ok(())
     }
 
     fn map_complete_apply(&self, r: Result<(), ApplyError>) -> Result<(), CompleteError> {
@@ -743,7 +813,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn due_deadline_prefers_queued_cancel() {
         let (tx, mut rx) = inject::channel();
-        let _ = tx.send(Event::Cancel);
+        let _ = tx.send(Event::Cancel { reply: None });
         let ev = next_drive_event(
             &mut rx,
             &SystemClock,
@@ -752,7 +822,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(ev, Event::Cancel),
+            matches!(ev, Event::Cancel { .. }),
             "inbox must beat due Timer, got {ev:?}"
         );
     }
@@ -805,7 +875,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn due_deadline_does_not_call_wait_until() {
         let (tx, mut rx) = inject::channel();
-        let _ = tx.send(Event::Cancel);
+        let _ = tx.send(Event::Cancel { reply: None });
         let ev = next_drive_event(
             &mut rx,
             &PanicIfWaitUntil,
@@ -814,7 +884,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(ev, Event::Cancel),
+            matches!(ev, Event::Cancel { .. }),
             "inbox must beat due Timer without wait_until, got {ev:?}"
         );
     }
@@ -1055,10 +1125,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn due_heartbeat_prefers_queued_cancel() {
         let (tx, mut rx) = inject::channel();
-        let _ = tx.send(Event::Cancel);
+        let _ = tx.send(Event::Cancel { reply: None });
         let ev = next_drive_event(&mut rx, &SystemClock, None, Some(Timestamp(0))).await;
         assert!(
-            matches!(ev, Event::Cancel),
+            matches!(ev, Event::Cancel { .. }),
             "inbox must beat due Heartbeat, got {ev:?}"
         );
     }

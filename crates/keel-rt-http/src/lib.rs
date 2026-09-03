@@ -1,17 +1,18 @@
 //! Thin HTTP adapter. Another process starts a run, inspects for a wait
-//! token, then POSTs that token + [`Resume`]. This process calls
-//! [`Runtime::start`] / [`Runtime::inspect`] / [`Runtime::complete`].
-//! No forms, no identity.
+//! token, then POSTs that token + [`Resume`], or cancels by id. This
+//! process calls [`Runtime::start`] / [`Runtime::inspect`] /
+//! [`Runtime::complete`] / [`Runtime::cancel`]. No forms, no identity.
 //!
 //! A shared secret is required. Default bind is `127.0.0.1` only.
 //! [`KeelClient::start`] + [`KeelClient::inspect`] + [`KeelClient::complete`]
-//! is the out-of-process wait round-trip. Kernel `keel-rt` does not depend
-//! on this crate.
+//! / [`KeelClient::cancel`] is the out-of-process wait round-trip. Kernel
+//! `keel-rt` does not depend on this crate.
 
 mod client;
 
 pub use client::{Decision, KeelClient, KeelClientError, HANG_BOUND};
 
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
@@ -20,8 +21,8 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use keel_rt::{
-    CompleteError, ExecutionHandle, ExecutionId, ExecutionSnapshot, ExecutionState, ExecutorId,
-    Join, NodeId, NodeState, OnFailure, Resume, ResumeToken, Runtime, StartError,
+    CancelError, CompleteError, ExecutionHandle, ExecutionId, ExecutionSnapshot, ExecutionState,
+    ExecutorId, Join, NodeId, NodeState, OnFailure, Resume, ResumeToken, Runtime, StartError,
     WorkflowDefinition, WorkflowId,
 };
 use serde::{Deserialize, Serialize};
@@ -34,7 +35,7 @@ use thiserror::Error;
 pub const DEFAULT_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
 /// JSON larger than this is not accepted. Oversized body does not call start
-/// or complete.
+/// or complete. Cancel is id-only: that route rejects any body (`413`).
 pub const MAX_BODY: usize = 1024 * 1024;
 
 /// `POST /complete` when another Runtime holds the execution
@@ -227,12 +228,16 @@ struct App {
 }
 
 /// Router a caller can nest or serve. Paths: `POST /start`, `GET /inspect/:id`,
-/// `POST /complete`.
+/// `POST /complete`, `POST /cancel/:id`.
 pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
     Router::new()
         .route("/start", post(start_handler))
         .route("/complete", post(complete_handler))
         .route("/inspect/:id", get(inspect_handler))
+        .route(
+            "/cancel/:id",
+            post(cancel_handler).layer(DefaultBodyLimit::max(0)),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(App {
             runtime,
@@ -381,6 +386,44 @@ async fn complete_handler(
         Err(CompleteError::UnknownToken) => StatusCode::NOT_FOUND.into_response(),
         Err(CompleteError::Cancelled) => StatusCode::CONFLICT.into_response(),
         Err(CompleteError::ClaimedElsewhere) => (
+            StatusCode::LOCKED,
+            Json(ErrorBody {
+                error: "claimed_elsewhere",
+            }),
+        )
+            .into_response(),
+        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+async fn cancel_handler(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> axum::response::Response {
+    if authorize(&app, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !body.is_empty() {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let id = match ExecutionId::parse(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    match app.runtime.cancel(&id).await {
+        Ok(()) => {
+            let terminal = app
+                .runtime
+                .inspect(&id)
+                .await
+                .is_some_and(|s| s.state.is_terminal());
+            drop_held_if_terminal(&app.started, &id, terminal);
+            StatusCode::OK.into_response()
+        }
+        Err(CancelError::UnknownExecution) => StatusCode::NOT_FOUND.into_response(),
+        Err(CancelError::ClaimedElsewhere) => (
             StatusCode::LOCKED,
             Json(ErrorBody {
                 error: "claimed_elsewhere",
