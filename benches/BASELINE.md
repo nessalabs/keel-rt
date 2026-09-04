@@ -1,5 +1,27 @@
 # Kernel microbench baseline (this run)
 
+## Custom Executor types (`cursor/custom-nodes-4717`, 2026-09-04)
+
+`cargo test --test custom_executors -- --nocapture --test-threads=1`.
+Debug, Tokio `current_thread`. Machine: Cloud Agent VM (x86_64).
+Start validation is HashSet + HashMap get per **unique DAG id**, not per
+catalog entry. `executor_ids()` allocates + sorts the catalog on each call.
+Scheduler caches `Arc<dyn Executor>` per node slot at drive start (one Arc
+clone per DAG node, not per registered id). `register_fn` and `impl Executor`
+share that path.
+
+| # | path | N | debug | notes |
+|---|---|---:|---|---|
+| 1 | 10k `register_fn` + `build` | 10 000 | **6.705 ms** | RSS 5764 → 7448 KiB (**+1684 KiB**, ~172 B/id) |
+| 2 | `Runtime::executor_ids` sort | 10 000 + `wait` | **6.362 ms** | allocates `Vec<ExecutorId>` and sorts |
+| 3 | start + wait one node among 10k | 1 | **1.717 ms** | HashMap get of `e0`; not an O(catalog) scan |
+| 4 | MemoryStore diamond `impl Executor` | 4 nodes | **0.097 ms** median | n=7; 96623 ns |
+| 5 | MemoryStore diamond `register_fn` | 4 nodes | **0.096 ms** median | n=7; 95758 ns; typed **+0.9%** (inside 10%) |
+
+Fat `Bytes` through two custom types (64 KiB) is refcount (`as_ptr` equal):
+`fat_bytes_custom_executor_join_is_refcount_not_copy`. Panic with a 1 MiB
+`Vec` drops the allocation via CatchUnwind (`custom_panic_huge_vec_is_failed_and_drop_reclaims`).
+
 ## Cancel one execution (`sdk/cancel`, 2026-09-03)
 
 Sibling `keel-rt-http`. `FakeClock`, MemoryStore, loopback, shared secret.

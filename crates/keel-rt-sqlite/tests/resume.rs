@@ -1110,8 +1110,8 @@ fn resume_running_custom_without_adapter_is_unregistered() {
         )
         .unwrap();
         assert!(matches!(
-            ex.node(&NodeId::new("slow")).unwrap().state,
-            NodeState::Running { .. }
+            ex.snapshot().node(&NodeId::new("slow")).map(|n| &n.state),
+            Some(NodeState::Running { .. })
         ));
         let rt = current_rt();
         rt.block_on(async {

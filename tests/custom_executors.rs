@@ -151,7 +151,7 @@ async fn custom_id_case_and_unicode_lookalike_are_unregistered() {
             let names: Vec<&str> = missing.0.iter().map(|e| e.as_str()).collect();
             assert_eq!(names, vec!["Research"], "{names:?}");
         }
-        other => panic!("case mismatch must be unregistered, got {other:?}"),
+        Ok(_) => panic!("case mismatch must be unregistered, start succeeded"),
     }
     let lookalike = "r\u{0435}search";
     assert_ne!(lookalike, "research");
@@ -164,7 +164,7 @@ async fn custom_id_case_and_unicode_lookalike_are_unregistered() {
         Err(StartError::UnregisteredExecutors(missing)) => {
             assert_eq!(missing.0[0].as_str(), lookalike);
         }
-        other => panic!("unicode lookalike must be unregistered, got {other:?}"),
+        Ok(_) => panic!("unicode lookalike must be unregistered, start succeeded"),
     }
 }
 
@@ -188,8 +188,8 @@ async fn resume_running_custom_without_adapter_is_unregistered_then_adapter_resu
     )
     .unwrap();
     assert!(matches!(
-        ex.node(&NodeId::new("slow")).unwrap().state,
-        NodeState::Running { .. }
+        ex.snapshot().node(&NodeId::new("slow")).map(|n| &n.state),
+        Some(NodeState::Running { .. })
     ));
     store.persist(&ex).await.unwrap();
     let id = ex.id().clone();
