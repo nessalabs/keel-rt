@@ -2,8 +2,8 @@
 //! [`CompleteBody`] the server already accepts. Not a second token type.
 
 use crate::{
-    CompleteBody, CompleteSecret, InspectView, StartBody, StartView, CLAIMED_ELSEWHERE,
-    SECRET_HEADER,
+    CompleteBody, CompleteSecret, ExecutorsView, InspectView, OutputBody, StartBody, StartView,
+    TokenBody, UnregisteredBody, CLAIMED_ELSEWHERE, SECRET_HEADER,
 };
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -12,7 +12,7 @@ use hyper::{Method, Request, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use keel_rt::{ExecutionId, NodeOutcome, Resume, ResumeToken};
+use keel_rt::{ExecutionId, ExecutorId, NodeOutcome, Resume, ResumeToken};
 use std::fmt;
 use std::time::Duration;
 use thiserror::Error;
@@ -56,6 +56,11 @@ pub enum KeelClientError {
     PayloadTooLarge,
     #[error("request rejected")]
     BadRequest,
+    #[error(
+        "unregistered executors: {}",
+        .executors.iter().map(|e| e.as_str()).collect::<Vec<_>>().join(", ")
+    )]
+    Unregistered { executors: Vec<ExecutorId> },
     #[error("execution claimed elsewhere")]
     ClaimedElsewhere,
     #[error("unexpected status {0}")]
@@ -175,12 +180,55 @@ impl KeelClient {
             }
             401 => Err(KeelClientError::Unauthorized),
             413 => Err(KeelClientError::PayloadTooLarge),
-            400 => Err(KeelClientError::BadRequest),
+            400 => {
+                let bytes = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
+                    .to_bytes();
+                if let Ok(body) = serde_json::from_slice::<UnregisteredBody>(&bytes) {
+                    if body.error == "unregistered" && !body.executors.is_empty() {
+                        return Err(KeelClientError::Unregistered {
+                            executors: body.executors,
+                        });
+                    }
+                }
+                Err(KeelClientError::BadRequest)
+            }
+            other => Err(KeelClientError::Unexpected(other)),
+        }
+    }
+
+    /// `GET /executors` — ids this Runtime has registered (plus builtin `wait`).
+    pub async fn executors(&self) -> Result<Vec<ExecutorId>, KeelClientError> {
+        let resp = self
+            .send(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(self.uri("executors")?),
+                Bytes::new(),
+            )
+            .await?;
+        match resp.status().as_u16() {
+            200 => {
+                let bytes = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
+                    .to_bytes();
+                let view: ExecutorsView = serde_json::from_slice(&bytes)
+                    .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+                Ok(view.executors)
+            }
+            401 => Err(KeelClientError::Unauthorized),
             other => Err(KeelClientError::Unexpected(other)),
         }
     }
 
     /// `GET /inspect/:id` — same secret as complete. Hang-bound applies.
+    /// Inspect JSON over [`crate::MAX_BODY`] is [`KeelClientError::PayloadTooLarge`].
     pub async fn inspect(
         &self,
         execution_id: &ExecutionId,
@@ -206,6 +254,7 @@ impl KeelClient {
             }
             401 => Err(KeelClientError::Unauthorized),
             404 => Err(KeelClientError::UnknownExecution),
+            413 => Err(KeelClientError::PayloadTooLarge),
             other => Err(KeelClientError::Unexpected(other)),
         }
     }
@@ -223,11 +272,40 @@ impl KeelClient {
             resume: resume.into(),
         })
         .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        self.post_apply("complete", json).await
+    }
+
+    /// `POST /approve` — `Decision::Complete(bytes)` through the same
+    /// complete apply path as [`Self::complete`].
+    pub async fn approve(
+        &self,
+        token: ResumeToken,
+        output: impl Into<Bytes>,
+    ) -> Result<(), KeelClientError> {
+        let json = serde_json::to_vec(&OutputBody {
+            token,
+            output: Some(output.into()),
+        })
+        .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        self.post_apply("approve", json).await
+    }
+
+    /// `POST /reject` — `Decision::Fail` through the same complete apply
+    /// path (`NodeOutcome::failed("failed")`).
+    pub async fn reject(&self, token: ResumeToken) -> Result<(), KeelClientError> {
+        let json = serde_json::to_vec(&TokenBody { token })
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        self.post_apply("reject", json).await
+    }
+
+    /// One POST + status map for complete / approve / reject. Same secret,
+    /// hang-bound, and 409/423 codes — not a second state machine.
+    async fn post_apply(&self, path: &str, json: Vec<u8>) -> Result<(), KeelClientError> {
         let resp = self
             .send(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(self.uri("complete")?)
+                    .uri(self.uri(path)?)
                     .header(CONTENT_TYPE, "application/json")
                     .header(CONTENT_LENGTH, json.len()),
                 Bytes::from(json),
@@ -243,24 +321,6 @@ impl KeelClient {
             CLAIMED_ELSEWHERE => Err(KeelClientError::ClaimedElsewhere),
             other => Err(KeelClientError::Unexpected(other)),
         }
-    }
-
-    /// `Decision::Complete(bytes)` through [`Self::complete`]. Same
-    /// `POST /complete` — not a second endpoint.
-    pub async fn approve(
-        &self,
-        token: ResumeToken,
-        output: impl Into<Bytes>,
-    ) -> Result<(), KeelClientError> {
-        self.complete(token, Decision::Complete(output.into()))
-            .await
-    }
-
-    /// `Decision::Fail` through [`Self::complete`] — `NodeOutcome::failed("failed")`,
-    /// execution [`keel_rt::ExecutionState::Failed`]. There is no `Decision`
-    /// reject variant (PR #9 mapping).
-    pub async fn reject(&self, token: ResumeToken) -> Result<(), KeelClientError> {
-        self.complete(token, Decision::Fail).await
     }
 
     /// `POST /cancel/:id` — same secret and hang-bound as start / inspect /
@@ -345,6 +405,18 @@ mod tests {
             path_url("http://127.0.0.1:9/", "cancel/exec-1"),
             "http://127.0.0.1:9/cancel/exec-1"
         );
+        assert_eq!(
+            path_url("http://127.0.0.1:9/", "executors"),
+            "http://127.0.0.1:9/executors"
+        );
+        assert_eq!(
+            path_url("http://127.0.0.1:9/", "approve"),
+            "http://127.0.0.1:9/approve"
+        );
+        assert_eq!(
+            path_url("http://127.0.0.1:9/", "reject"),
+            "http://127.0.0.1:9/reject"
+        );
     }
 
     #[test]
@@ -360,6 +432,16 @@ mod tests {
     fn hang_bound_default_is_five_seconds() {
         assert_eq!(HANG_BOUND, Duration::from_secs(5));
         assert_eq!(crate::CLAIMED_ELSEWHERE, 423);
+    }
+
+    #[test]
+    fn unregistered_display_names_ids() {
+        let err = KeelClientError::Unregistered {
+            executors: vec![keel_rt::ExecutorId::new("not-on-this-engine")],
+        };
+        let text = err.to_string();
+        assert!(text.contains("not-on-this-engine"), "{text}");
+        assert!(text.contains("unregistered"), "{text}");
     }
 
     #[test]

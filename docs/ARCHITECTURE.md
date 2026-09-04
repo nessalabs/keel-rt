@@ -107,13 +107,19 @@ flowchart TB
 `join`, edges) — not a snapshot dump. Live handles stay on the server
 so Drop does not cancel; terminals are reaped. GETs `InspectView` from
 `GET /inspect/:id`, then POSTs `CompleteBody` to `POST /complete`, or
+thin aliases `POST /approve` / `POST /reject` (`OutputBody` /
+`TokenBody` → the same complete apply), or
 `POST /cancel/:id` (`Runtime::cancel` by id — same inbox Cancel as
-handle Drop). `approve` / `reject` are `Decision::Complete` /
-`Decision::Fail` through the same complete path — not extra routes.
+handle Drop). `GET /executors` returns `ExecutorsView` from
+`Runtime::executor_ids` (registered ids plus builtin `wait`).
 Same secret. The server wraps [`Runtime::start`] / [`Runtime::inspect`]
 / [`Runtime::complete`] / [`Runtime::cancel`]. No HTTP types in kernel
 `src/`. `InspectView` JSON carries the wait token once
 (`InspectNodeState::Waiting { token }`, not a cloned kernel `NodeState`).
+Succeeded owns output bytes as one base64 field — the same compact
+wire as `POST /complete` Succeeded and `POST /approve` `output`
+(kernel Resume `[u8]` serde stays in-process). Running / Waiting /
+Failed do not. Inspect JSON over `MAX_BODY` is **413**.
 `POST /complete` and `POST /cancel/:id` ClaimedElsewhere is
 **423 Locked** `{"error":"claimed_elsewhere"}` (not 400, not 409).
 
@@ -123,16 +129,23 @@ flowchart LR
   client[KeelClient]
   httpStart["keel-rt-http POST /start"]
   httpGet["keel-rt-http GET /inspect"]
+  httpExec["keel-rt-http GET /executors"]
   httpPost["keel-rt-http POST /complete"]
+  httpApprove["keel-rt-http POST /approve"]
+  httpReject["keel-rt-http POST /reject"]
   httpCancel["keel-rt-http POST /cancel"]
   rts["Runtime::start"]
   rti["Runtime::inspect"]
+  rte["Runtime::executor_ids"]
   rtc["Runtime::complete"]
   rtx["Runtime::cancel"]
   other --> client
   client --> httpStart --> rts
   client --> httpGet --> rti
+  client --> httpExec --> rte
   client --> httpPost --> rtc
+  client --> httpApprove --> rtc
+  client --> httpReject --> rtc
   client --> httpCancel --> rtx
 ```
 
@@ -143,11 +156,22 @@ classDiagram
     +without_secret(base_url)
     +hang_bound(Duration)
     +start(StartBody) ExecutionId
+    +executors() ExecutorsView
     +inspect(execution_id) InspectView
     +complete(token, Resume)
     +approve(token, Bytes)
     +reject(token)
     +cancel(execution_id)
+  }
+  class ExecutorsView {
+    executors
+  }
+  class OutputBody {
+    token ResumeToken
+    output Bytes
+  }
+  class TokenBody {
+    token ResumeToken
   }
   class StartBody {
     id
@@ -181,7 +205,8 @@ classDiagram
     Pending Ready
     Running attempt
     Waiting token attempt
-    Succeeded Failed Cancelled TimedOut
+    Succeeded output
+    Failed Cancelled TimedOut
   }
   class Decision {
     Complete Bytes
@@ -205,6 +230,9 @@ classDiagram
   InspectView --> InspectNode
   InspectNode --> InspectNodeState
   KeelClient --> CompleteBody : POST JSON
+  KeelClient --> ExecutorsView : GET /executors
+  KeelClient --> OutputBody : POST /approve
+  KeelClient --> TokenBody : POST /reject
 ```
 
 `keel-rt-schedule` is `ScheduleSpec` → `next_after` → `Clock::wait_until` →

@@ -90,8 +90,14 @@ impl ExecutorRegistry {
         self.inner.insert(exec.id(), exec);
     }
 
-    pub     fn get(&self, id: &ExecutorId) -> Option<Arc<dyn Executor>> {
+    pub fn get(&self, id: &ExecutorId) -> Option<Arc<dyn Executor>> {
         self.inner.get(id).cloned()
+    }
+
+    pub fn ids(&self) -> Vec<ExecutorId> {
+        let mut ids: Vec<_> = self.inner.keys().cloned().collect();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        ids
     }
 }
 
@@ -130,8 +136,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn sleep_zero_completes_without_cancel() {
-        ctx(CancellationToken::new())
-            .sleep(Duration::ZERO)
-            .await;
+        ctx(CancellationToken::new()).sleep(Duration::ZERO).await;
     }
 }

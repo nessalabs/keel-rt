@@ -23,7 +23,9 @@ fn secret() -> CompleteSecret {
 }
 
 async fn post_raw(addr: std::net::SocketAddr, extra_headers: &str, body: &[u8]) -> u16 {
-    post_raw_full(addr, extra_headers, body).await.0
+    post_raw_path(addr, "/complete", extra_headers, body)
+        .await
+        .0
 }
 
 async fn post_raw_full(
@@ -31,8 +33,17 @@ async fn post_raw_full(
     extra_headers: &str,
     body: &[u8],
 ) -> (u16, String) {
+    post_raw_path(addr, "/complete", extra_headers, body).await
+}
+
+async fn post_raw_path(
+    addr: std::net::SocketAddr,
+    path: &str,
+    extra_headers: &str,
+    body: &[u8],
+) -> (u16, String) {
     let req = format!(
-        "POST /complete HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n",
         body.len()
     );
     let mut s = TcpStream::connect(addr).await.expect("connect");
@@ -625,5 +636,57 @@ async fn post_bearer_secret_is_200() {
     let status = post_raw(addr, &format!("Authorization: Bearer {SECRET}\r\n"), &json).await;
     assert_eq!(status, 200);
     tokio::time::timeout(BOUND, handle.wait()).await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn post_approve_empty_body_is_400_does_not_complete() {
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("next", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"next"))
+            })
+            .build(),
+    );
+    let (handle, _token) = park_wait(&rt).await;
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let extra = format!("{SECRET_HEADER}: {SECRET}\r\n");
+    let (status_empty, _) = post_raw_path(addr, "/approve", &extra, b"").await;
+    let (status_obj, _) = post_raw_path(addr, "/approve", &extra, b"{}").await;
+    assert_eq!(status_empty, 400, "empty approve must be 400 not 422");
+    assert_eq!(status_obj, 400, "missing token must be 400 not 422");
+    assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
+    handle.cancel().await;
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn post_approve_oversized_is_413_does_not_complete() {
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("next", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"next"))
+            })
+            .build(),
+    );
+    let (handle, _token) = park_wait(&rt).await;
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let huge = vec![b'x'; MAX_BODY + 1];
+    let extra = format!("{SECRET_HEADER}: {SECRET}\r\n");
+    let status = post_raw_path(addr, "/approve", &extra, &huge).await.0;
+    assert!(status == 413 || status == 400, "got {status}");
+    assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
+    handle.cancel().await;
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn post_approve_without_secret_is_401() {
+    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let status = post_raw_path(addr, "/approve", "", b"{}").await.0;
+    assert_eq!(status, 401);
     server.abort();
 }

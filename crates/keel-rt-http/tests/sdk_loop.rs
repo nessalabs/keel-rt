@@ -3,6 +3,7 @@
 use bytes::Bytes;
 use keel_rt::{
     ExecutionContext, ExecutionState, FakeClock, NodeId, NodeOutcome, Runtime, WorkflowDefinition,
+    WAIT_ID,
 };
 use keel_rt_http::{
     serve_ephemeral, CompleteSecret, InspectNodeState, KeelClient, KeelClientError,
@@ -60,6 +61,16 @@ async fn sdk_loop_approve_then_cancel_is_409() {
     let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
     let client = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
 
+    let catalog = client.executors().await.expect("catalog");
+    assert!(
+        catalog.iter().any(|id| id.as_str() == "research"),
+        "{catalog:?}"
+    );
+    assert!(
+        catalog.iter().any(|id| id.as_str() == WAIT_ID),
+        "{catalog:?}"
+    );
+
     let err = client
         .start(
             WorkflowDefinition::builder("missing")
@@ -69,7 +80,18 @@ async fn sdk_loop_approve_then_cancel_is_409() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, KeelClientError::BadRequest), "{err:?}");
+    match &err {
+        KeelClientError::Unregistered { executors } => {
+            assert!(
+                executors
+                    .iter()
+                    .any(|id| id.as_str() == "not-on-this-engine"),
+                "{executors:?}"
+            );
+        }
+        other => panic!("expected Unregistered with id, got {other:?}"),
+    }
+    assert!(err.to_string().contains("not-on-this-engine"), "{err}");
 
     let id = client.start(dag()).await.expect("start");
     let parked = tokio::time::timeout(BOUND, async {
@@ -89,7 +111,9 @@ async fn sdk_loop_approve_then_cancel_is_409() {
     .expect("park");
     assert_eq!(
         parked.node(&NodeId::new("research")).map(|n| &n.state),
-        Some(&InspectNodeState::Succeeded)
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"notes"),
+        })
     );
     assert!(parked.resume_token(&NodeId::new("research")).is_none());
     assert!(parked.resume_token(&NodeId::new("write")).is_none());
@@ -97,28 +121,51 @@ async fn sdk_loop_approve_then_cancel_is_409() {
         .resume_token(&NodeId::new("hold"))
         .cloned()
         .expect("token only on Waiting");
-    let wire = serde_json::to_string(&parked).unwrap();
-    assert!(!wire.contains("notes"), "InspectView omits outputs: {wire}");
+    let hold_json =
+        serde_json::to_value(&parked.node(&NodeId::new("hold")).unwrap().state).unwrap();
+    assert!(
+        hold_json.get("output").is_none(),
+        "Waiting must not own output: {hold_json}"
+    );
 
     client
         .approve(token, Bytes::from_static(b"human-ok"))
         .await
         .expect("approve");
-    tokio::time::timeout(BOUND, async {
+    let done = tokio::time::timeout(BOUND, async {
         loop {
             let v = client.inspect(&id).await.expect("i");
             if v.state == ExecutionState::Succeeded {
                 assert_eq!(
                     v.node(&NodeId::new("write")).map(|n| &n.state),
-                    Some(&InspectNodeState::Succeeded)
+                    Some(&InspectNodeState::Succeeded {
+                        output: Bytes::from_static(b"human-ok"),
+                    })
                 );
-                return;
+                return v;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("succeeded");
+    let wire = serde_json::to_value(&done).unwrap();
+    let write = wire["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "write")
+        .unwrap();
+    assert!(
+        write["state"]["output"].is_string(),
+        "write Succeeded output is one base64 field: {write}"
+    );
+    assert_eq!(
+        done.node(&NodeId::new("write")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"human-ok"),
+        })
+    );
     assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert_eq!(last.lock().unwrap().as_ref(), b"human-ok");
 

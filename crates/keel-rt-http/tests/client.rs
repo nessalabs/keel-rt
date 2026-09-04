@@ -2,15 +2,16 @@
 //! Same protocol as `complete.rs`. No wall sleep.
 
 use bytes::Bytes;
-use keel_rt::testing::NoRefreshHeartbeat;
+use keel_rt::testing::{disable, enable, FailingStore, NoRefreshHeartbeat};
 use keel_rt::{
     ExecutionContext, ExecutionId, ExecutionState, FakeClock, Join, MemoryStore, NodeId,
     NodeOutcome, NodeState, OnFailure, Resume, ResumeToken, Runtime, StateStore,
-    WorkflowDefinition, DEFAULT_LEASE_TTL,
+    WorkflowDefinition, DEFAULT_LEASE_TTL, WAIT_ID,
 };
 use keel_rt_http::{
     serve_ephemeral, CompleteBody, CompleteSecret, Decision, InspectNodeState, KeelClient,
-    KeelClientError, StartBody, CLAIMED_ELSEWHERE, HANG_BOUND, MAX_BODY, SECRET_HEADER,
+    KeelClientError, StartBody, StartEdge, StartNode, CLAIMED_ELSEWHERE, HANG_BOUND, MAX_BODY,
+    SECRET_HEADER,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -146,6 +147,12 @@ async fn client_inspect_then_complete_unblocks_wait() {
     let after = client.inspect(&id).await.expect("after");
     assert_eq!(after.state, ExecutionState::Succeeded);
     assert!(after.resume_token(&NodeId::new("hold")).is_none());
+    assert_eq!(
+        after.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"gate"),
+        })
+    );
     server.abort();
 }
 
@@ -209,6 +216,18 @@ async fn client_inspect_while_running_has_no_token_then_wait_sees_token() {
     assert!(
         running.resume_token(&NodeId::new("slow")).is_none(),
         "InspectView must not expose a Running-node token"
+    );
+    let slow_json = serde_json::to_value(
+        running
+            .node(&NodeId::new("slow"))
+            .map(|n| &n.state)
+            .expect("slow"),
+    )
+    .unwrap();
+    assert_eq!(slow_json["kind"], "running");
+    assert!(
+        slow_json.get("output").is_none(),
+        "Running inspect JSON must not own output: {slow_json}"
     );
     go.notify_one();
     assert_eq!(
@@ -697,7 +716,7 @@ async fn client_inspect_wait_sibling_while_running_completes_only_wait() {
             let v = client.inspect(&id).await.expect("poll");
             if matches!(
                 v.node(&NodeId::new("hold")).map(|n| &n.state),
-                Some(InspectNodeState::Succeeded)
+                Some(InspectNodeState::Succeeded { .. })
             ) {
                 assert!(
                     matches!(
@@ -1321,7 +1340,12 @@ async fn client_wire_is_complete_body_and_secret_header() {
         !headers.contains('?') && !raw.contains(&format!("?{SECRET_HEADER}")),
         "secret must not be a query string: {raw}"
     );
-    let parsed: CompleteBody = serde_json::from_str(body.trim_end_matches('\0')).unwrap();
+    let body = body.trim_end_matches('\0');
+    assert!(
+        body.contains("Zw==") && !body.contains("[103]"),
+        "complete Succeeded must be base64, not a u8 array: {body}"
+    );
+    let parsed: CompleteBody = serde_json::from_str(body).unwrap();
     assert_eq!(parsed.token, token);
     assert!(matches!(
         parsed.resume,
@@ -1642,14 +1666,143 @@ async fn client_start_wrong_secret_is_401() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn client_start_unregistered_is_400_nothing_runs() {
-    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("research", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"notes"))
+            })
+            .build(),
+    );
     let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let client = client_at(addr);
+    let catalog = client.executors().await.expect("catalog");
+    assert!(
+        catalog.iter().any(|id| id.as_str() == "research"),
+        "after register_fn(research) catalog must name it: {catalog:?}"
+    );
+    assert!(
+        catalog.iter().any(|id| id.as_str() == WAIT_ID),
+        "catalog must include builtin wait: {catalog:?}"
+    );
+    assert!(
+        !catalog.iter().any(|id| id.as_str() == "not-on-this-engine"),
+        "catalog must not invent missing ids: {catalog:?}"
+    );
     let def = WorkflowDefinition::builder("wf")
-        .node("work", "missing-exec")
+        .node("work", "not-on-this-engine")
         .build()
         .unwrap();
-    let err = client_at(addr).start(def).await.unwrap_err();
-    assert!(matches!(err, KeelClientError::BadRequest), "{err:?}");
+    let err = client.start(def).await.unwrap_err();
+    match &err {
+        KeelClientError::Unregistered { executors } => {
+            assert!(
+                executors
+                    .iter()
+                    .any(|id| id.as_str() == "not-on-this-engine"),
+                "{executors:?}"
+            );
+        }
+        other => panic!("unregistered start must name the id, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("not-on-this-engine"),
+        "400 Display must name the missing id: {err}"
+    );
+    let mut sorted = catalog.clone();
+    sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    assert_eq!(catalog, sorted, "catalog must be sorted stable ids");
+    assert_eq!(catalog, rt.executor_ids(), "GET /executors is live Runtime");
+    let wait_only = client
+        .start(
+            WorkflowDefinition::builder("just-wait")
+                .node("hold", WAIT_ID)
+                .build()
+                .unwrap(),
+        )
+        .await;
+    assert!(
+        wait_only.is_ok(),
+        "id in catalog must not be unregistered: {wait_only:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_wait_plus_missing_unregistered_is_exactly_missing() {
+    let rt = Arc::new(Runtime::builder().clock(Arc::new(FakeClock::new())).build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let err = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .node("work", "missing-only")
+                .edge("hold", "work")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    match err {
+        KeelClientError::Unregistered { executors } => {
+            let names: Vec<_> = executors.iter().map(|e| e.as_str()).collect();
+            assert_eq!(names, ["missing-only"], "{names:?}");
+        }
+        other => panic!("must not list wait: {other:?}"),
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_start_cycle_is_400_bad_request_not_unregistered() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let a = NodeId::new("a");
+    let b = NodeId::new("b");
+    let err = client_at(addr)
+        .start(StartBody {
+            id: keel_rt::WorkflowId::new("cycle"),
+            on_failure: OnFailure::FailExecution,
+            nodes: vec![
+                StartNode {
+                    id: a.clone(),
+                    executor_id: keel_rt::ExecutorId::new("wait"),
+                    join: Join::AllSucceeded,
+                },
+                StartNode {
+                    id: b.clone(),
+                    executor_id: keel_rt::ExecutorId::new("wait"),
+                    join: Join::AllSucceeded,
+                },
+            ],
+            edges: vec![
+                StartEdge {
+                    from: a.clone(),
+                    to: b.clone(),
+                },
+                StartEdge { from: b, to: a },
+            ],
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::BadRequest),
+        "cycle must stay opaque BadRequest, not Unregistered: {err:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_executors_without_secret_is_401() {
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let err = KeelClient::without_secret(format!("http://{addr}"))
+        .unwrap()
+        .executors()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::Unauthorized), "{err:?}");
     server.abort();
 }
 
@@ -1861,10 +2014,26 @@ async fn client_start_inspect_approve_unblocks_wait() {
     .await
     .expect("terminal");
     assert_eq!(done.state, ExecutionState::Succeeded);
-    assert!(matches!(
+    assert_eq!(
         done.node(&NodeId::new("hold")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
-    ));
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"gate"),
+        })
+    );
+    assert_eq!(
+        done.node(&NodeId::new("next")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"gate"),
+        })
+    );
+    let running_json = serde_json::to_value(
+        done.node(&NodeId::new("hold"))
+            .map(|n| &n.state)
+            .expect("hold"),
+    )
+    .unwrap();
+    assert_eq!(running_json["kind"], "succeeded");
+    assert!(running_json.get("token").is_none());
     let snap = rt.inspect(&id).await.expect("downstream");
     assert_eq!(
         snap.node(&NodeId::new("next"))
@@ -2023,7 +2192,7 @@ async fn client_start_fail_subtree_keeps_running_sibling() {
             let v = client.inspect(&id).await.expect("inspect");
             if matches!(
                 v.node(&NodeId::new("join")).map(|n| &n.state),
-                Some(InspectNodeState::Succeeded)
+                Some(InspectNodeState::Succeeded { .. })
             ) {
                 return v;
             }
@@ -2227,7 +2396,7 @@ async fn client_approve_then_reject_does_not_fail_succeeded() {
     assert_eq!(snap.state, ExecutionState::Succeeded);
     assert!(matches!(
         snap.node(&NodeId::new("hold")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
+        Some(InspectNodeState::Succeeded { .. })
     ));
     server.abort();
 }
@@ -2435,7 +2604,7 @@ async fn client_approve_after_fail_fast_other_node_is_409() {
     assert_eq!(snap.state, ExecutionState::Failed);
     assert!(!matches!(
         snap.node(&NodeId::new("hold")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
+        Some(InspectNodeState::Succeeded { .. })
     ));
     server.abort();
 }
@@ -3342,7 +3511,7 @@ async fn client_cancel_fail_subtree_cancels_running_sibling() {
     assert_eq!(after.state, ExecutionState::Cancelled);
     assert!(!matches!(
         after.node(&NodeId::new("sib")).map(|n| &n.state),
-        Some(InspectNodeState::Succeeded)
+        Some(InspectNodeState::Succeeded { .. })
     ));
     server.abort();
 }
@@ -3707,5 +3876,476 @@ async fn client_live_cancel_after_ttl_steal_is_claimed_elsewhere() {
         ExecutionState::Waiting
     );
     drop(hb);
+    server.abort();
+}
+
+/// 0.1%: JSON `[u8]` for 400 KiB is a >1 MiB body (413) even though MAX_BODY
+/// is 1 MiB. Complete must send the same compact field as approve / inspect.
+#[tokio::test(flavor = "current_thread")]
+async fn client_complete_400kib_is_200_not_json_array_413() {
+    // Small downstream: two 400 KiB echo outputs would exceed inspect MAX_BODY.
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    let payload = Bytes::from(vec![0xabu8; 400 * 1024]);
+    let json = serde_json::to_vec(&CompleteBody {
+        token: token.clone(),
+        resume: Resume::Complete(NodeOutcome::Succeeded(payload.clone())),
+    })
+    .expect("json");
+    assert!(
+        json.len() < MAX_BODY,
+        "400 KiB complete must be compact, not a u8 array: {} B",
+        json.len()
+    );
+    let text = String::from_utf8_lossy(&json);
+    assert!(
+        !text.contains("[171,") && !text.contains("[171,"),
+        "complete Succeeded must not be a number array"
+    );
+    client
+        .complete(
+            token,
+            Resume::Complete(NodeOutcome::Succeeded(payload.clone())),
+        )
+        .await
+        .expect("400 KiB complete must not 413 as a number array");
+    let done = tokio::time::timeout(BOUND, async {
+        loop {
+            let v = client.inspect(&id).await.expect("i");
+            if v.state.is_terminal() {
+                return v;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("done");
+    assert_eq!(
+        done.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded { output: payload })
+    );
+    assert_eq!(
+        done.node(&NodeId::new("next")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"next"),
+        })
+    );
+    server.abort();
+}
+
+/// Compact inspect encoding is not a response cap. GET has no body limit;
+/// MAX_BODY raw Succeeded is ~1.33 MiB base64 JSON and must 413.
+#[tokio::test(flavor = "current_thread")]
+async fn client_inspect_over_max_body_is_413() {
+    let fat = Bytes::from(vec![0x5au8; MAX_BODY]);
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("fat", {
+                let fat = fat.clone();
+                move |_ctx: ExecutionContext| {
+                    let fat = fat.clone();
+                    async move { NodeOutcome::Succeeded(fat) }
+                }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("fat", "fat")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    let err = tokio::time::timeout(BOUND, async {
+        loop {
+            match client.inspect(&id).await {
+                Ok(v) if v.state.is_terminal() => {
+                    panic!("inspect of MAX_BODY Succeeded must 413, got {v:?}")
+                }
+                Ok(_) | Err(KeelClientError::UnknownExecution) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(KeelClientError::PayloadTooLarge) => {
+                    return KeelClientError::PayloadTooLarge;
+                }
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("413");
+    assert!(matches!(err, KeelClientError::PayloadTooLarge), "{err:?}");
+    server.abort();
+}
+
+/// 0.1%: JSON `[u8]` for 400 KiB is a >1 MiB body (413) even though MAX_BODY
+/// is 1 MiB. Approve must send one base64 field and succeed.
+#[tokio::test(flavor = "current_thread")]
+async fn client_approve_400kib_is_200_not_json_array_413() {
+    // Small downstream: two 400 KiB echo outputs would exceed inspect MAX_BODY.
+    let rt = runtime_with_next();
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    let payload = Bytes::from(vec![0xabu8; 400 * 1024]);
+    client
+        .approve(token, payload.clone())
+        .await
+        .expect("400 KiB approve must not 413 as a number array");
+    let done = tokio::time::timeout(BOUND, async {
+        loop {
+            let v = client.inspect(&id).await.expect("i");
+            if v.state.is_terminal() {
+                return v;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("done");
+    assert_eq!(
+        done.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded { output: payload })
+    );
+    assert_eq!(
+        done.node(&NodeId::new("next")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"next"),
+        })
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_inspect_research_hold_write_outputs_are_per_node() {
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("research", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"notes-only"))
+            })
+            .register_fn("write", |ctx: ExecutionContext| async move {
+                NodeOutcome::Succeeded(
+                    ctx.inputs
+                        .get(&NodeId::new("hold"))
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("research", "research")
+                .node("hold", "wait")
+                .node("write", "write")
+                .edge("research", "hold")
+                .edge("hold", "write")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client
+        .approve(token, Bytes::from_static(b"human-ok"))
+        .await
+        .expect("approve");
+    let done = tokio::time::timeout(BOUND, async {
+        loop {
+            let v = client.inspect(&id).await.expect("i");
+            if v.state == ExecutionState::Succeeded {
+                return v;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("succeeded");
+    assert_eq!(
+        done.node(&NodeId::new("research")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"notes-only"),
+        })
+    );
+    assert_eq!(
+        done.node(&NodeId::new("hold")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"human-ok"),
+        })
+    );
+    assert_eq!(
+        done.node(&NodeId::new("write")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"human-ok"),
+        })
+    );
+    let wire = serde_json::to_value(&done).unwrap();
+    for n in wire["nodes"].as_array().unwrap() {
+        if n["state"]["kind"] == "succeeded" {
+            assert!(n["state"]["output"].is_string(), "{n}");
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn two_clients_approve_and_complete_one_token_downstream_runs_once() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("next", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"next")) }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let a = client_at(addr);
+    let b = KeelClient::new(format!("http://{addr}"), secret()).unwrap();
+    let id = a.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = a.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    let (ra, rb) = tokio::join!(
+        a.approve(token.clone(), Bytes::from_static(b"gate")),
+        b.complete(
+            token,
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate")))
+        )
+    );
+    assert!(ra.is_ok() || rb.is_ok(), "a={ra:?} b={rb:?}");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if a.inspect(&id).await.expect("i").state.is_terminal() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("done");
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "no second SM / double next");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_approve_then_complete_same_token_is_noop() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let c = runs.clone();
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .register_fn("next", move |_ctx: ExecutionContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { NodeOutcome::Succeeded(Bytes::from_static(b"next")) }
+            })
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client.start(wait_then_next()).await.expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    client
+        .approve(token.clone(), Bytes::from_static(b"gate"))
+        .await
+        .expect("approve");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if client.inspect(&id).await.expect("i").state.is_terminal() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal");
+    client
+        .complete(
+            token,
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"gate"))),
+        )
+        .await
+        .expect("complete after approve is noop");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_approve_oversized_body_is_413_does_not_complete() {
+    let rt = runtime_with_next();
+    let (handle, token) = park_wait(&rt).await;
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    let huge = Bytes::from(vec![1u8; MAX_BODY]);
+    let err = client_at(addr).approve(token, huge).await.unwrap_err();
+    assert!(matches!(err, KeelClientError::PayloadTooLarge), "{err:?}");
+    assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
+    handle.cancel().await;
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_live_approve_after_ttl_steal_is_claimed_elsewhere() {
+    let store = NoRefreshHeartbeat {
+        inner: MemoryStore::new(),
+    };
+    let clock = Arc::new(FakeClock::new());
+    let rt_a = Arc::new(
+        Runtime::builder()
+            .clock(clock.clone())
+            .store(store.clone())
+            .build(),
+    );
+    let (addr, server) = serve_ephemeral(rt_a.clone(), secret()).await.unwrap();
+    let client = client_at(addr);
+    let id = client
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("start");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = client.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("park");
+    clock.advance(DEFAULT_LEASE_TTL);
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let rt_b = Runtime::builder().store(store.clone()).clock(clock).build();
+    let hb = rt_b
+        .resume(&id)
+        .await
+        .expect("B claims after TTL while A HTTP handle is still live");
+    let err = client
+        .approve(token, Bytes::from_static(b"nope"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, KeelClientError::ClaimedElsewhere),
+        "approve after steal must claim, not inject: {err:?}"
+    );
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Waiting
+    );
+    drop(hb);
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_live_approve_persist_err_is_not_ok() {
+    let store = Arc::new(FailingStore::fail_on_nth_put(0));
+    let rt = Arc::new(
+        Runtime::builder()
+            .clock(Arc::new(FakeClock::new()))
+            .store_arc(store as Arc<dyn StateStore>)
+            .register_fn("next", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"next"))
+            })
+            .build(),
+    );
+    let (handle, token) = park_wait(&rt).await;
+    let id = handle.execution_id().clone();
+    let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
+    enable("store.put", 1);
+    let err = client_at(addr)
+        .approve(token.clone(), Bytes::from_static(b"x"))
+        .await
+        .unwrap_err();
+    disable("store.put");
+    assert!(
+        matches!(err, KeelClientError::BadRequest),
+        "persist Err is CompleteError::Apply → 400, not 200: {err:?}"
+    );
+    // Same apply as `live_complete_persist_err_is_not_ok`: retry after persist Ok.
+    client_at(addr)
+        .approve(token, Bytes::from_static(b"x"))
+        .await
+        .expect("retry after persist Ok");
+    assert_eq!(
+        tokio::time::timeout(BOUND, handle.wait())
+            .await
+            .expect("wait"),
+        ExecutionState::Succeeded
+    );
+    let _ = id;
     server.abort();
 }
