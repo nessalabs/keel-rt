@@ -720,10 +720,10 @@ async fn retry_attempt_full_error_emitted_to_sink_snapshot_stays_short() {
     let id = handle.execution_id().clone();
     let parked = tokio::time::timeout(BOUND, async {
         loop {
-            if let Ok(Some(n)) = rt
+            if let Some(n) = rt
                 .inspect(&id)
                 .await
-                .map(|s| s.node(&NodeId::new("x")).cloned())
+                .and_then(|s| s.node(&NodeId::new("x")).cloned())
             {
                 match n.state {
                     NodeState::Ready {
