@@ -458,10 +458,9 @@ async fn custom_failed_huge_last_error_inspect_is_200_omits_error() {
         .and_then(|n| n.last_error.clone())
         .expect("kernel snapshot keeps last_error");
     assert!(
-        msg.message.len() <= keel_rt::MAX_LAST_ERROR,
-        "kernel last_error is capped at MAX_LAST_ERROR, got {}",
+        msg.message.len() <= keel_rt::MAX_SNAPSHOT_ERROR,
+        "kernel last_error is the short snapshot form, got {}",
         msg.message.len()
     );
-    assert!(huge.starts_with(&msg.message));
     server.abort();
 }

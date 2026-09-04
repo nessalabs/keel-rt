@@ -43,7 +43,10 @@ pub use domain::events::Event;
 pub use domain::ids::{
     DefinitionHash, ExecutionId, ExecutorId, InvalidId, NodeId, ResumeToken, WorkflowId,
 };
-pub use domain::outcome::{NodeError, NodeOutcome, Recover, Resume, MAX_LAST_ERROR};
+pub use domain::outcome::{
+    NodeError, NodeOutcome, Recover, Resume, MAX_SINK_ERROR, MAX_SNAPSHOT_ERROR,
+    SNAPSHOT_ERROR_MARK,
+};
 pub use domain::policy::{AcceptPolicy, NeverWaitPolicy, Policy, PolicyDecision, RetryPolicy};
 pub use domain::snapshot::{ExecutionSnapshot, NodeSnapshot, SnapshotError, SCHEMA_VERSION};
 pub use domain::state::{ApplyCmd, ApplyEffect, ApplyError, Execution, ExecutionState, NodeState};

@@ -64,6 +64,8 @@ pub enum Event {
         attempt: u32,
         at: Timestamp,
         schema_version: u32,
+        /// Adapter message for EventSink / persist_with_events (sink-capped).
+        /// Snapshot `last_error` is the short form ([`crate::MAX_SNAPSHOT_ERROR`]).
         error: NodeError,
     },
     NodeTimedOut {
@@ -332,9 +334,7 @@ impl fmt::Display for Event {
                 node_id, attempt, ..
             } => write!(f, "node {node_id} started attempt={attempt}"),
             Self::NodeSucceeded { node_id, .. } => write!(f, "node {node_id} succeeded"),
-            Self::NodeFailed {
-                node_id, error, ..
-            } => write!(f, "node {node_id} failed: {error}"),
+            Self::NodeFailed { node_id, error, .. } => write!(f, "node {node_id} failed: {error}"),
             Self::NodeCancelled { node_id, .. } => write!(f, "node {node_id} cancelled"),
             Self::NodeWaiting { node_id, .. } => write!(f, "node {node_id} waiting"),
             Self::NodeTimedOut { node_id, .. } => write!(f, "node {node_id} timed out"),

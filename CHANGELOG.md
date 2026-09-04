@@ -9,7 +9,9 @@ ids. Missing id is **400** with only the missing names; nothing runs.
 Empty register ids are not catalog entries. A second register of the same
 id replaces the first, including builtin `wait`
 (`register_wait_id_last_wins_replaces_builtin`). Graph I/O is predecessor
-`Bytes` — no typed schema, no register-over-HTTP, no YAML. CI:
+`Bytes` — no typed schema, no register-over-HTTP, no YAML. Failed snapshot
+`last_error` is short (`MAX_SNAPSHOT_ERROR`); full detail is `NodeFailed`
+on the EventSink (`MAX_SINK_ERROR`). CI:
 `custom_executor_types_catalog_start_approve_inspect`,
 `register_empty_id_is_not_in_catalog`,
 `http_sqlite_custom_executor_types_inspect_succeeded_bytes`.

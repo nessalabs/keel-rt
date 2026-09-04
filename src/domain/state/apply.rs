@@ -210,7 +210,7 @@ impl Execution {
         effect: &mut ApplyEffect,
     ) -> Result<(), ApplyError> {
         let outcome = match outcome {
-            NodeOutcome::Failed(err) => NodeOutcome::Failed(err.capped()),
+            NodeOutcome::Failed(err) => NodeOutcome::Failed(err.sink_capped()),
             other => other,
         };
         let attempt = self.nodes[slot.0].attempt;
@@ -252,11 +252,17 @@ impl Execution {
                 };
                 {
                     let n = &mut self.nodes[slot.0];
-                    n.last_error = match &outcome {
-                        NodeOutcome::Failed(e) => Some(e.clone()),
-                        _ => Some(NodeError::new("timed out")),
-                    };
-                    n.last_outcome = Some(outcome);
+                    match &outcome {
+                        NodeOutcome::Failed(e) => {
+                            let short = e.clone().snapshot_short();
+                            n.last_error = Some(short.clone());
+                            n.last_outcome = Some(NodeOutcome::Failed(short));
+                        }
+                        other => {
+                            n.last_error = Some(NodeError::new("timed out"));
+                            n.last_outcome = Some(other.clone());
+                        }
+                    }
                     // Prior attempt token is dead. Waiting is the only state
                     // that resume Complete/Reinvoke consults. Dropping it here
                     // keeps Ready { T } node JSON off the stale token blob.
@@ -352,16 +358,17 @@ impl Execution {
         now: Timestamp,
         effect: &mut ApplyEffect,
     ) {
-        let err = err.capped();
+        let sink = err.sink_capped();
+        let snap = sink.clone().snapshot_short();
         let attempt = self.nodes[slot.0].attempt;
         {
             let n = &mut self.nodes[slot.0];
-            n.last_error = Some(err.clone());
-            n.last_outcome = Some(NodeOutcome::Failed(err.clone()));
+            n.last_error = Some(snap.clone());
+            n.last_outcome = Some(NodeOutcome::Failed(snap));
         }
         self.set_state(slot, NodeState::Failed);
         self.clear_deadline_if(slot);
-        self.emit_node(effect, now, id.clone(), attempt, NodeKind::Failed(err));
+        self.emit_node(effect, now, id.clone(), attempt, NodeKind::Failed(sink));
     }
 
     fn apply_on_failure(&mut self, slot: NodeSlot, now: Timestamp, effect: &mut ApplyEffect) {

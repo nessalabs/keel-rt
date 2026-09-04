@@ -9,7 +9,7 @@ use keel_rt::{
     AcceptPolicy, ApplyCmd, Clock, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
     ExecutionSnapshot, ExecutionState, Executor, ExecutorId, Join, LeaseEpoch, NodeError, NodeId,
     NodeOutcome, NodeState, OnFailure, OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime,
-    StateStore, StoreError, Timestamp, WorkflowDefinition, DEFAULT_LEASE_TTL, MAX_LAST_ERROR,
+    StateStore, StoreError, Timestamp, WorkflowDefinition, DEFAULT_LEASE_TTL, MAX_SNAPSHOT_ERROR,
     SCHEMA_VERSION,
 };
 use keel_rt_sqlite::SqliteStore;
@@ -1171,7 +1171,7 @@ fn sqlite_persist_failed_huge_last_error_is_capped() {
         now,
     )
     .unwrap();
-    let huge = "q".repeat(MAX_LAST_ERROR + 4096);
+    let huge = "q".repeat(MAX_SNAPSHOT_ERROR + 4096);
     ex.apply(
         ApplyCmd::FinishNode {
             node_id: "a".into(),
@@ -1191,8 +1191,8 @@ fn sqlite_persist_failed_huge_last_error_is_capped() {
             .and_then(|n| n.last_error.clone())
             .expect("last_error");
         assert!(
-            msg.message.len() <= MAX_LAST_ERROR,
-            "sqlite last_error {} > MAX_LAST_ERROR",
+            msg.message.len() <= MAX_SNAPSHOT_ERROR,
+            "sqlite last_error {} > MAX_SNAPSHOT_ERROR",
             msg.message.len()
         );
     });

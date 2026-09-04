@@ -4,10 +4,20 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
-/// Max bytes stored on a Failed/TimedOut [`NodeError`] (`last_error` on the
-/// snapshot, `NodeFailed` events). **Succeeded `Bytes` are not capped** —
+/// Marker appended when a Failed message is shortened for snapshot state.
+pub const SNAPSHOT_ERROR_MARK: &str = "\u{2026}";
+
+/// Max bytes of `last_error` on a live/durable snapshot (`NodeSnapshot`).
+/// Truncated form is a UTF-8 prefix plus [`SNAPSHOT_ERROR_MARK`].
+/// Full Failed detail is [`crate::Event::NodeFailed`] (see [`MAX_SINK_ERROR`]).
+/// **Succeeded `Bytes` are not capped** —
 /// fat payloads stay refcounted (`fat_bytes_join_input_is_refcount_not_copy`).
-pub const MAX_LAST_ERROR: usize = 1024 * 1024;
+pub const MAX_SNAPSHOT_ERROR: usize = 512;
+
+/// Max bytes of [`NodeError`] on [`crate::Event::NodeFailed`] (EventSink and
+/// `persist_with_events` rows). Snapshot `last_error` uses
+/// [`MAX_SNAPSHOT_ERROR`]. Succeeded `Bytes` are not capped.
+pub const MAX_SINK_ERROR: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[error("{message}")]
@@ -16,31 +26,56 @@ pub struct NodeError {
 }
 
 impl NodeError {
+    /// Construct a sink-capped error. Snapshot storage still shortens at apply.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
-            message: cap_last_error(message.into()),
+            message: truncate_utf8(message.into(), MAX_SINK_ERROR),
         }
     }
 
-    /// Bound a value that bypassed [`Self::new`] (struct literal, serde).
-    pub fn capped(self) -> Self {
+    /// Short form stored on `last_error` / inspect / store snapshots.
+    pub fn snapshot_short(self) -> Self {
         Self {
-            message: cap_last_error(self.message),
+            message: truncate_with_mark(self.message, MAX_SNAPSHOT_ERROR),
+        }
+    }
+
+    /// Bound a value that bypassed [`Self::new`] (struct literal, serde)
+    /// before it is announced on [`crate::Event::NodeFailed`].
+    pub fn sink_capped(self) -> Self {
+        Self {
+            message: truncate_utf8(self.message, MAX_SINK_ERROR),
         }
     }
 }
 
-fn cap_last_error(s: String) -> String {
-    if s.len() <= MAX_LAST_ERROR {
+fn truncate_utf8(s: String, max: usize) -> String {
+    if s.len() <= max {
         return s;
     }
-    let mut end = MAX_LAST_ERROR;
+    let mut end = max;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
     let mut s = s;
     s.truncate(end);
     s
+}
+
+fn truncate_with_mark(s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let mark = SNAPSHOT_ERROR_MARK;
+    debug_assert!(max > mark.len());
+    let mut end = max - mark.len();
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + mark.len());
+    out.push_str(&s[..end]);
+    out.push_str(mark);
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,26 +147,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_caps_message_over_max() {
-        let err = NodeError::new("x".repeat(MAX_LAST_ERROR + 8));
-        assert_eq!(err.message.len(), MAX_LAST_ERROR);
+    fn new_caps_message_at_sink_bound() {
+        let err = NodeError::new("x".repeat(MAX_SINK_ERROR + 8));
+        assert_eq!(err.message.len(), MAX_SINK_ERROR);
+        assert!(!err.message.contains('\u{2026}'));
     }
 
     #[test]
-    fn exact_max_is_kept() {
-        let err = NodeError::new("y".repeat(MAX_LAST_ERROR));
-        assert_eq!(err.message.len(), MAX_LAST_ERROR);
+    fn exact_sink_max_is_kept() {
+        let err = NodeError::new("y".repeat(MAX_SINK_ERROR));
+        assert_eq!(err.message.len(), MAX_SINK_ERROR);
     }
 
     #[test]
-    fn cap_does_not_split_utf8_char() {
-        let mut s = "x".repeat(MAX_LAST_ERROR - 1);
+    fn snapshot_short_is_max_snapshot_error() {
+        let err = NodeError {
+            message: "z".repeat(MAX_SNAPSHOT_ERROR + 64),
+        }
+        .snapshot_short();
+        assert!(err.message.len() <= MAX_SNAPSHOT_ERROR);
+        assert!(err.message.ends_with('\u{2026}'));
+        assert!(err.message.len() < MAX_SNAPSHOT_ERROR + 64);
+    }
+
+    #[test]
+    fn exact_snapshot_max_is_kept() {
+        let err = NodeError {
+            message: "y".repeat(MAX_SNAPSHOT_ERROR),
+        }
+        .snapshot_short();
+        assert_eq!(err.message.len(), MAX_SNAPSHOT_ERROR);
+        assert!(!err.message.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn snapshot_short_does_not_split_utf8_char() {
+        let mut s = "x".repeat(MAX_SNAPSHOT_ERROR - 1);
         s.push('\u{1F600}');
-        assert!(s.len() > MAX_LAST_ERROR);
-        let err = NodeError { message: s.clone() }.capped();
-        assert!(err.message.len() <= MAX_LAST_ERROR);
+        assert!(s.len() > MAX_SNAPSHOT_ERROR);
+        let err = NodeError { message: s.clone() }.snapshot_short();
+        assert!(err.message.len() <= MAX_SNAPSHOT_ERROR);
+        assert!(err.message.is_char_boundary(err.message.len()));
+        assert!(err.message.ends_with('\u{2026}'));
+        let prefix = err.message.trim_end_matches('\u{2026}');
+        assert!(s.starts_with(prefix));
+        assert!(!prefix.contains('\u{1F600}'));
+    }
+
+    #[test]
+    fn sink_capped_does_not_split_utf8_char() {
+        let mut s = "x".repeat(MAX_SINK_ERROR - 1);
+        s.push('\u{1F600}');
+        assert!(s.len() > MAX_SINK_ERROR);
+        let err = NodeError { message: s.clone() }.sink_capped();
+        assert!(err.message.len() <= MAX_SINK_ERROR);
         assert!(err.message.is_char_boundary(err.message.len()));
         assert!(s.starts_with(&err.message));
         assert!(!err.message.contains('\u{1F600}'));
+        assert!(!err.message.contains('\u{2026}'));
     }
 }

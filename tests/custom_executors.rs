@@ -5,11 +5,13 @@
 //! `cargo test --test custom_executors -- --test-threads=1`
 
 use bytes::Bytes;
+use keel_rt::testing::RecordingSink;
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, CompleteError, Execution, ExecutionContext, ExecutionId,
+    AcceptPolicy, ApplyCmd, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
     ExecutionState, Executor, ExecutorId, Join, MemoryStore, NodeError, NodeId, NodeOutcome,
     NodeState, OnFailure, Recover, Resume, ResumeError, ResumeToken, Runtime, StartError,
-    StateStore, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND, MAX_LAST_ERROR,
+    StateStore, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND, MAX_SINK_ERROR,
+    MAX_SNAPSHOT_ERROR,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -552,10 +554,10 @@ async fn custom_failed_resume_with_retry_failed_rebumps_and_succeeds() {
 }
 
 /// Custom Failed with a multi-MiB last_error must not land unbounded on the
-/// live inspect snapshot or MemoryStore. Succeeded fat Bytes stay uncapped.
+/// live inspect snapshot or MemoryStore. Snapshot last_error is the short form.
 #[tokio::test(flavor = "current_thread")]
 async fn custom_failed_huge_last_error_is_capped_on_live_and_store_snapshot() {
-    let huge = "x".repeat(MAX_LAST_ERROR + 1024 * 1024);
+    let huge = "x".repeat(MAX_SNAPSHOT_ERROR + 2 * 1024 * 1024);
     let h = huge.clone();
     let store = MemoryStore::new();
     struct Boom {
@@ -593,23 +595,94 @@ async fn custom_failed_huge_last_error_is_capped_on_live_and_store_snapshot() {
         .and_then(|n| n.last_error.clone())
         .expect("Failed last_error");
     assert!(
-        live_err.message.len() <= MAX_LAST_ERROR,
-        "live snapshot last_error {} > MAX_LAST_ERROR",
+        live_err.message.len() <= MAX_SNAPSHOT_ERROR,
+        "live snapshot last_error {} > MAX_SNAPSHOT_ERROR",
         live_err.message.len()
     );
-    assert!(huge.starts_with(&live_err.message));
+    assert!(live_err.message.len() < huge.len());
+    let prefix = live_err.message.trim_end_matches('\u{2026}');
+    assert!(huge.starts_with(prefix));
     let stored = store.get(&id).await.unwrap().unwrap();
     let stored_err = stored
         .node(&NodeId::new("x"))
         .and_then(|n| n.last_error.clone())
         .expect("store last_error");
     assert_eq!(stored_err.message.len(), live_err.message.len());
-    assert!(stored_err.message.len() <= MAX_LAST_ERROR);
+    assert!(stored_err.message.len() <= MAX_SNAPSHOT_ERROR);
+}
+
+/// Pattern 3: snapshot stays short; EventSink keeps the full Failed message.
+#[tokio::test(flavor = "current_thread")]
+async fn custom_failed_full_error_emitted_to_sink_snapshot_stays_short() {
+    let full = format!("detail-{}", "x".repeat(MAX_SNAPSHOT_ERROR + 2048));
+    assert!(full.len() > MAX_SNAPSHOT_ERROR);
+    assert!(full.len() <= MAX_SINK_ERROR);
+    let sink = RecordingSink::new();
+    let store = MemoryStore::new();
+    struct Boom {
+        msg: String,
+    }
+    impl Executor for Boom {
+        fn id(&self) -> ExecutorId {
+            ExecutorId::new("boom")
+        }
+        fn execute<'a>(
+            &'a self,
+            _ctx: ExecutionContext,
+        ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+            let msg = self.msg.clone();
+            Box::pin(async move { NodeOutcome::Failed(NodeError { message: msg }) })
+        }
+    }
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .sink(sink.clone())
+        .register(Boom { msg: full.clone() })
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("x", "boom")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Failed);
+    let live = rt.inspect(&id).await.unwrap();
+    let live_err = live
+        .node(&NodeId::new("x"))
+        .and_then(|n| n.last_error.clone())
+        .expect("Failed last_error");
+    assert!(
+        live_err.message.len() <= MAX_SNAPSHOT_ERROR,
+        "snapshot last_error {} > MAX_SNAPSHOT_ERROR",
+        live_err.message.len()
+    );
+    assert_ne!(live_err.message, full);
+    let stored = store.get(&id).await.unwrap().unwrap();
+    let stored_err = stored
+        .node(&NodeId::new("x"))
+        .and_then(|n| n.last_error.clone())
+        .expect("store last_error");
+    assert!(stored_err.message.len() <= MAX_SNAPSHOT_ERROR);
+    let sink_err = sink
+        .events()
+        .into_iter()
+        .find_map(|e| match e {
+            Event::NodeFailed { error, .. } => Some(error.message),
+            _ => None,
+        })
+        .expect("NodeFailed on EventSink");
+    assert_eq!(
+        sink_err, full,
+        "EventSink must see the full Failed message after persist"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn succeeded_fat_bytes_are_not_capped_by_last_error_bound() {
-    let fat = Bytes::from(vec![7u8; MAX_LAST_ERROR + 4096]);
+    let fat = Bytes::from(vec![7u8; MAX_SINK_ERROR + 4096]);
     struct Fat {
         payload: Bytes,
     }

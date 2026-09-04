@@ -379,7 +379,10 @@ behavior; “now” is frozen `main`).
   unregistered `expect`. Now `resume` returns `ResumeError::UnregisteredExecutors`
   and does not rewrite the Running snapshot.
 - When a caller’s custom adapter returns **Failed** with a multi-MiB
-  `last_error`, it used to persist the whole string on the snapshot (MemoryStore
-  and sqlite). Now `FinishNode(Failed)` truncates at `MAX_LAST_ERROR` (1 MiB).
+  `last_error`, it used to persist up to 1 MiB (`MAX_LAST_ERROR`) on the
+  snapshot (MemoryStore and sqlite). Now snapshot `last_error` is the short
+  form (`MAX_SNAPSHOT_ERROR`, 512 B, prefix + mark). `Event::NodeFailed`
+  carries the full message up to `MAX_SINK_ERROR` (1 MiB)
+  (`custom_failed_full_error_emitted_to_sink_snapshot_stays_short`).
   Succeeded `Bytes` stay uncapped (`succeeded_fat_bytes_are_not_capped_by_last_error_bound`).
 - Frozen absences: no Agent, HTTP, SQL, or merge of `examples/studio`.

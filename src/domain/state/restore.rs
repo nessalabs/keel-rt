@@ -37,7 +37,7 @@ impl Execution {
                 state: ns.state.clone(),
                 output: ns.output.clone(),
                 attempt: ns.attempt,
-                last_error: ns.last_error.clone().map(NodeError::capped),
+                last_error: ns.last_error.clone().map(NodeError::snapshot_short),
                 resume_token: ns.resume_token.clone(),
                 reinvoke: false,
                 last_outcome: ns.output.clone().map(NodeOutcome::Succeeded),
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn from_snapshot_caps_huge_last_error() {
-        use crate::domain::outcome::MAX_LAST_ERROR;
+        use crate::domain::outcome::MAX_SNAPSHOT_ERROR;
         let def = WorkflowDefinition::builder("wf")
             .node("a", "e")
             .build()
@@ -367,7 +367,7 @@ mod tests {
         .unwrap();
         let mut snap = ex.snapshot();
         snap.nodes.get_mut(&NodeId::new("a")).unwrap().last_error = Some(NodeError {
-            message: "z".repeat(MAX_LAST_ERROR + 32),
+            message: "z".repeat(MAX_SNAPSHOT_ERROR + 32),
         });
         let restored = Execution::from_snapshot(def, snap).unwrap();
         let msg = restored
@@ -375,6 +375,6 @@ mod tests {
             .node(&NodeId::new("a"))
             .and_then(|n| n.last_error.clone())
             .expect("last_error");
-        assert!(msg.message.len() <= MAX_LAST_ERROR);
+        assert!(msg.message.len() <= MAX_SNAPSHOT_ERROR);
     }
 }

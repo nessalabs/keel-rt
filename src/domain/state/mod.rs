@@ -385,7 +385,7 @@ impl Execution {
             output: n.output.clone(),
             attempt: n.attempt,
             resume_token,
-            last_error: n.last_error.clone().map(NodeError::capped),
+            last_error: n.last_error.clone().map(NodeError::snapshot_short),
         }
     }
 
@@ -523,7 +523,7 @@ mod tests {
     use super::*;
     use crate::domain::definition::{Join, OnFailure};
     use crate::domain::events::Event;
-    use crate::domain::outcome::MAX_LAST_ERROR;
+    use crate::domain::outcome::MAX_SNAPSHOT_ERROR;
     use crate::domain::policy::{AcceptPolicy, Policy, PolicyDecision};
     use bytes::Bytes;
 
@@ -2437,29 +2437,44 @@ mod tests {
             now,
         )
         .unwrap();
-        let huge = "x".repeat(MAX_LAST_ERROR + 64 * 1024);
-        ex.apply(
-            ApplyCmd::FinishNode {
-                node_id: "a".into(),
-                attempt: 1,
-                outcome: Ok(NodeOutcome::Failed(NodeError {
-                    message: huge.clone(),
-                })),
-            },
-            &p,
-            now,
-        )
-        .unwrap();
+        let huge = "x".repeat(MAX_SNAPSHOT_ERROR + 64 * 1024);
+        let effect = ex
+            .apply(
+                ApplyCmd::FinishNode {
+                    node_id: "a".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::Failed(NodeError {
+                        message: huge.clone(),
+                    })),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
         let snap = ex.snapshot().node(&NodeId::new("a")).unwrap().clone();
         let msg = snap.last_error.expect("Failed keeps last_error");
         assert!(
-            msg.message.len() <= MAX_LAST_ERROR,
-            "FinishNode(Failed) must not store unbounded last_error: {}",
+            msg.message.len() <= MAX_SNAPSHOT_ERROR,
+            "FinishNode(Failed) snapshot last_error must stay short: {}",
             msg.message.len()
         );
         assert!(
-            huge.starts_with(&msg.message),
-            "cap is a prefix, not a substitute message"
+            msg.message.ends_with('\u{2026}'),
+            "short snapshot form is prefix + mark"
+        );
+        let prefix = msg.message.trim_end_matches('\u{2026}');
+        assert!(huge.starts_with(prefix));
+        let sink_err = effect
+            .events
+            .iter()
+            .find_map(|e| match e {
+                Event::NodeFailed { error, .. } => Some(error.message.clone()),
+                _ => None,
+            })
+            .expect("NodeFailed announced");
+        assert_eq!(
+            sink_err, huge,
+            "EventSink payload keeps the full Failed message"
         );
         assert_eq!(ex.state, ExecutionState::Failed);
     }
@@ -2480,7 +2495,7 @@ mod tests {
             now,
         )
         .unwrap();
-        let huge = "w".repeat(MAX_LAST_ERROR + 8);
+        let huge = "w".repeat(MAX_SNAPSHOT_ERROR + 8);
         ex.apply(
             ApplyCmd::FinishNode {
                 node_id: "a".into(),
@@ -2501,7 +2516,8 @@ mod tests {
             }
         ));
         let msg = snap.last_error.expect("retry park keeps last_error");
-        assert!(msg.message.len() <= MAX_LAST_ERROR);
-        assert!(huge.starts_with(&msg.message));
+        assert!(msg.message.len() <= MAX_SNAPSHOT_ERROR);
+        let prefix = msg.message.trim_end_matches('\u{2026}');
+        assert!(huge.starts_with(prefix));
     }
 }

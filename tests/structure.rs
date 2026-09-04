@@ -446,6 +446,7 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "fat_bytes_custom_executor_join_is_refcount_not_copy",
         "finish_node_failed_huge_last_error_is_capped_on_snapshot",
         "custom_failed_huge_last_error_is_capped_on_live_and_store_snapshot",
+        "custom_failed_full_error_emitted_to_sink_snapshot_stays_short",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
