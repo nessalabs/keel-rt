@@ -436,6 +436,7 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "register_empty_id_is_not_in_catalog",
         "register_same_id_twice_last_wins",
         "register_custom_executor_type_runs",
+        "register_wait_id_last_wins_replaces_builtin",
         "custom_executor_types_catalog_start_approve_inspect",
         "http_sqlite_custom_executor_types_inspect_succeeded_bytes",
     ] {

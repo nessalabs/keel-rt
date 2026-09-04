@@ -710,7 +710,7 @@ impl RuntimeBuilder {
 
     /// Register an [`Executor`] by its [`Executor::id`]. Empty ids are ignored
     /// (they cannot appear on a definition). A second register of the same id
-    /// replaces the first.
+    /// replaces the first, including builtin [`crate::WAIT_ID`].
     pub fn register(mut self, exec: impl Executor + 'static) -> Self {
         self.registry.register(Arc::new(exec));
         self
@@ -895,6 +895,61 @@ mod tests {
             .node(&NodeId::new("n"))
             .and_then(|n| n.output.clone());
         assert_eq!(out.as_deref(), Some(&b"typed"[..]));
+    }
+
+    struct StealWait;
+    impl Executor for StealWait {
+        fn id(&self) -> ExecutorId {
+            ExecutorId::new(crate::WAIT_ID)
+        }
+        fn execute<'a>(
+            &'a self,
+            _ctx: ExecutionContext,
+        ) -> std::pin::Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+            Box::pin(async { NodeOutcome::Succeeded(Bytes::from_static(b"not-parked")) })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn register_wait_id_last_wins_replaces_builtin() {
+        let rt = Runtime::builder().register(StealWait).build();
+        let ids = rt.executor_ids();
+        assert_eq!(
+            ids.iter()
+                .filter(|id| id.as_str() == crate::WAIT_ID)
+                .count(),
+            1,
+            "catalog lists wait once after overwrite: {ids:?}"
+        );
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("hold", crate::WAIT_ID)
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        assert_eq!(
+            handle.wait().await,
+            ExecutionState::Succeeded,
+            "custom wait id must run, not park"
+        );
+        let snap = rt.inspect(&id).await.unwrap();
+        assert_eq!(
+            snap.node(&NodeId::new("hold"))
+                .and_then(|n| n.output.clone())
+                .as_deref(),
+            Some(&b"not-parked"[..])
+        );
+        assert!(
+            !matches!(
+                snap.node(&NodeId::new("hold")).map(|n| &n.state),
+                Some(crate::NodeState::Waiting { .. })
+            ),
+            "overwritten wait must not stay parked: {:?}",
+            snap.node(&NodeId::new("hold")).map(|n| &n.state)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
