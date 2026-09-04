@@ -105,7 +105,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.83.0
       - name: 100k scale (no coverage instrumentation)
-        run: cargo test --test stress_100k -- --test-threads=1 --nocapture
+        # Release: debug wide_100k is ~57s locally / can exceed the 90s
+        # hang-bound on GHA; release is ~4s and keeps the same assertions.
+        run: cargo test --release --test stress_100k -- --test-threads=1 --nocapture
 
   chaos-sqlite:
     runs-on: ubuntu-latest
