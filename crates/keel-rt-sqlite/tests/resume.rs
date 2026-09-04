@@ -7,9 +7,9 @@ use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
     AcceptPolicy, ApplyCmd, Clock, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
-    ExecutionSnapshot, ExecutionState, Join, LeaseEpoch, NodeId, NodeOutcome, NodeState, OnFailure,
-    OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime, StateStore, StoreError, Timestamp,
-    WorkflowDefinition, DEFAULT_LEASE_TTL, SCHEMA_VERSION,
+    ExecutionSnapshot, ExecutionState, Executor, ExecutorId, Join, LeaseEpoch, NodeId, NodeOutcome,
+    NodeState, OnFailure, OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime, StateStore,
+    StoreError, Timestamp, WorkflowDefinition, DEFAULT_LEASE_TTL, SCHEMA_VERSION,
 };
 use keel_rt_sqlite::SqliteStore;
 use std::path::PathBuf;
@@ -1064,6 +1064,87 @@ fn resume_unknown_id_on_file() {
             Err(e) => panic!("{e}"),
             Ok(_) => panic!("expected UnknownExecution"),
         }
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Runtime A registered `slow` and left it Running on sqlite. Runtime B does
+/// not register that id: resume is `UnregisteredExecutors`, not a
+/// `launch_slot` panic. Runtime C with the adapter re-invokes and finishes.
+#[test]
+fn resume_running_custom_without_adapter_is_unregistered() {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct Slow;
+    impl Executor for Slow {
+        fn id(&self) -> ExecutorId {
+            ExecutorId::new("slow")
+        }
+        fn execute<'a>(
+            &'a self,
+            _ctx: ExecutionContext,
+        ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+            Box::pin(async { NodeOutcome::Succeeded(Bytes::from_static(b"ok")) })
+        }
+    }
+
+    let path = tmp();
+    let id = {
+        let store = SqliteStore::open(&path).unwrap();
+        let mut ex = Execution::new(
+            WorkflowDefinition::builder("wf")
+                .node("slow", "slow")
+                .build()
+                .unwrap(),
+        );
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "slow".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("slow")).unwrap().state,
+            NodeState::Running { .. }
+        ));
+        let rt = current_rt();
+        rt.block_on(async {
+            store.persist(&ex).await.unwrap();
+        });
+        drop(rt);
+        drop(store);
+        ex.id().clone()
+    };
+    let store = SqliteStore::open(&path).unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        let bare = Runtime::builder().store(store.clone()).build();
+        match bare.resume(&id).await {
+            Err(ResumeError::UnregisteredExecutors(missing)) => {
+                let names: Vec<&str> = missing.0.iter().map(|e| e.as_str()).collect();
+                assert_eq!(names, vec!["slow"], "{names:?}");
+            }
+            Err(e) => panic!("{e}"),
+            Ok(_) => panic!("expected UnregisteredExecutors"),
+        }
+        let still = store.get(&id).await.unwrap().unwrap();
+        assert!(
+            matches!(
+                still.node(&NodeId::new("slow")).map(|n| &n.state),
+                Some(NodeState::Running { .. })
+            ),
+            "fail-closed resume must not rewrite Running: {:?}",
+            still.node(&NodeId::new("slow")).map(|n| &n.state)
+        );
+        let with = Runtime::builder().store(store).register(Slow).build();
+        let handle = with.resume(&id).await.expect("adapter present");
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
     });
     let _ = std::fs::remove_file(&path);
 }

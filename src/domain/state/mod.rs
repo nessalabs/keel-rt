@@ -2300,4 +2300,125 @@ mod tests {
             "stale n_failed/n_cancelled must not yield Completed"
         );
     }
+
+    #[test]
+    fn waiting_without_kernel_token_is_failed_not_adapter_issued() {
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let slot = ex.definition.slot(&NodeId::new("a")).unwrap();
+        ex.nodes[slot.0].resume_token = None;
+        let forged = ResumeToken::issue(ex.id().clone(), NodeId::new("b"), 99);
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Waiting {
+                    token: forged.clone(),
+                }),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let n = ex.node(&NodeId::new("a")).unwrap();
+        assert!(
+            matches!(n.state, NodeState::Failed),
+            "missing kernel token must not park on the adapter token: {:?}",
+            n.state
+        );
+        assert!(n.resume_token.is_none());
+        assert_eq!(ex.state, ExecutionState::Failed);
+        let snap = ex.snapshot().node(&NodeId::new("a")).unwrap().clone();
+        assert!(
+            snap.resume_token.is_none(),
+            "Failed snapshot must not carry a stolen wait token"
+        );
+        let err = ex
+            .apply(
+                ApplyCmd::Resume {
+                    token: forged,
+                    resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"steal"))),
+                },
+                &p,
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, ApplyError::ResumeAfterCancel);
+    }
+
+    #[test]
+    fn waiting_forged_token_is_ignored_kernel_token_parks() {
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let kernel = ex
+            .node(&NodeId::new("a"))
+            .unwrap()
+            .resume_token
+            .clone()
+            .unwrap();
+        let forged = ResumeToken::issue(ex.id().clone(), NodeId::new("a"), 1);
+        assert_ne!(kernel.nonce(), forged.nonce());
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Waiting {
+                    token: forged.clone(),
+                }),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        match &ex.node(&NodeId::new("a")).unwrap().state {
+            NodeState::Waiting { token, attempt: 1 } => {
+                assert_eq!(token, &kernel, "adapter-issued token must not be stored")
+            }
+            other => panic!("expected Waiting(kernel), got {other:?}"),
+        }
+        let err = ex
+            .apply(
+                ApplyCmd::Resume {
+                    token: forged,
+                    resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"nope"))),
+                },
+                &p,
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, ApplyError::TokenMismatch);
+        ex.apply(
+            ApplyCmd::Resume {
+                token: kernel,
+                resume: Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"ok"))),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            ex.node(&NodeId::new("a")).unwrap().state,
+            NodeState::Succeeded
+        ));
+    }
 }

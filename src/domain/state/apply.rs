@@ -292,16 +292,27 @@ impl Execution {
                 self.emit_node(effect, now, id.clone(), attempt, NodeKind::Succeeded);
                 self.ready_successors(slot, effect);
             }
-            NodeOutcome::Waiting { token } => {
-                let token = {
+            NodeOutcome::Waiting {
+                token: adapter_token,
+            } => {
+                // Kernel issues the wait token at StartNode. An adapter-issued
+                // token is never stored (steal / double-park). If the kernel
+                // token is missing, fail closed — do not park on the adapter's.
+                let kernel = self.nodes[slot.0].resume_token.take();
+                let Some(token) = kernel else {
+                    let _ = adapter_token;
+                    self.fail_node(slot, id, NodeError::new("wait token missing"), now, effect);
+                    self.apply_on_failure(slot, now, effect);
+                    return Ok(());
+                };
+                let _ = adapter_token;
+                {
                     let n = &mut self.nodes[slot.0];
-                    let token = n.resume_token.take().unwrap_or(token);
                     n.resume_token = Some(token.clone());
                     n.last_outcome = Some(NodeOutcome::Waiting {
                         token: token.clone(),
                     });
-                    token
-                };
+                }
                 self.set_state(
                     slot,
                     NodeState::Waiting {

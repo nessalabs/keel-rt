@@ -53,7 +53,7 @@ row is `test:` (existing proof) or `gap-closed-by:` (new named test). **Zero MIS
 | Cancel vs in-flight / timer / Waiting / already Failed | | `test: cancel_mid_run_running_sees_token_pending_never_starts` `test: cancel_ready_with_future_deadline_does_not_start_later` `test: cancel_while_waiting_is_cancelled` `test: cancel_after_failed_stays_failed` |
 | Drop handle = cancel; second cancel idempotent | | `test: dropping_execution_handle_cancels_graph_not_detach` `test: cancel_already_terminal_is_noop` |
 | Cancel bound under load (ignore_cancel) | wall bound; `cancel_under_load_64` uses hang(false) and does **not** prove the bound | `test: hang_ignore_cancel_ends_within_documented_bound` `gap-closed-by: cancel_ignore_cancel_fanout_meets_bound` |
-| 0-byte vs huge Bytes; NodeId keying; refcount | | `test: succeeded_empty_bytes_vs_fat_bytes` `test: uneven_payloads` `gap-closed-by: fat_bytes_join_input_is_refcount_not_copy` |
+| 0-byte vs huge Bytes; NodeId keying; refcount | | `test: succeeded_empty_bytes_vs_fat_bytes` `test: uneven_payloads` `gap-closed-by: fat_bytes_join_input_is_refcount_not_copy` `gap-closed-by: fat_bytes_custom_executor_join_is_refcount_not_copy` |
 | Snapshot after every terminal; inspect during Running / after cancel | | `test: inspect_during_running_returns_live_snapshot` `test: inspect_after_cancel_returns_cancelled_not_error` `gap-closed-by: memory_store_persists_failed_cancelled_completed_terminals` |
 
 - Default join is `Join::AllSucceeded`. Default `OnFailure` is `FailExecution`.
@@ -98,7 +98,7 @@ Dropping the handle is pinned by `dropping_execution_handle_cancels_graph_not_de
 | Duplicate edge | one pred (deduped) | `duplicate_edge_is_one_pred` | no-op extra edge |
 | Empty node id | `DefinitionError::EmptyNodeId` | `empty_node_id_rejected` | typed error |
 | Empty workflow id | `DefinitionError::EmptyWorkflowId` | `empty_workflow_id_rejected` | typed error |
-| Empty executor id | `DefinitionError::EmptyExecutorId` | `empty_executor_id_rejected` | typed error |
+| Empty executor id | `DefinitionError::EmptyExecutorId` | `empty_executor_id_rejected` / **gap-closed-by:** `from_durable_bytes_empty_executor_id_is_rejected` | typed error |
 | `Join::AllDone` on a node with no preds | source Ready, runs | `all_done_source_with_no_preds_runs` | default (remain=0) |
 | FailSubtree with no children (0-successor fail) | node Failed, execution **Completed** (not Failed) | `fail_subtree_with_no_children_is_noop_on_descendants` | FailSubtree contract |
 | 0-successor fail under FailExecution | node Failed, execution Failed | `zero_successor_fail_execution_is_failed` | fail-fast |
@@ -127,8 +127,8 @@ Dropping the handle is pinned by `dropping_execution_handle_cancels_graph_not_de
 | Executor panic + FailSubtree | node Failed, sibling Succeeded, execution **Completed**, permit released | **gap-closed-by:** `executor_panic_fail_subtree_releases_permit_sibling_runs` | FailSubtree (not fail-fast) |
 | Next start after executor panic | same Runtime, next execution Succeeded | **gap-closed-by:** `next_start_after_executor_panic_succeeds` | no JoinSet/permit leak |
 | Executor hang until cancel | Cancelled within `DEFAULT_CANCEL_BOUND` | `hang_ignore_cancel_ends_within_documented_bound` | abort after bound |
-| Executor returns Waiting without / with garbage token | kernel-issued token on inspect; resume garbage → `TokenMismatch` | `waiting_executor_supplied_token_ignored_kernel_token_used` | ignore executor token |
-| Succeeded empty `Bytes` vs fat `Bytes` | both stored; join sees both | `succeeded_empty_bytes_vs_fat_bytes` / `uneven_payloads`; **gap-closed-by:** `fat_bytes_join_input_is_refcount_not_copy` | opaque bytes / refcount |
+| Executor returns Waiting without / with garbage token | kernel-issued token on inspect; resume garbage → `TokenMismatch`; missing kernel token → node Failed (not adapter-issued park) | `waiting_executor_supplied_token_ignored_kernel_token_used` / `custom_waiting_forged_token_complete_is_mismatch_kernel_token_unblocks`; **gap-closed-by:** `waiting_without_kernel_token_is_failed_not_adapter_issued` `waiting_forged_token_is_ignored_kernel_token_parks` | ignore executor token; fail-closed if kernel token missing |
+| Succeeded empty `Bytes` vs fat `Bytes` | both stored; join sees both | `succeeded_empty_bytes_vs_fat_bytes` / `uneven_payloads`; **gap-closed-by:** `fat_bytes_join_input_is_refcount_not_copy` `fat_bytes_custom_executor_join_is_refcount_not_copy` | opaque bytes / refcount |
 | Failed + Accept | node Failed, execution Failed, no retry | `accept_policy_on_fail_no_retry` | Accept |
 | Failed + Retry then Succeeded | attempts 1,2,… at-least-once | `retry_policy_max_3_fail_twice_then_succeed` / `retry_is_at_least_once_two_execute_invocations` | Retry; **not** exactly-once |
 | Failed + Retry exhausted | node Failed, execution Failed | `retry_policy_max_2_always_fail` | Accept after max |

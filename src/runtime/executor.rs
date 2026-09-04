@@ -80,6 +80,9 @@ where
     }
 }
 
+/// Builder-owned map. [`Clone`] copies the HashMap (Arc bumps on values);
+/// it is not a shared mutex — a clone cannot live-swap another Runtime's
+/// adapters. Register is [`crate::RuntimeBuilder`] only.
 #[derive(Clone, Default)]
 pub struct ExecutorRegistry {
     inner: HashMap<ExecutorId, Arc<dyn Executor>>,
@@ -175,5 +178,26 @@ mod tests {
             1
         );
         assert!(reg.get(&ExecutorId::new("tool")).is_some());
+    }
+
+    #[test]
+    fn registry_clone_is_independent_map_not_live_swap() {
+        let mut a = ExecutorRegistry::new();
+        a.register(Arc::new(FunctionExecutor::new("keep", |_ctx| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"a"))
+        })));
+        let b = a.clone();
+        a.register(Arc::new(FunctionExecutor::new("late", |_ctx| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"late"))
+        })));
+        assert!(
+            a.get(&ExecutorId::new("late")).is_some(),
+            "builder map still accepts a later insert"
+        );
+        assert!(
+            b.get(&ExecutorId::new("late")).is_none(),
+            "Clone is a HashMap copy, not a shared Arc<Mutex>; post-clone insert must not live-swap the other registry"
+        );
+        assert!(b.get(&ExecutorId::new("keep")).is_some());
     }
 }

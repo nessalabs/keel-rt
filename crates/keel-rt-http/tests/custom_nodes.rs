@@ -4,10 +4,12 @@
 use bytes::Bytes;
 use keel_rt::{
     ExecutionContext, ExecutionId, ExecutionState, Executor, ExecutorId, FakeClock, MemoryStore,
-    NodeId, NodeOutcome, Runtime, RuntimeBuilder, StateStore, WorkflowDefinition, WAIT_ID,
+    NodeId, NodeOutcome, Resume, ResumeToken, Runtime, RuntimeBuilder, StateStore,
+    WorkflowDefinition, WAIT_ID,
 };
 use keel_rt_http::{
     serve_ephemeral, CompleteSecret, InspectNodeState, InspectView, KeelClient, KeelClientError,
+    MAX_BODY,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -369,5 +371,92 @@ async fn custom_empty_register_id_is_not_in_catalog() {
         "catalog must not list empty id: {catalog:?}"
     );
     assert!(catalog.iter().any(|id| id.as_str() == "research"));
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_id_case_mismatch_start_is_400_names_the_id() {
+    let rt = Arc::new(builder().register(Research).build());
+    let (client, server) = bind(rt).await;
+    let err = client.start(one_node("n", "Research")).await.unwrap_err();
+    match &err {
+        KeelClientError::Unregistered { executors } => {
+            let names: Vec<&str> = executors.iter().map(|e| e.as_str()).collect();
+            assert_eq!(names, vec!["Research"], "{names:?}");
+        }
+        other => panic!("expected Unregistered Research, got {other:?}"),
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_waiting_forged_token_complete_is_404_kernel_unblocks() {
+    let rt = Arc::new(
+        builder()
+            .register_fn("hold", |_ctx: ExecutionContext| async {
+                NodeOutcome::Waiting {
+                    token: ResumeToken::issue(ExecutionId::new(), NodeId::new("hold"), 99),
+                }
+            })
+            .build(),
+    );
+    let (client, server) = bind(rt).await;
+    let id = client.start(one_node("hold", "hold")).await.expect("start");
+    let parked = inspect_until(&client, &id, |v| v.state == ExecutionState::Waiting).await;
+    let kernel = parked
+        .resume_token(&NodeId::new("hold"))
+        .cloned()
+        .expect("kernel token");
+    let forged = ResumeToken::issue(id.clone(), NodeId::new("hold"), 1);
+    match client
+        .complete(
+            forged,
+            Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"nope"))),
+        )
+        .await
+    {
+        Err(KeelClientError::UnknownToken) => {}
+        other => panic!("forged complete must 404 UnknownToken, got {other:?}"),
+    }
+    client
+        .approve(kernel, Bytes::from_static(b"ok"))
+        .await
+        .expect("kernel token");
+    inspect_until(&client, &id, |v| v.state == ExecutionState::Succeeded).await;
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_failed_huge_last_error_inspect_is_200_omits_error() {
+    let huge = "x".repeat(2 * 1024 * 1024);
+    let h = huge.clone();
+    let rt = Arc::new(
+        builder()
+            .register_fn("boom", move |_ctx: ExecutionContext| {
+                let h = h.clone();
+                async move { NodeOutcome::failed(h) }
+            })
+            .build(),
+    );
+    let (client, server) = bind(rt.clone()).await;
+    let id = client.start(one_node("x", "boom")).await.expect("start");
+    let done = inspect_until(&client, &id, |v| v.state.is_terminal()).await;
+    assert_eq!(done.state, ExecutionState::Failed);
+    let json = serde_json::to_vec(&done).unwrap();
+    assert!(
+        json.len() < MAX_BODY,
+        "Failed inspect must omit last_error so a huge adapter error is not a 413: {}",
+        json.len()
+    );
+    let v = serde_json::to_value(&done).unwrap();
+    let node = v["nodes"].as_array().unwrap().iter().next().unwrap();
+    assert!(node.get("last_error").is_none(), "{node}");
+    assert!(node["state"].get("output").is_none(), "{node}");
+    let snap = rt.inspect(&id).await.expect("kernel inspect");
+    let msg = snap
+        .node(&NodeId::new("x"))
+        .and_then(|n| n.last_error.clone())
+        .expect("kernel snapshot keeps last_error");
+    assert_eq!(msg.message.len(), huge.len());
     server.abort();
 }

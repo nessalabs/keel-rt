@@ -213,8 +213,8 @@ impl WorkflowDefinition {
 
     /// Rebuild a validated DAG from stored bytes. Invalid graphs fail closed.
     pub fn from_durable_bytes(bytes: &[u8]) -> Result<Self, DefinitionError> {
-        let rec: WorkflowDefinitionRecord = serde_json::from_slice(bytes)
-            .map_err(|_| DefinitionError::CorruptDurableBytes)?;
+        let rec: WorkflowDefinitionRecord =
+            serde_json::from_slice(bytes).map_err(|_| DefinitionError::CorruptDurableBytes)?;
         let mut b = WorkflowDefinition::builder(rec.id).on_failure(rec.on_failure);
         for n in rec.nodes {
             b = b.node(n.id.clone(), n.executor_id).join(n.id, n.join);
@@ -552,5 +552,12 @@ mod tests {
     fn from_durable_bytes_rejects_corrupt_json() {
         let err = WorkflowDefinition::from_durable_bytes(b"not-json").unwrap_err();
         assert_eq!(err, DefinitionError::CorruptDurableBytes);
+    }
+
+    #[test]
+    fn from_durable_bytes_empty_executor_id_is_rejected() {
+        let bytes = br#"{"id":"wf","on_failure":"FailExecution","nodes":[{"id":"a","executor_id":"","join":"AllSucceeded"}],"edges":[]}"#;
+        let err = WorkflowDefinition::from_durable_bytes(bytes).unwrap_err();
+        assert_eq!(err, DefinitionError::EmptyExecutorId);
     }
 }

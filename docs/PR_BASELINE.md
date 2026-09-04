@@ -364,4 +364,18 @@ behavior; “now” is frozen `main`).
   binaries from those numbers (`benches/JEMALLOC.md`).
 - When a caller drops `Runtime` after `start`, in-flight executions used to
   keep running. Now they still do; the **last handle** owns JoinSet/permits.
+- When a caller’s custom adapter returns **Waiting** with its own token, it
+  used to park on that token if the kernel token was missing (`take().unwrap_or`).
+  Now the kernel-issued token is always stored (adapter token ignored). If
+  the kernel token is missing, the node **Fails** (`wait token missing`)
+  instead of parking on an adapter-issued token.
+- When a caller **registers** an executor, it used to (and still does) happen
+  only on `RuntimeBuilder` before `build`. `Runtime` has no `register`; the
+  registry is a HashMap clone (not a shared mutex), so there is no live swap
+  of in-flight adapters. Last-wins is builder-only. Empty register ids are
+  skipped; an empty `executor_id` on durable JSON is `EmptyExecutorId`.
+- When a caller **resumes** a Running custom node on a second Runtime that
+  did not register that id, it used to be possible to reach `launch_slot`’s
+  unregistered `expect`. Now `resume` returns `ResumeError::UnregisteredExecutors`
+  and does not rewrite the Running snapshot.
 - Frozen absences: no Agent, HTTP, SQL, or merge of `examples/studio`.

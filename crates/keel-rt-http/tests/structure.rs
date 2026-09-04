@@ -660,6 +660,9 @@ fn custom_node_authoring_tests_and_absences() {
         "fn custom_empty_bytes_output_inspect_succeeded",
         "fn custom_double_register_last_wins_catalog_and_run",
         "fn custom_empty_register_id_is_not_in_catalog",
+        "fn custom_id_case_mismatch_start_is_400_names_the_id",
+        "fn custom_waiting_forged_token_complete_is_404_kernel_unblocks",
+        "fn custom_failed_huge_last_error_inspect_is_200_omits_error",
         "impl Executor for Research",
         "impl Executor for Write",
     ] {
