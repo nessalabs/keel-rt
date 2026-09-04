@@ -154,13 +154,10 @@ async fn drive(
             // Catch-up=1: one start, then next from now (not each missed slot).
             // Drop handle cancels (kernel). wait() consumes so the fire
             // lives; a detached task-per-start is not a second engine.
-            match runtime.start(specs[i].definition().clone()) {
-                Ok(handle) => {
-                    tokio::spawn(async move {
-                        handle.wait().await;
-                    });
-                }
-                Err(_) => {}
+            if let Ok(handle) = runtime.start(specs[i].definition().clone()) {
+                tokio::spawn(async move {
+                    handle.wait().await;
+                });
             }
             let next = specs[i].next_after(now).unwrap_or(Timestamp::MAX);
             nexts[i] = next;
