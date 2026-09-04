@@ -2,12 +2,14 @@
 
 use bytes::Bytes;
 use keel_rt::{
-    ExecutionContext, ExecutionState, FakeClock, NodeId, NodeOutcome, Runtime, WorkflowDefinition,
-    WAIT_ID,
+    ExecutionContext, ExecutionState, Executor, ExecutorId, FakeClock, NodeId, NodeOutcome,
+    Runtime, WorkflowDefinition, WAIT_ID,
 };
 use keel_rt_http::{
     serve_ephemeral, CompleteSecret, InspectNodeState, KeelClient, KeelClientError,
 };
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,31 +32,61 @@ fn dag() -> WorkflowDefinition {
         .unwrap()
 }
 
+struct Research;
+
+impl Executor for Research {
+    fn id(&self) -> ExecutorId {
+        ExecutorId::new("research")
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _ctx: ExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+        Box::pin(async { NodeOutcome::Succeeded(Bytes::from_static(b"notes")) })
+    }
+}
+
+struct Write {
+    hits: Arc<AtomicU32>,
+    last: Arc<Mutex<Bytes>>,
+}
+
+impl Executor for Write {
+    fn id(&self) -> ExecutorId {
+        ExecutorId::new("write")
+    }
+
+    fn execute<'a>(
+        &'a self,
+        ctx: ExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+        let hits = self.hits.clone();
+        let last = self.last.clone();
+        Box::pin(async move {
+            hits.fetch_add(1, Ordering::SeqCst);
+            let out = ctx
+                .inputs
+                .get(&NodeId::new("hold"))
+                .cloned()
+                .unwrap_or_default();
+            *last.lock().expect("write") = out.clone();
+            NodeOutcome::Succeeded(out)
+        })
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn sdk_loop_approve_then_cancel_is_409() {
     let writes = Arc::new(AtomicU32::new(0));
     let last = Arc::new(Mutex::new(Bytes::new()));
-    let w = writes.clone();
-    let last_c = last.clone();
     let rt = Arc::new(
         Runtime::builder()
             .clock(Arc::new(FakeClock::new()))
-            .register_fn("research", |_ctx: ExecutionContext| async {
-                NodeOutcome::Succeeded(Bytes::from_static(b"notes"))
-            })
-            .register_fn("write", move |ctx: ExecutionContext| {
-                let w = w.clone();
-                let last = last_c.clone();
-                async move {
-                    w.fetch_add(1, Ordering::SeqCst);
-                    let out = ctx
-                        .inputs
-                        .get(&NodeId::new("hold"))
-                        .cloned()
-                        .unwrap_or_default();
-                    *last.lock().expect("write") = out.clone();
-                    NodeOutcome::Succeeded(out)
-                }
+            .register(Research)
+            .register(Write {
+                hits: writes.clone(),
+                last: last.clone(),
             })
             .build(),
     );

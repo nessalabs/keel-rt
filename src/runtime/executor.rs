@@ -36,6 +36,10 @@ impl ExecutionContext {
     }
 }
 
+/// Author hook: one named adapter. Implement this, then
+/// [`crate::RuntimeBuilder::register`] before [`crate::RuntimeBuilder::build`].
+/// Closures go through [`crate::RuntimeBuilder::register_fn`].
+/// Graph I/O is predecessor [`Bytes`] keyed by node id — not a typed schema.
 pub trait Executor: Send + Sync {
     fn id(&self) -> ExecutorId;
     fn execute<'a>(
@@ -87,6 +91,9 @@ impl ExecutorRegistry {
     }
 
     pub fn register(&mut self, exec: Arc<dyn Executor>) {
+        if exec.id().as_str().is_empty() {
+            return;
+        }
         self.inner.insert(exec.id(), exec);
     }
 
@@ -105,6 +112,7 @@ impl ExecutorRegistry {
 mod tests {
     use super::*;
     use crate::runtime::time::SystemClock;
+    use bytes::Bytes;
 
     fn ctx(cancel: CancellationToken) -> ExecutionContext {
         ExecutionContext {
@@ -137,5 +145,35 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn sleep_zero_completes_without_cancel() {
         ctx(CancellationToken::new()).sleep(Duration::ZERO).await;
+    }
+
+    #[test]
+    fn registry_skips_empty_id() {
+        let mut reg = ExecutorRegistry::new();
+        reg.register(Arc::new(FunctionExecutor::new("", |_ctx| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"nope"))
+        })));
+        assert!(
+            !reg.ids().iter().any(|id| id.as_str().is_empty()),
+            "empty id is not a catalog entry: {:?}",
+            reg.ids()
+        );
+        assert!(reg.get(&ExecutorId::new("")).is_none());
+    }
+
+    #[test]
+    fn registry_same_id_last_wins() {
+        let mut reg = ExecutorRegistry::new();
+        reg.register(Arc::new(FunctionExecutor::new("tool", |_ctx| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"first"))
+        })));
+        reg.register(Arc::new(FunctionExecutor::new("tool", |_ctx| async {
+            NodeOutcome::Succeeded(Bytes::from_static(b"second"))
+        })));
+        assert_eq!(
+            reg.ids().iter().filter(|id| id.as_str() == "tool").count(),
+            1
+        );
+        assert!(reg.get(&ExecutorId::new("tool")).is_some());
     }
 }

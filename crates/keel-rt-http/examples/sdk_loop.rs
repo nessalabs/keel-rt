@@ -2,8 +2,9 @@
 //!
 //! The engine owns executors; this client never registers them.
 //!
-//! **Engine** (this process): registers `research` and `write`. Builtin
-//! `wait` needs no register. Then `serve_ephemeral` on `127.0.0.1`.
+//! **Engine** (this process): implements [`Executor`] for `research` and
+//! `write` (or `register_fn`). Builtin `wait` needs no register. Then
+//! `serve_ephemeral` on `127.0.0.1`.
 //!
 //! **Client** (`KeelClient`): `GET /executors`, then sends only the
 //! definition (`durable_bytes`). A node whose `executor_id` is missing
@@ -17,10 +18,15 @@
 //! the join bytes. Waiting is still the only variant with a token.
 
 use bytes::Bytes;
-use keel_rt::{ExecutionContext, ExecutionState, NodeId, NodeOutcome, Runtime, WorkflowDefinition};
+use keel_rt::{
+    ExecutionContext, ExecutionState, Executor, ExecutorId, NodeId, NodeOutcome, Runtime,
+    WorkflowDefinition,
+};
 use keel_rt_http::{
     serve_ephemeral, CompleteSecret, InspectNodeState, InspectView, KeelClient, KeelClientError,
 };
+use std::future::Future;
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -75,32 +81,62 @@ where
     .expect("inspect timed out")
 }
 
+struct Research;
+
+impl Executor for Research {
+    fn id(&self) -> ExecutorId {
+        ExecutorId::new("research")
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _ctx: ExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+        Box::pin(async { NodeOutcome::Succeeded(Bytes::from_static(b"notes")) })
+    }
+}
+
+struct Write {
+    hits: Arc<AtomicU32>,
+    last: Arc<Mutex<Bytes>>,
+}
+
+impl Executor for Write {
+    fn id(&self) -> ExecutorId {
+        ExecutorId::new("write")
+    }
+
+    fn execute<'a>(
+        &'a self,
+        ctx: ExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+        let hits = self.hits.clone();
+        let last = self.last.clone();
+        Box::pin(async move {
+            hits.fetch_add(1, Ordering::SeqCst);
+            let out = ctx
+                .inputs
+                .get(&NodeId::new("hold"))
+                .cloned()
+                .unwrap_or_default();
+            *last.lock().expect("write bytes") = out.clone();
+            NodeOutcome::Succeeded(out)
+        })
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let writes = Arc::new(AtomicU32::new(0));
     let last_write = Arc::new(Mutex::new(Bytes::new()));
-    let w = writes.clone();
-    let last = last_write.clone();
 
     // Engine process: executors live here. Client never sends them.
     let runtime = Arc::new(
         Runtime::builder()
-            .register_fn("research", |_ctx: ExecutionContext| async {
-                NodeOutcome::Succeeded(Bytes::from_static(b"notes"))
-            })
-            .register_fn("write", move |ctx: ExecutionContext| {
-                let w = w.clone();
-                let last = last.clone();
-                async move {
-                    w.fetch_add(1, Ordering::SeqCst);
-                    let out = ctx
-                        .inputs
-                        .get(&NodeId::new("hold"))
-                        .cloned()
-                        .unwrap_or_default();
-                    *last.lock().expect("write bytes") = out.clone();
-                    NodeOutcome::Succeeded(out)
-                }
+            .register(Research)
+            .register(Write {
+                hits: writes.clone(),
+                last: last_write.clone(),
             })
             .build(),
     );
@@ -129,7 +165,7 @@ async fn main() -> ExitCode {
             .join(", ")
     );
     if !catalog.iter().any(|id| id.as_str() == "research") {
-        eprintln!("catalog missing research after engine register_fn");
+        eprintln!("catalog missing research after engine register(Research)");
         server.abort();
         return ExitCode::FAILURE;
     }

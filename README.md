@@ -43,9 +43,34 @@ not belong in the kernel.
 
 ## Consumer happy path
 
+Implement [`Executor`] on a type (or use `register_fn` for a closure). Register
+**before** `build`. Builtin `wait` is already on the builder. Graph I/O is
+predecessor `Bytes` by node id — not a typed schema.
+
 ```rust
 use bytes::Bytes;
-use keel_rt::{Event, ExecutionContext, FnSink, NodeOutcome, Runtime, WorkflowDefinition};
+use keel_rt::{
+    Event, ExecutionContext, Executor, ExecutorId, FnSink, NodeOutcome, Runtime,
+    WorkflowDefinition,
+};
+use std::future::Future;
+use std::pin::Pin;
+
+struct Fetch;
+impl Executor for Fetch {
+    fn id(&self) -> ExecutorId {
+        ExecutorId::new("fetch")
+    }
+    fn execute<'a>(
+        &'a self,
+        ctx: ExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            ctx.sleep(std::time::Duration::ZERO).await;
+            NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+        })
+    }
+}
 
 let def = WorkflowDefinition::builder(format!("job-{}", 1))
     .node("fetch", "fetch")
@@ -56,10 +81,7 @@ let def = WorkflowDefinition::builder(format!("job-{}", 1))
 let rt = Runtime::builder()
     .concurrency(4)
     .sink(FnSink(|e: &Event| println!("{e}")))
-    .register_fn("fetch", |ctx: ExecutionContext| async move {
-        ctx.sleep(std::time::Duration::ZERO).await; // execution clock
-        NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
-    })
+    .register(Fetch)
     .register_fn("save", |_ctx| async { NodeOutcome::Succeeded(Bytes::new()) })
     .build();
 

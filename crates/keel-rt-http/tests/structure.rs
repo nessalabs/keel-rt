@@ -625,15 +625,16 @@ fn sdk_loop_example_and_test_exist() {
     let ex = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/sdk_loop.rs");
     let example = fs::read_to_string(&ex).expect("examples/sdk_loop.rs");
     assert!(
-        example.contains("register_fn(\"research\"")
-            && example.contains("register_fn(\"write\"")
+        example.contains("impl Executor for Research")
+            && example.contains("impl Executor for Write")
+            && example.contains(".register(Research)")
             && example.contains("KeelClient::new")
             && example.contains(".executors(")
             && example.contains(".approve(")
             && example.contains(".cancel(")
             && example.contains("not-on-this-engine")
             && example.contains("engine owns executors"),
-        "example must register on the engine and start/approve/cancel on the client"
+        "example must impl Executor on the engine and start/approve/cancel on the client"
     );
     let tests =
         fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sdk_loop.rs"))
@@ -641,5 +642,55 @@ fn sdk_loop_example_and_test_exist() {
     assert!(
         tests.contains("fn sdk_loop_approve_then_cancel_is_409"),
         "CI must keep the sdk loop"
+    );
+}
+
+#[test]
+fn custom_node_authoring_tests_and_absences() {
+    let tests =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/custom_nodes.rs"))
+            .expect("tests/custom_nodes.rs");
+    for name in [
+        "fn custom_executor_types_catalog_start_approve_inspect",
+        "fn custom_subset_registered_start_is_400_names_missing_only_nothing_runs",
+        "fn custom_adapter_failed_inspect_is_failed_not_succeeded",
+        "fn custom_adapter_panic_inspect_is_failed",
+        "fn client_cancel_mid_custom_running_is_cancelled",
+        "fn client_drop_http_server_while_custom_running_cancels",
+        "fn custom_empty_bytes_output_inspect_succeeded",
+        "fn custom_double_register_last_wins_catalog_and_run",
+        "fn custom_empty_register_id_is_not_in_catalog",
+        "fn custom_catalog_without_secret_is_401",
+        "impl Executor for Research",
+        "impl Executor for Write",
+    ] {
+        assert!(tests.contains(name), "custom_nodes.rs missing {name}");
+    }
+    let lib = fs::read_to_string(crate_src().join("lib.rs")).unwrap();
+    let client = fs::read_to_string(crate_src().join("client.rs")).unwrap();
+    assert!(
+        !lib.contains("route(\"/register") && !client.contains("pub async fn register"),
+        "no register-over-HTTP"
+    );
+    assert!(
+        !lib.contains("yaml")
+            && !lib.contains("YAML")
+            && !client.contains("yaml")
+            && !client.contains("YAML"),
+        "no YAML this PR"
+    );
+    let start_node = lib
+        .split("pub struct StartNode {")
+        .nth(1)
+        .expect("StartNode")
+        .split('}')
+        .next()
+        .expect("StartNode fields");
+    assert!(start_node.contains("pub id: NodeId"));
+    assert!(start_node.contains("pub executor_id: ExecutorId"));
+    assert!(start_node.contains("pub join: Join"));
+    assert!(
+        !start_node.contains("schema") && !start_node.contains("type_name"),
+        "StartNode must not grow typed I/O: {start_node}"
     );
 }

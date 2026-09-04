@@ -708,6 +708,9 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Register an [`Executor`] by its [`Executor::id`]. Empty ids are ignored
+    /// (they cannot appear on a definition). A second register of the same id
+    /// replaces the first.
     pub fn register(mut self, exec: impl Executor + 'static) -> Self {
         self.registry.register(Arc::new(exec));
         self
@@ -801,6 +804,97 @@ mod tests {
         );
         assert!(ids.iter().any(|id| id.as_str() == "research"), "{ids:?}");
         assert!(!ids.iter().any(|id| id.as_str() == "not-on-this-engine"));
+    }
+
+    #[test]
+    fn register_empty_id_is_not_in_catalog() {
+        let rt = Runtime::builder()
+            .register_fn("", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"nope"))
+            })
+            .build();
+        let ids = rt.executor_ids();
+        assert!(
+            !ids.iter().any(|id| id.as_str().is_empty()),
+            "empty executor id must not appear in catalog: {ids:?}"
+        );
+        assert!(
+            ids.iter()
+                .any(|id| id.as_str() == crate::runtime::wait::WAIT_ID),
+            "builtin wait must survive empty register: {ids:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn register_same_id_twice_last_wins() {
+        let rt = Runtime::builder()
+            .register_fn("tool", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"first"))
+            })
+            .register_fn("tool", |_ctx: ExecutionContext| async {
+                NodeOutcome::Succeeded(Bytes::from_static(b"second"))
+            })
+            .build();
+        let ids = rt.executor_ids();
+        assert_eq!(
+            ids.iter().filter(|id| id.as_str() == "tool").count(),
+            1,
+            "catalog lists an id once: {ids:?}"
+        );
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("n", "tool")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        let out = rt
+            .inspect(&id)
+            .await
+            .unwrap()
+            .node(&NodeId::new("n"))
+            .and_then(|n| n.output.clone());
+        assert_eq!(out.as_deref(), Some(&b"second"[..]));
+    }
+
+    struct TypedEcho;
+    impl Executor for TypedEcho {
+        fn id(&self) -> ExecutorId {
+            ExecutorId::new("echo")
+        }
+        fn execute<'a>(
+            &'a self,
+            _ctx: ExecutionContext,
+        ) -> std::pin::Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+            Box::pin(async { NodeOutcome::Succeeded(Bytes::from_static(b"typed")) })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn register_custom_executor_type_runs() {
+        let rt = Runtime::builder().register(TypedEcho).build();
+        let ids = rt.executor_ids();
+        assert!(ids.iter().any(|id| id.as_str() == "echo"), "{ids:?}");
+        let handle = rt
+            .start(
+                WorkflowDefinition::builder("wf")
+                    .node("n", "echo")
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let id = handle.execution_id().clone();
+        assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+        let out = rt
+            .inspect(&id)
+            .await
+            .unwrap()
+            .node(&NodeId::new("n"))
+            .and_then(|n| n.output.clone());
+        assert_eq!(out.as_deref(), Some(&b"typed"[..]));
     }
 
     #[tokio::test(flavor = "current_thread")]

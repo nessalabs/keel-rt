@@ -12,8 +12,9 @@
 //! and AllDone are opt-in on [`WorkflowDefinition`] only — not a Runtime or
 //! process-wide switch.
 //!
-//! Consumer path: [`WorkflowDefinition::builder`] →
-//! [`RuntimeBuilder::register_fn`] → [`Runtime::run`] / [`Runtime::start`].
+//! Consumer path: implement [`Executor`] (or [`RuntimeBuilder::register_fn`]),
+//! [`RuntimeBuilder::register`] before [`RuntimeBuilder::build`], then
+//! [`Runtime::run`] / [`Runtime::start`].
 //! After process death, [`Runtime::resume`] loads the snapshot (at-least-once).
 //! [`Runtime::resume_with`] + [`Recover::RetryFailed`] re-invokes Failed /
 //! TimedOut nodes; default [`Runtime::resume`] still leaves them Failed.

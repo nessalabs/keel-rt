@@ -1,5 +1,18 @@
 # Changelog
 
+## Custom node types (`sdk/custom-nodes`)
+
+Agent authors implement [`Executor`] (or `register_fn`), register on the
+engine **before** `build` / listen, list ids via [`Runtime::executor_ids`]
+/ `GET /executors` (plus builtin `wait`), and start DAGs that name those
+ids. Missing id is **400** with only the missing names; nothing runs.
+Empty register ids are not catalog entries. A second register of the same
+id replaces the first. Graph I/O is predecessor `Bytes` — no typed schema,
+no register-over-HTTP, no YAML. CI:
+`custom_executor_types_catalog_start_approve_inspect`,
+`register_empty_id_is_not_in_catalog`,
+`http_sqlite_custom_executor_types_inspect_succeeded_bytes`.
+
 ## SDK loop example (`sdk/loop`)
 
 `cargo run -p keel-rt-http --example sdk_loop` is the two-process path

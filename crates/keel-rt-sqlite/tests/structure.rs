@@ -133,6 +133,10 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "http.rs must lock HTTP start+inspect+complete on sqlite (two Runtimes)"
     );
     assert!(
+        http.contains("fn http_sqlite_custom_executor_types_inspect_succeeded_bytes"),
+        "http.rs must lock custom Executor types on sqlite (inspect Bytes, subset 400)"
+    );
+    assert!(
         http.contains("fn http_sqlite_start_cancel_second_runtime_is_claimed_elsewhere"),
         "http.rs must lock HTTP start+cancel on sqlite (ClaimedElsewhere)"
     );
