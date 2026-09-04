@@ -9,14 +9,16 @@ pub const SNAPSHOT_ERROR_MARK: &str = "\u{2026}";
 
 /// Max bytes of `last_error` on a live/durable snapshot (`NodeSnapshot`).
 /// Truncated form is a UTF-8 prefix plus [`SNAPSHOT_ERROR_MARK`].
-/// Full Failed detail is [`crate::Event::NodeFailed`] (see [`MAX_SINK_ERROR`]).
+/// Full Failed detail is [`crate::Event::NodeFailed`] / [`crate::Event::NodeAttemptFailed`]
+/// (see [`MAX_SINK_ERROR`]).
 /// **Succeeded `Bytes` are not capped** —
 /// fat payloads stay refcounted (`fat_bytes_join_input_is_refcount_not_copy`).
 pub const MAX_SNAPSHOT_ERROR: usize = 512;
 
-/// Max bytes of [`NodeError`] on [`crate::Event::NodeFailed`] (EventSink and
-/// `persist_with_events` rows). Snapshot `last_error` uses
-/// [`MAX_SNAPSHOT_ERROR`]. Succeeded `Bytes` are not capped.
+/// Max bytes of [`NodeError`] on [`crate::Event::NodeFailed`] and
+/// [`crate::Event::NodeAttemptFailed`] (EventSink and `persist_with_events`
+/// rows). Snapshot `last_error` uses [`MAX_SNAPSHOT_ERROR`]. Succeeded
+/// `Bytes` are not capped.
 pub const MAX_SINK_ERROR: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -41,7 +43,8 @@ impl NodeError {
     }
 
     /// Bound a value that bypassed [`Self::new`] (struct literal, serde)
-    /// before it is announced on [`crate::Event::NodeFailed`].
+    /// before it is announced on [`crate::Event::NodeFailed`] /
+    /// [`crate::Event::NodeAttemptFailed`].
     pub fn sink_capped(self) -> Self {
         Self {
             message: truncate_utf8(self.message, MAX_SINK_ERROR),

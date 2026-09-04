@@ -268,12 +268,24 @@ impl Execution {
                     // keeps Ready { T } node JSON off the stale token blob.
                     n.resume_token = None;
                 }
+                let sink_err = match &outcome {
+                    NodeOutcome::Failed(e) => e.clone(),
+                    _ => NodeError::new("timed out"),
+                };
                 self.set_state(slot, NodeState::Ready { runnable_at: at });
                 if let Some(at) = at {
                     self.note_deadline(slot, at);
                 } else {
                     effect.newly_runnable.push(slot);
                 }
+                // Not NodeFailed: the node is Ready { T }, not Failed.
+                self.emit_node(
+                    effect,
+                    now,
+                    id.clone(),
+                    attempt,
+                    NodeKind::AttemptFailed(sink_err),
+                );
                 return Ok(());
             }
             PolicyDecision::Reject => {

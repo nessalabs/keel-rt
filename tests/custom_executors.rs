@@ -8,10 +8,10 @@ use bytes::Bytes;
 use keel_rt::testing::RecordingSink;
 use keel_rt::{
     AcceptPolicy, ApplyCmd, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
-    ExecutionState, Executor, ExecutorId, Join, MemoryStore, NodeError, NodeId, NodeOutcome,
-    NodeState, OnFailure, Recover, Resume, ResumeError, ResumeToken, Runtime, StartError,
-    StateStore, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND, MAX_SINK_ERROR,
-    MAX_SNAPSHOT_ERROR,
+    ExecutionState, Executor, ExecutorId, FakeClock, Join, MemoryStore, NodeError, NodeId,
+    NodeOutcome, NodeState, OnFailure, Recover, Resume, ResumeError, ResumeToken, RetryPolicy,
+    Runtime, StartError, StateStore, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
+    MAX_SINK_ERROR, MAX_SNAPSHOT_ERROR,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -678,6 +678,99 @@ async fn custom_failed_full_error_emitted_to_sink_snapshot_stays_short() {
         sink_err, full,
         "EventSink must see the full Failed message after persist"
     );
+}
+
+/// Pattern 3 on Retry: park Ready{T}, snapshot short, sink gets full via NodeAttemptFailed.
+#[tokio::test(flavor = "current_thread")]
+async fn retry_attempt_full_error_emitted_to_sink_snapshot_stays_short() {
+    let full = format!("retry-{}", "x".repeat(MAX_SNAPSHOT_ERROR + 2048));
+    assert!(full.len() > MAX_SNAPSHOT_ERROR);
+    assert!(full.len() <= MAX_SINK_ERROR);
+    let sink = RecordingSink::new();
+    let store = MemoryStore::new();
+    let clock = Arc::new(FakeClock::new());
+    let n = Arc::new(AtomicU32::new(0));
+    let msg = full.clone();
+    let hits = n.clone();
+    let rt = Runtime::builder()
+        .clock(clock.clone())
+        .store(store.clone())
+        .sink(sink.clone())
+        .policy(RetryPolicy::new(3, Duration::from_millis(50)))
+        .register_fn("boom", move |_ctx: ExecutionContext| {
+            let n = hits.fetch_add(1, Ordering::SeqCst);
+            let msg = msg.clone();
+            async move {
+                if n == 0 {
+                    NodeOutcome::Failed(NodeError { message: msg })
+                } else {
+                    NodeOutcome::Succeeded(Bytes::from_static(b"ok"))
+                }
+            }
+        })
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("x", "boom")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    let parked = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(Some(n)) = rt
+                .inspect(&id)
+                .await
+                .map(|s| s.node(&NodeId::new("x")).cloned())
+            {
+                match n.state {
+                    NodeState::Ready {
+                        runnable_at: Some(_),
+                    } => return n,
+                    NodeState::Failed => panic!("Retry must park Ready{{T}}, not Failed"),
+                    NodeState::Waiting { .. } => panic!("retry delay must not be Waiting"),
+                    _ => tokio::task::yield_now().await,
+                }
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+    })
+    .await
+    .expect("parked Ready{{T}}");
+    let live_err = parked.last_error.expect("retry park keeps last_error");
+    assert!(
+        live_err.message.len() <= MAX_SNAPSHOT_ERROR,
+        "snapshot last_error {} > MAX_SNAPSHOT_ERROR",
+        live_err.message.len()
+    );
+    assert_ne!(live_err.message, full);
+    let stored = store.get(&id).await.unwrap().unwrap();
+    let stored_err = stored
+        .node(&NodeId::new("x"))
+        .and_then(|n| n.last_error.clone())
+        .expect("store last_error");
+    assert!(stored_err.message.len() <= MAX_SNAPSHOT_ERROR);
+    let events = sink.events();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::NodeFailed { .. })),
+        "Retry must not announce NodeFailed while the node is Ready{{T}}: {events:?}"
+    );
+    let sink_err = events
+        .into_iter()
+        .find_map(|e| match e {
+            Event::NodeAttemptFailed { error, .. } => Some(error.message),
+            _ => None,
+        })
+        .expect("NodeAttemptFailed on EventSink after persist");
+    assert_eq!(
+        sink_err, full,
+        "EventSink must see the full attempt error while snapshot stays short"
+    );
+    clock.advance(Duration::from_millis(50));
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
 }
 
 #[tokio::test(flavor = "current_thread")]

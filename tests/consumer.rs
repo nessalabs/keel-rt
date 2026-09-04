@@ -4,10 +4,10 @@
 
 use bytes::Bytes;
 use keel_rt::{
-    AcceptPolicy, ApplyCmd, ApplyError, Clock, Event, Execution, ExecutionContext,
-    ExecutionState, FnSink, Join, MemoryStore, NeverWaitPolicy, NodeId, NodeOutcome, NodeState,
-    NoopStore, OnFailure, Policy, PolicyDecision, ResumeToken, Runtime, StartError, StateStore,
-    Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
+    AcceptPolicy, ApplyCmd, ApplyError, Clock, Event, Execution, ExecutionContext, ExecutionState,
+    FnSink, Join, MemoryStore, NeverWaitPolicy, NodeId, NodeOutcome, NodeState, NoopStore,
+    OnFailure, Policy, PolicyDecision, ResumeToken, Runtime, StartError, StateStore, Timestamp,
+    WorkflowDefinition, DEFAULT_CANCEL_BOUND,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -207,7 +207,10 @@ async fn noop_store_put_get_are_empty() {
         definition_hash: Default::default(),
     };
     store.put(&dummy).await.unwrap();
-    assert!(store.get(&id).await.unwrap().is_none(), "NoopStore never retains");
+    assert!(
+        store.get(&id).await.unwrap().is_none(),
+        "NoopStore never retains"
+    );
 }
 
 #[test]
@@ -231,7 +234,9 @@ fn node_outcome_helpers_and_display() {
     let ok = NodeOutcome::succeeded(Bytes::from_static(b"xy"));
     let fail = NodeOutcome::failed("boom");
     let token = ResumeToken::issue(keel_rt::ExecutionId::new(), NodeId::new("n"), 1);
-    let wait = NodeOutcome::Waiting { token: token.clone() };
+    let wait = NodeOutcome::Waiting {
+        token: token.clone(),
+    };
     assert!(ok.is_success());
     assert!(!fail.is_success());
     assert!(ok.equivalent(&NodeOutcome::succeeded(Bytes::from_static(b"xy"))));
@@ -314,7 +319,13 @@ fn apply_start_twice_is_illegal_unknown_retry_is_noop() {
     assert!(ex.executor_id(&NodeId::new("ghost")).is_none());
     assert!(ex.inputs_for(&NodeId::new("ghost")).is_empty());
     let late = ex
-        .apply(ApplyCmd::RetryDue { node_id: "ghost".into() }, &p, now)
+        .apply(
+            ApplyCmd::RetryDue {
+                node_id: "ghost".into(),
+            },
+            &p,
+            now,
+        )
         .unwrap();
     assert!(!late.changed);
     let idle = ex.apply(ApplyCmd::ForceCancelRunning, &p, now).unwrap();
@@ -408,6 +419,18 @@ fn event_display_covers_every_variant() {
                 error: keel_rt::NodeError::new("boom"),
             },
             "failed: boom",
+        ),
+        (
+            Event::NodeAttemptFailed {
+                execution_id: execution_id.clone(),
+                workflow_id: workflow_id.clone(),
+                node_id: node_id.clone(),
+                attempt: 1,
+                at,
+                schema_version: sv,
+                error: keel_rt::NodeError::new("boom"),
+            },
+            "attempt failed: boom",
         ),
         (
             Event::NodeCancelled {
@@ -546,10 +569,7 @@ async fn persist_panic_does_not_kill_execution() {
         ) -> Result<Option<keel_rt::ExecutionSnapshot>, keel_rt::StoreError> {
             Ok(None)
         }
-        async fn persist(
-            &self,
-            _exec: &keel_rt::Execution,
-        ) -> Result<(), keel_rt::StoreError> {
+        async fn persist(&self, _exec: &keel_rt::Execution) -> Result<(), keel_rt::StoreError> {
             panic!("persist boom");
         }
     }

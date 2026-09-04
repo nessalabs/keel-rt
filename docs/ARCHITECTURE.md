@@ -361,7 +361,7 @@ classDiagram
   class Event {
     <<enum>>
     ExecutionStarted Succeeded Failed Completed Cancelled
-    NodeStarted Succeeded Failed TimedOut Cancelled Waiting
+    NodeStarted Succeeded Failed AttemptFailed TimedOut Cancelled Waiting
     +node_id() Option~NodeId~
     +attempt() Option~u32~
   }

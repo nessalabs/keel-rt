@@ -2496,18 +2496,19 @@ mod tests {
         )
         .unwrap();
         let huge = "w".repeat(MAX_SNAPSHOT_ERROR + 8);
-        ex.apply(
-            ApplyCmd::FinishNode {
-                node_id: "a".into(),
-                attempt: 1,
-                outcome: Ok(NodeOutcome::Failed(NodeError {
-                    message: huge.clone(),
-                })),
-            },
-            &p,
-            now,
-        )
-        .unwrap();
+        let effect = ex
+            .apply(
+                ApplyCmd::FinishNode {
+                    node_id: "a".into(),
+                    attempt: 1,
+                    outcome: Ok(NodeOutcome::Failed(NodeError {
+                        message: huge.clone(),
+                    })),
+                },
+                &p,
+                now,
+            )
+            .unwrap();
         let snap = ex.snapshot().node(&NodeId::new("a")).unwrap().clone();
         assert!(matches!(
             snap.state,
@@ -2519,5 +2520,21 @@ mod tests {
         assert!(msg.message.len() <= MAX_SNAPSHOT_ERROR);
         let prefix = msg.message.trim_end_matches('\u{2026}');
         assert!(huge.starts_with(prefix));
+        assert!(
+            !effect
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::NodeFailed { .. })),
+            "Retry must not announce NodeFailed"
+        );
+        let sink_err = effect
+            .events
+            .iter()
+            .find_map(|e| match e {
+                Event::NodeAttemptFailed { error, .. } => Some(error.message.clone()),
+                _ => None,
+            })
+            .expect("NodeAttemptFailed announced");
+        assert_eq!(sink_err, huge);
     }
 }
