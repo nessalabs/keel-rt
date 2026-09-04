@@ -554,7 +554,7 @@ async fn cancel_when_deadline_already_due_does_not_dispatch() {
 /// Same inbox as handle cancel: `Runtime::cancel` at due T must not
 /// dispatch-then-cancel.
 #[tokio::test(flavor = "current_thread")]
-async fn runtime_cancel_at_T_does_not_dispatch_then_cancel() {
+async fn runtime_cancel_at_t_does_not_dispatch_then_cancel() {
     let clock = Arc::new(FakeClock::new());
     let store = MemoryStore::new();
     let (id, t) = persist_backoff(&store, DELAY).await;
