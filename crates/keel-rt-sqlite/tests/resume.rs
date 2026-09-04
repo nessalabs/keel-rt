@@ -7,9 +7,10 @@ use bytes::Bytes;
 use keel_rt::testing::{FakeClock, ScriptedExecutor};
 use keel_rt::{
     AcceptPolicy, ApplyCmd, Clock, CompleteError, Event, Execution, ExecutionContext, ExecutionId,
-    ExecutionSnapshot, ExecutionState, Executor, ExecutorId, Join, LeaseEpoch, NodeId, NodeOutcome,
-    NodeState, OnFailure, OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime, StateStore,
-    StoreError, Timestamp, WorkflowDefinition, DEFAULT_LEASE_TTL, SCHEMA_VERSION,
+    ExecutionSnapshot, ExecutionState, Executor, ExecutorId, Join, LeaseEpoch, NodeError, NodeId,
+    NodeOutcome, NodeState, OnFailure, OwnerId, Recover, Resume, ResumeError, RetryPolicy, Runtime,
+    StateStore, StoreError, Timestamp, WorkflowDefinition, DEFAULT_LEASE_TTL, MAX_LAST_ERROR,
+    SCHEMA_VERSION,
 };
 use keel_rt_sqlite::SqliteStore;
 use std::path::PathBuf;
@@ -1145,6 +1146,55 @@ fn resume_running_custom_without_adapter_is_unregistered() {
         let with = Runtime::builder().store(store).register(Slow).build();
         let handle = with.resume(&id).await.expect("adapter present");
         assert_eq!(handle.wait().await, ExecutionState::Succeeded);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn sqlite_persist_failed_huge_last_error_is_capped() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let mut ex = Execution::new(
+        WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap(),
+    );
+    let p = AcceptPolicy;
+    let now = Timestamp(0);
+    ex.apply(ApplyCmd::Start, &p, now).unwrap();
+    ex.apply(
+        ApplyCmd::StartNode {
+            node_id: "a".into(),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    let huge = "q".repeat(MAX_LAST_ERROR + 4096);
+    ex.apply(
+        ApplyCmd::FinishNode {
+            node_id: "a".into(),
+            attempt: 1,
+            outcome: Ok(NodeOutcome::Failed(NodeError { message: huge })),
+        },
+        &p,
+        now,
+    )
+    .unwrap();
+    let rt = current_rt();
+    rt.block_on(async {
+        store.persist(&ex).await.unwrap();
+        let snap = store.get(ex.id()).await.unwrap().unwrap();
+        let msg = snap
+            .node(&NodeId::new("a"))
+            .and_then(|n| n.last_error.clone())
+            .expect("last_error");
+        assert!(
+            msg.message.len() <= MAX_LAST_ERROR,
+            "sqlite last_error {} > MAX_LAST_ERROR",
+            msg.message.len()
+        );
     });
     let _ = std::fs::remove_file(&path);
 }

@@ -378,4 +378,8 @@ behavior; “now” is frozen `main`).
   did not register that id, it used to be possible to reach `launch_slot`’s
   unregistered `expect`. Now `resume` returns `ResumeError::UnregisteredExecutors`
   and does not rewrite the Running snapshot.
+- When a caller’s custom adapter returns **Failed** with a multi-MiB
+  `last_error`, it used to persist the whole string on the snapshot (MemoryStore
+  and sqlite). Now `FinishNode(Failed)` truncates at `MAX_LAST_ERROR` (1 MiB).
+  Succeeded `Bytes` stay uncapped (`succeeded_fat_bytes_are_not_capped_by_last_error_bound`).
 - Frozen absences: no Agent, HTTP, SQL, or merge of `examples/studio`.

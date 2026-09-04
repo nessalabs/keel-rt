@@ -7,9 +7,9 @@
 use bytes::Bytes;
 use keel_rt::{
     AcceptPolicy, ApplyCmd, CompleteError, Execution, ExecutionContext, ExecutionId,
-    ExecutionState, Executor, ExecutorId, Join, MemoryStore, NodeId, NodeOutcome, NodeState,
-    OnFailure, Recover, Resume, ResumeError, ResumeToken, Runtime, StartError, StateStore,
-    Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND,
+    ExecutionState, Executor, ExecutorId, Join, MemoryStore, NodeError, NodeId, NodeOutcome,
+    NodeState, OnFailure, Recover, Resume, ResumeError, ResumeToken, Runtime, StartError,
+    StateStore, Timestamp, WorkflowDefinition, DEFAULT_CANCEL_BOUND, MAX_LAST_ERROR,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -549,6 +549,109 @@ async fn custom_failed_resume_with_retry_failed_rebumps_and_succeeds() {
         .await
         .expect("retry");
     assert_eq!(within(h.wait()).await, ExecutionState::Succeeded);
+}
+
+/// Custom Failed with a multi-MiB last_error must not land unbounded on the
+/// live inspect snapshot or MemoryStore. Succeeded fat Bytes stay uncapped.
+#[tokio::test(flavor = "current_thread")]
+async fn custom_failed_huge_last_error_is_capped_on_live_and_store_snapshot() {
+    let huge = "x".repeat(MAX_LAST_ERROR + 1024 * 1024);
+    let h = huge.clone();
+    let store = MemoryStore::new();
+    struct Boom {
+        msg: String,
+    }
+    impl Executor for Boom {
+        fn id(&self) -> ExecutorId {
+            ExecutorId::new("boom")
+        }
+        fn execute<'a>(
+            &'a self,
+            _ctx: ExecutionContext,
+        ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+            let msg = self.msg.clone();
+            Box::pin(async move { NodeOutcome::Failed(NodeError { message: msg }) })
+        }
+    }
+    let rt = Runtime::builder()
+        .store(store.clone())
+        .register(Boom { msg: h })
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("x", "boom")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Failed);
+    let live = rt.inspect(&id).await.unwrap();
+    let live_err = live
+        .node(&NodeId::new("x"))
+        .and_then(|n| n.last_error.clone())
+        .expect("Failed last_error");
+    assert!(
+        live_err.message.len() <= MAX_LAST_ERROR,
+        "live snapshot last_error {} > MAX_LAST_ERROR",
+        live_err.message.len()
+    );
+    assert!(huge.starts_with(&live_err.message));
+    let stored = store.get(&id).await.unwrap().unwrap();
+    let stored_err = stored
+        .node(&NodeId::new("x"))
+        .and_then(|n| n.last_error.clone())
+        .expect("store last_error");
+    assert_eq!(stored_err.message.len(), live_err.message.len());
+    assert!(stored_err.message.len() <= MAX_LAST_ERROR);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn succeeded_fat_bytes_are_not_capped_by_last_error_bound() {
+    let fat = Bytes::from(vec![7u8; MAX_LAST_ERROR + 4096]);
+    struct Fat {
+        payload: Bytes,
+    }
+    impl Executor for Fat {
+        fn id(&self) -> ExecutorId {
+            ExecutorId::new("fat")
+        }
+        fn execute<'a>(
+            &'a self,
+            _ctx: ExecutionContext,
+        ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+            let payload = self.payload.clone();
+            Box::pin(async move { NodeOutcome::Succeeded(payload) })
+        }
+    }
+    let rt = Runtime::builder()
+        .register(Fat {
+            payload: fat.clone(),
+        })
+        .build();
+    let handle = rt
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("fat", "fat")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    assert_eq!(within(handle.wait()).await, ExecutionState::Succeeded);
+    let out = rt
+        .inspect(&id)
+        .await
+        .unwrap()
+        .node(&NodeId::new("fat"))
+        .and_then(|n| n.output.clone())
+        .expect("Succeeded output");
+    assert_eq!(
+        out.len(),
+        fat.len(),
+        "Succeeded Bytes stay uncapped (HTTP inspect 413 is adapter-only)"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

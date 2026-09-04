@@ -209,6 +209,10 @@ impl Execution {
         now: Timestamp,
         effect: &mut ApplyEffect,
     ) -> Result<(), ApplyError> {
+        let outcome = match outcome {
+            NodeOutcome::Failed(err) => NodeOutcome::Failed(err.capped()),
+            other => other,
+        };
         let attempt = self.nodes[slot.0].attempt;
 
         let decision = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -348,6 +352,7 @@ impl Execution {
         now: Timestamp,
         effect: &mut ApplyEffect,
     ) {
+        let err = err.capped();
         let attempt = self.nodes[slot.0].attempt;
         {
             let n = &mut self.nodes[slot.0];

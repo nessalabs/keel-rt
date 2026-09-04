@@ -385,7 +385,7 @@ impl Execution {
             output: n.output.clone(),
             attempt: n.attempt,
             resume_token,
-            last_error: n.last_error.clone(),
+            last_error: n.last_error.clone().map(NodeError::capped),
         }
     }
 
@@ -523,6 +523,7 @@ mod tests {
     use super::*;
     use crate::domain::definition::{Join, OnFailure};
     use crate::domain::events::Event;
+    use crate::domain::outcome::MAX_LAST_ERROR;
     use crate::domain::policy::{AcceptPolicy, Policy, PolicyDecision};
     use bytes::Bytes;
 
@@ -2420,5 +2421,87 @@ mod tests {
             ex.node(&NodeId::new("a")).unwrap().state,
             NodeState::Succeeded
         ));
+    }
+
+    #[test]
+    fn finish_node_failed_huge_last_error_is_capped_on_snapshot() {
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = AcceptPolicy;
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let huge = "x".repeat(MAX_LAST_ERROR + 64 * 1024);
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Failed(NodeError {
+                    message: huge.clone(),
+                })),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let snap = ex.snapshot().node(&NodeId::new("a")).unwrap().clone();
+        let msg = snap.last_error.expect("Failed keeps last_error");
+        assert!(
+            msg.message.len() <= MAX_LAST_ERROR,
+            "FinishNode(Failed) must not store unbounded last_error: {}",
+            msg.message.len()
+        );
+        assert!(
+            huge.starts_with(&msg.message),
+            "cap is a prefix, not a substitute message"
+        );
+        assert_eq!(ex.state, ExecutionState::Failed);
+    }
+
+    #[test]
+    fn retry_failed_huge_last_error_is_capped_on_ready_snapshot() {
+        use crate::domain::policy::RetryPolicy;
+        use std::time::Duration;
+        let mut ex = linear();
+        let now = Timestamp(0);
+        let p = RetryPolicy::new(3, Duration::from_millis(10));
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let huge = "w".repeat(MAX_LAST_ERROR + 8);
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::Failed(NodeError {
+                    message: huge.clone(),
+                })),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let snap = ex.snapshot().node(&NodeId::new("a")).unwrap().clone();
+        assert!(matches!(
+            snap.state,
+            NodeState::Ready {
+                runnable_at: Some(_)
+            }
+        ));
+        let msg = snap.last_error.expect("retry park keeps last_error");
+        assert!(msg.message.len() <= MAX_LAST_ERROR);
+        assert!(huge.starts_with(&msg.message));
     }
 }
