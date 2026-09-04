@@ -37,7 +37,7 @@ impl Execution {
                 state: ns.state.clone(),
                 output: ns.output.clone(),
                 attempt: ns.attempt,
-                last_error: ns.last_error.clone(),
+                last_error: ns.last_error.clone().map(NodeError::snapshot_short),
                 resume_token: ns.resume_token.clone(),
                 reinvoke: false,
                 last_outcome: ns.output.clone().map(NodeOutcome::Succeeded),
@@ -334,5 +334,47 @@ mod tests {
                 runnable_at: Some(due)
             }
         );
+    }
+
+    #[test]
+    fn from_snapshot_caps_huge_last_error() {
+        use crate::domain::outcome::MAX_SNAPSHOT_ERROR;
+        let def = WorkflowDefinition::builder("wf")
+            .node("a", "e")
+            .build()
+            .unwrap();
+        let mut ex = Execution::new(def.clone());
+        let p = AcceptPolicy;
+        let now = Timestamp(0);
+        ex.apply(ApplyCmd::Start, &p, now).unwrap();
+        ex.apply(
+            ApplyCmd::StartNode {
+                node_id: "a".into(),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        ex.apply(
+            ApplyCmd::FinishNode {
+                node_id: "a".into(),
+                attempt: 1,
+                outcome: Ok(NodeOutcome::failed("boom")),
+            },
+            &p,
+            now,
+        )
+        .unwrap();
+        let mut snap = ex.snapshot();
+        snap.nodes.get_mut(&NodeId::new("a")).unwrap().last_error = Some(NodeError {
+            message: "z".repeat(MAX_SNAPSHOT_ERROR + 32),
+        });
+        let restored = Execution::from_snapshot(def, snap).unwrap();
+        let msg = restored
+            .snapshot()
+            .node(&NodeId::new("a"))
+            .and_then(|n| n.last_error.clone())
+            .expect("last_error");
+        assert!(msg.message.len() <= MAX_SNAPSHOT_ERROR);
     }
 }

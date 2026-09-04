@@ -1,9 +1,26 @@
 # Changelog
 
+## Custom node types (`sdk/custom-nodes`)
+
+Agent authors implement [`Executor`] (or `register_fn`), register on the
+engine **before** `build` / listen, list ids via [`Runtime::executor_ids`]
+/ `GET /executors` (plus builtin `wait`), and start DAGs that name those
+ids. Missing id is **400** with only the missing names; nothing runs.
+Empty register ids are not catalog entries. A second register of the same
+id replaces the first, including builtin `wait`
+(`register_wait_id_last_wins_replaces_builtin`). Graph I/O is predecessor
+`Bytes` — no typed schema, no register-over-HTTP, no YAML. Failed snapshot
+`last_error` is short (`MAX_SNAPSHOT_ERROR`); full detail is `NodeFailed`
+(terminal) or `NodeAttemptFailed` (Retry park) on the EventSink
+(`MAX_SINK_ERROR`). CI:
+`custom_executor_types_catalog_start_approve_inspect`,
+`register_empty_id_is_not_in_catalog`,
+`http_sqlite_custom_executor_types_inspect_succeeded_bytes`.
+
 ## SDK loop example (`sdk/loop`)
 
 `cargo run -p keel-rt-http --example sdk_loop` is the two-process path
-in one binary: engine `register_fn` (`research`, `write`; builtin
+in one binary: engine `impl Executor` (`research`, `write`; builtin
 `wait`), client `executors` / `start` / `inspect` / `approve` / `cancel`.
 The engine owns executors; the client never registers them. The client
 sends only `durable_bytes`. Unregistered `executor_id` is **400**

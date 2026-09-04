@@ -433,6 +433,21 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "handle_resume_after_ttl_steal_is_claimed_elsewhere",
         "complete_256_wait_nodes_then_hang_bound_cancels",
         "resume_tokens_are_not_sequential_ints",
+        "register_empty_id_is_not_in_catalog",
+        "register_same_id_twice_last_wins",
+        "register_custom_executor_type_runs",
+        "register_wait_id_last_wins_replaces_builtin",
+        "custom_executor_types_catalog_start_approve_inspect",
+        "http_sqlite_custom_executor_types_inspect_succeeded_bytes",
+        "waiting_without_kernel_token_is_failed_not_adapter_issued",
+        "custom_waiting_forged_token_complete_is_mismatch_kernel_token_unblocks",
+        "resume_running_custom_without_adapter_is_unregistered_then_adapter_resumes",
+        "from_durable_bytes_empty_executor_id_is_rejected",
+        "fat_bytes_custom_executor_join_is_refcount_not_copy",
+        "finish_node_failed_huge_last_error_is_capped_on_snapshot",
+        "custom_failed_huge_last_error_is_capped_on_live_and_store_snapshot",
+        "custom_failed_full_error_emitted_to_sink_snapshot_stays_short",
+        "retry_attempt_full_error_emitted_to_sink_snapshot_stays_short",
     ] {
         assert!(catalog.contains(name), "RESUME_CATALOG missing {name}");
     }
@@ -477,6 +492,7 @@ const PUBLIC_EVENT_VARIANTS: &[&str] = &[
     "NodeStarted",
     "NodeSucceeded",
     "NodeFailed",
+    "NodeAttemptFailed",
     "NodeTimedOut",
     "NodeCancelled",
     "NodeWaiting",
@@ -650,6 +666,37 @@ fn resume_with_takes_execution_id_and_recover_not_snapshot() {
         "resume_with must not take or return ExecutionSnapshot"
     );
     assert!(header.contains("ResumeError"));
+}
+
+/// Register is builder-only. The in-flight scheduler copies `Arc`s at
+/// `Scheduler::new`; there is no live swap of adapters after `build`.
+#[test]
+fn runtime_has_no_register_after_build() {
+    let src = fs::read_to_string(src_root().join("runtime/runtime.rs")).unwrap();
+    let runtime = rust_fn_body(&src, "impl Runtime {");
+    assert!(
+        !runtime.contains("pub fn register(") && !runtime.contains("pub fn register_fn"),
+        "Runtime must not grow register after build: adapters are frozen at build"
+    );
+    let builder = rust_fn_body(&src, "impl RuntimeBuilder {");
+    assert!(
+        builder.contains("pub fn register(") && builder.contains("pub fn register_fn"),
+        "register stays on RuntimeBuilder"
+    );
+    let exec = fs::read_to_string(src_root().join("runtime/executor.rs")).unwrap();
+    assert!(
+        exec.contains("inner: HashMap<ExecutorId, Arc<dyn Executor>>"),
+        "ExecutorRegistry is a HashMap of Arcs, not a shared mutex map"
+    );
+    assert!(
+        !exec.contains("inner: Arc<"),
+        "registry map itself must not be behind a shared pointer"
+    );
+    let lib = fs::read_to_string(src_root().join("lib.rs")).unwrap();
+    assert!(
+        !lib.contains("ExecutorRegistry"),
+        "ExecutorRegistry is crate-private; public API cannot mutate it after build"
+    );
 }
 
 /// Eligibility lives in apply. Runtime maps Illegal only — not apply().is_err().

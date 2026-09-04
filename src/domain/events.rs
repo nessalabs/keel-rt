@@ -64,6 +64,20 @@ pub enum Event {
         attempt: u32,
         at: Timestamp,
         schema_version: u32,
+        /// Adapter message for EventSink / persist_with_events (sink-capped).
+        /// Snapshot `last_error` is the short form ([`crate::MAX_SNAPSHOT_ERROR`]).
+        error: NodeError,
+    },
+    /// This attempt failed; policy Retry parked the node `Ready { T }`.
+    /// Not [`Self::NodeFailed`] (the node is not Failed).
+    NodeAttemptFailed {
+        execution_id: ExecutionId,
+        workflow_id: WorkflowId,
+        node_id: NodeId,
+        attempt: u32,
+        at: Timestamp,
+        schema_version: u32,
+        /// Full (sink-capped) attempt error. Snapshot `last_error` stays short.
         error: NodeError,
     },
     NodeTimedOut {
@@ -104,6 +118,7 @@ impl Event {
             | Self::NodeStarted { execution_id, .. }
             | Self::NodeSucceeded { execution_id, .. }
             | Self::NodeFailed { execution_id, .. }
+            | Self::NodeAttemptFailed { execution_id, .. }
             | Self::NodeTimedOut { execution_id, .. }
             | Self::NodeCancelled { execution_id, .. }
             | Self::NodeWaiting { execution_id, .. } => execution_id,
@@ -120,6 +135,7 @@ impl Event {
             | Self::NodeStarted { workflow_id, .. }
             | Self::NodeSucceeded { workflow_id, .. }
             | Self::NodeFailed { workflow_id, .. }
+            | Self::NodeAttemptFailed { workflow_id, .. }
             | Self::NodeTimedOut { workflow_id, .. }
             | Self::NodeCancelled { workflow_id, .. }
             | Self::NodeWaiting { workflow_id, .. } => workflow_id,
@@ -136,6 +152,7 @@ impl Event {
             | Self::NodeStarted { at, .. }
             | Self::NodeSucceeded { at, .. }
             | Self::NodeFailed { at, .. }
+            | Self::NodeAttemptFailed { at, .. }
             | Self::NodeTimedOut { at, .. }
             | Self::NodeCancelled { at, .. }
             | Self::NodeWaiting { at, .. } => *at,
@@ -147,6 +164,7 @@ impl Event {
             Self::NodeStarted { node_id, .. }
             | Self::NodeSucceeded { node_id, .. }
             | Self::NodeFailed { node_id, .. }
+            | Self::NodeAttemptFailed { node_id, .. }
             | Self::NodeTimedOut { node_id, .. }
             | Self::NodeCancelled { node_id, .. }
             | Self::NodeWaiting { node_id, .. } => Some(node_id),
@@ -163,6 +181,7 @@ impl Event {
             Self::NodeStarted { attempt, .. }
             | Self::NodeSucceeded { attempt, .. }
             | Self::NodeFailed { attempt, .. }
+            | Self::NodeAttemptFailed { attempt, .. }
             | Self::NodeTimedOut { attempt, .. }
             | Self::NodeCancelled { attempt, .. }
             | Self::NodeWaiting { attempt, .. } => Some(*attempt),
@@ -184,6 +203,7 @@ impl Event {
             | Self::NodeStarted { schema_version, .. }
             | Self::NodeSucceeded { schema_version, .. }
             | Self::NodeFailed { schema_version, .. }
+            | Self::NodeAttemptFailed { schema_version, .. }
             | Self::NodeTimedOut { schema_version, .. }
             | Self::NodeCancelled { schema_version, .. }
             | Self::NodeWaiting { schema_version, .. } => *schema_version,
@@ -264,6 +284,15 @@ impl Event {
                 schema_version: SCHEMA_VERSION,
                 error,
             },
+            NodeKind::AttemptFailed(error) => Self::NodeAttemptFailed {
+                execution_id,
+                workflow_id,
+                node_id,
+                attempt,
+                at,
+                schema_version: SCHEMA_VERSION,
+                error,
+            },
             NodeKind::TimedOut => Self::NodeTimedOut {
                 execution_id,
                 workflow_id,
@@ -305,6 +334,7 @@ pub(crate) enum NodeKind {
     Started,
     Succeeded,
     Failed(NodeError),
+    AttemptFailed(NodeError),
     TimedOut,
     Cancelled,
     Waiting(ResumeToken),
@@ -332,9 +362,10 @@ impl fmt::Display for Event {
                 node_id, attempt, ..
             } => write!(f, "node {node_id} started attempt={attempt}"),
             Self::NodeSucceeded { node_id, .. } => write!(f, "node {node_id} succeeded"),
-            Self::NodeFailed {
-                node_id, error, ..
-            } => write!(f, "node {node_id} failed: {error}"),
+            Self::NodeFailed { node_id, error, .. } => write!(f, "node {node_id} failed: {error}"),
+            Self::NodeAttemptFailed { node_id, error, .. } => {
+                write!(f, "node {node_id} attempt failed: {error}")
+            }
             Self::NodeCancelled { node_id, .. } => write!(f, "node {node_id} cancelled"),
             Self::NodeWaiting { node_id, .. } => write!(f, "node {node_id} waiting"),
             Self::NodeTimedOut { node_id, .. } => write!(f, "node {node_id} timed out"),

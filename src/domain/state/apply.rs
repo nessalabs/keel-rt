@@ -209,6 +209,10 @@ impl Execution {
         now: Timestamp,
         effect: &mut ApplyEffect,
     ) -> Result<(), ApplyError> {
+        let outcome = match outcome {
+            NodeOutcome::Failed(err) => NodeOutcome::Failed(err.sink_capped()),
+            other => other,
+        };
         let attempt = self.nodes[slot.0].attempt;
 
         let decision = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -248,22 +252,40 @@ impl Execution {
                 };
                 {
                     let n = &mut self.nodes[slot.0];
-                    n.last_error = match &outcome {
-                        NodeOutcome::Failed(e) => Some(e.clone()),
-                        _ => Some(NodeError::new("timed out")),
-                    };
-                    n.last_outcome = Some(outcome);
+                    match &outcome {
+                        NodeOutcome::Failed(e) => {
+                            let short = e.clone().snapshot_short();
+                            n.last_error = Some(short.clone());
+                            n.last_outcome = Some(NodeOutcome::Failed(short));
+                        }
+                        other => {
+                            n.last_error = Some(NodeError::new("timed out"));
+                            n.last_outcome = Some(other.clone());
+                        }
+                    }
                     // Prior attempt token is dead. Waiting is the only state
                     // that resume Complete/Reinvoke consults. Dropping it here
                     // keeps Ready { T } node JSON off the stale token blob.
                     n.resume_token = None;
                 }
+                let sink_err = match &outcome {
+                    NodeOutcome::Failed(e) => e.clone(),
+                    _ => NodeError::new("timed out"),
+                };
                 self.set_state(slot, NodeState::Ready { runnable_at: at });
                 if let Some(at) = at {
                     self.note_deadline(slot, at);
                 } else {
                     effect.newly_runnable.push(slot);
                 }
+                // Not NodeFailed: the node is Ready { T }, not Failed.
+                self.emit_node(
+                    effect,
+                    now,
+                    id.clone(),
+                    attempt,
+                    NodeKind::AttemptFailed(sink_err),
+                );
                 return Ok(());
             }
             PolicyDecision::Reject => {
@@ -292,16 +314,27 @@ impl Execution {
                 self.emit_node(effect, now, id.clone(), attempt, NodeKind::Succeeded);
                 self.ready_successors(slot, effect);
             }
-            NodeOutcome::Waiting { token } => {
-                let token = {
+            NodeOutcome::Waiting {
+                token: adapter_token,
+            } => {
+                // Kernel issues the wait token at StartNode. An adapter-issued
+                // token is never stored (steal / double-park). If the kernel
+                // token is missing, fail closed — do not park on the adapter's.
+                let kernel = self.nodes[slot.0].resume_token.take();
+                let Some(token) = kernel else {
+                    let _ = adapter_token;
+                    self.fail_node(slot, id, NodeError::new("wait token missing"), now, effect);
+                    self.apply_on_failure(slot, now, effect);
+                    return Ok(());
+                };
+                let _ = adapter_token;
+                {
                     let n = &mut self.nodes[slot.0];
-                    let token = n.resume_token.take().unwrap_or(token);
                     n.resume_token = Some(token.clone());
                     n.last_outcome = Some(NodeOutcome::Waiting {
                         token: token.clone(),
                     });
-                    token
-                };
+                }
                 self.set_state(
                     slot,
                     NodeState::Waiting {
@@ -337,15 +370,17 @@ impl Execution {
         now: Timestamp,
         effect: &mut ApplyEffect,
     ) {
+        let sink = err.sink_capped();
+        let snap = sink.clone().snapshot_short();
         let attempt = self.nodes[slot.0].attempt;
         {
             let n = &mut self.nodes[slot.0];
-            n.last_error = Some(err.clone());
-            n.last_outcome = Some(NodeOutcome::Failed(err.clone()));
+            n.last_error = Some(snap.clone());
+            n.last_outcome = Some(NodeOutcome::Failed(snap));
         }
         self.set_state(slot, NodeState::Failed);
         self.clear_deadline_if(slot);
-        self.emit_node(effect, now, id.clone(), attempt, NodeKind::Failed(err));
+        self.emit_node(effect, now, id.clone(), attempt, NodeKind::Failed(sink));
     }
 
     fn apply_on_failure(&mut self, slot: NodeSlot, now: Timestamp, effect: &mut ApplyEffect) {

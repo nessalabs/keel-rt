@@ -4,12 +4,16 @@
 use bytes::Bytes;
 use keel_rt::testing::FakeClock;
 use keel_rt::{
-    ExecutionId, ExecutionState, NodeId, NodeOutcome, Resume, Runtime, StateStore,
-    WorkflowDefinition,
+    ExecutionContext, ExecutionId, ExecutionState, Executor, ExecutorId, NodeId, NodeOutcome,
+    Resume, Runtime, StateStore, WorkflowDefinition,
 };
-use keel_rt_http::{serve_ephemeral, CompleteSecret, KeelClient, KeelClientError};
+use keel_rt_http::{
+    serve_ephemeral, CompleteSecret, InspectNodeState, KeelClient, KeelClientError,
+};
 use keel_rt_sqlite::SqliteStore;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -169,6 +173,148 @@ async fn http_sqlite_start_cancel_second_runtime_is_claimed_elsewhere() {
         ExecutionState::Waiting,
         "cancel of a must not cancel b"
     );
+    sa.abort();
+    sb.abort();
+    let _ = std::fs::remove_file(&path);
+}
+
+struct Research;
+
+impl Executor for Research {
+    fn id(&self) -> ExecutorId {
+        ExecutorId::new("research")
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _ctx: ExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+        Box::pin(async { NodeOutcome::Succeeded(Bytes::from_static(b"notes")) })
+    }
+}
+
+struct Write;
+
+impl Executor for Write {
+    fn id(&self) -> ExecutorId {
+        ExecutorId::new("write")
+    }
+
+    fn execute<'a>(
+        &'a self,
+        ctx: ExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = NodeOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            let out = ctx
+                .inputs
+                .get(&NodeId::new("hold"))
+                .cloned()
+                .unwrap_or_default();
+            NodeOutcome::Succeeded(out)
+        })
+    }
+}
+
+fn custom_dag() -> WorkflowDefinition {
+    WorkflowDefinition::builder("research-hold-write")
+        .node("research", "research")
+        .node("hold", "wait")
+        .node("write", "write")
+        .edge("research", "hold")
+        .edge("hold", "write")
+        .build()
+        .unwrap()
+}
+
+/// Custom adapters persist Bytes on sqlite. Inspect on a Runtime that did
+/// not register `write` still reads Succeeded. Start without `write` is
+/// named 400. New id is not a steal.
+#[tokio::test(flavor = "current_thread")]
+async fn http_sqlite_custom_executor_types_inspect_succeeded_bytes() {
+    let path = tmp();
+    let store = SqliteStore::open(&path).unwrap();
+    let clock = Arc::new(FakeClock::new());
+    let a = Arc::new(
+        Runtime::builder()
+            .clock(clock.clone())
+            .store(store.clone())
+            .register(Research)
+            .register(Write)
+            .build(),
+    );
+    let b = Arc::new(
+        Runtime::builder()
+            .clock(clock)
+            .store(store.clone())
+            .register(Research)
+            .build(),
+    );
+    let (addr_a, sa) = serve_ephemeral(a, secret()).await.unwrap();
+    let (addr_b, sb) = serve_ephemeral(b, secret()).await.unwrap();
+    let ca = KeelClient::new(format!("http://{addr_a}"), secret()).unwrap();
+    let cb = KeelClient::new(format!("http://{addr_b}"), secret()).unwrap();
+    let err = cb.start(custom_dag()).await.unwrap_err();
+    match &err {
+        KeelClientError::Unregistered { executors } => {
+            assert_eq!(
+                executors.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+                vec!["write"],
+                "{executors:?}"
+            );
+        }
+        other => panic!("B without write must 400, got {other:?}"),
+    }
+    let id = ca.start(custom_dag()).await.expect("start a");
+    let token = tokio::time::timeout(BOUND, async {
+        loop {
+            if let Ok(v) = ca.inspect(&id).await {
+                if let Some(t) = v.resume_token(&NodeId::new("hold")) {
+                    return t.clone();
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("token");
+    ca.approve(token, Bytes::from_static(b"human-ok"))
+        .await
+        .expect("approve");
+    tokio::time::timeout(BOUND, async {
+        loop {
+            let v = ca.inspect(&id).await.expect("a");
+            if v.state == ExecutionState::Succeeded {
+                assert_eq!(
+                    v.node(&NodeId::new("write")).map(|n| &n.state),
+                    Some(&InspectNodeState::Succeeded {
+                        output: Bytes::from_static(b"human-ok"),
+                    })
+                );
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a succeeded");
+    let from_b = cb.inspect(&id).await.expect("b inspect is store-read");
+    assert_eq!(from_b.state, ExecutionState::Succeeded);
+    assert_eq!(
+        from_b.node(&NodeId::new("write")).map(|n| &n.state),
+        Some(&InspectNodeState::Succeeded {
+            output: Bytes::from_static(b"human-ok"),
+        })
+    );
+    let id_b = cb
+        .start(
+            WorkflowDefinition::builder("wf")
+                .node("hold", "wait")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .expect("new wait on B");
+    assert_ne!(id, id_b, "new id is not a steal");
     sa.abort();
     sb.abort();
     let _ = std::fs::remove_file(&path);

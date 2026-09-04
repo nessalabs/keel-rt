@@ -123,6 +123,8 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
         "fn retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many",
         "fn complete_after_sqlite_kill_new_runtime_unblocks_wait",
         "fn two_runtimes_same_file_both_may_complete",
+        "fn resume_running_custom_without_adapter_is_unregistered",
+        "fn sqlite_persist_failed_huge_last_error_is_capped",
     ] {
         assert!(resume.contains(name), "resume.rs missing {name}");
     }
@@ -131,6 +133,10 @@ fn adapter_has_no_timer_table_and_persists_snapshot_deadline() {
     assert!(
         http.contains("fn http_sqlite_start_inspect_complete_two_runtimes_new_id_is_not_steal"),
         "http.rs must lock HTTP start+inspect+complete on sqlite (two Runtimes)"
+    );
+    assert!(
+        http.contains("fn http_sqlite_custom_executor_types_inspect_succeeded_bytes"),
+        "http.rs must lock custom Executor types on sqlite (inspect Bytes, subset 400)"
     );
     assert!(
         http.contains("fn http_sqlite_start_cancel_second_runtime_is_claimed_elsewhere"),

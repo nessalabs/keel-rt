@@ -16,9 +16,11 @@ Default bind is **`127.0.0.1`** (`DEFAULT_BIND` / `serve` / `serve_ephemeral`).
 (`MAX_BODY`) is **413** and does not call start or complete. Inspect JSON
 larger than **1 MiB** is the same **413** — compact base64 is not a cap.
 
-The **engine process** registers executors (`register_fn`) before it
-serves. [`KeelClient::start`] sends only the definition
-(`WorkflowDefinition::durable_bytes`). It cannot register a function.
+The **engine process** registers executors before it serves — implement
+[`keel_rt::Executor`] and [`RuntimeBuilder::register`], or
+[`RuntimeBuilder::register_fn`]. [`KeelClient::start`] sends only the
+definition (`WorkflowDefinition::durable_bytes`). It cannot register a
+function. There is no `POST /register` and no YAML.
 A node whose `executor_id` is not on that Runtime is **400**
 `{"error":"unregistered","executors":["…"]}`
 (`client_start_unregistered_is_400_nothing_runs`).

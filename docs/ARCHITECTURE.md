@@ -120,8 +120,22 @@ Succeeded owns output bytes as one base64 field — the same compact
 wire as `POST /complete` Succeeded and `POST /approve` `output`
 (kernel Resume `[u8]` serde stays in-process). Running / Waiting /
 Failed do not. Inspect JSON over `MAX_BODY` is **413**.
+Custom node types: implement [`Executor`],
+[`RuntimeBuilder::register`] before listen; `GET /executors` lists those
+ids plus builtin `wait`. No `POST /register`, no YAML, no typed I/O on
+`StartNode`.
 `POST /complete` and `POST /cancel/:id` ClaimedElsewhere is
 **423 Locked** `{"error":"claimed_elsewhere"}` (not 400, not 409).
+
+```mermaid
+flowchart LR
+  author[author Executor type]
+  builder["RuntimeBuilder::register"]
+  catalog["GET /executors"]
+  start["POST /start"]
+  author --> builder --> catalog
+  catalog -->|"missing id → 400 names only that id"| start
+```
 
 ```mermaid
 flowchart LR
@@ -347,7 +361,7 @@ classDiagram
   class Event {
     <<enum>>
     ExecutionStarted Succeeded Failed Completed Cancelled
-    NodeStarted Succeeded Failed TimedOut Cancelled Waiting
+    NodeStarted Succeeded Failed AttemptFailed TimedOut Cancelled Waiting
     +node_id() Option~NodeId~
     +attempt() Option~u32~
   }
