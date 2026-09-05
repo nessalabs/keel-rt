@@ -78,6 +78,7 @@ pub enum KeelClientError {
 /// with a secret. Duplicate complete is Ok (server 200 noop).
 /// Cancel of an already-terminal run is Ok (kernel noop). Does not revive
 /// Cancelled. Does not follow redirects.
+/// Encoded request bodies over [`crate::MAX_BODY`] are rejected before sending.
 #[derive(Clone)]
 pub struct KeelClient {
     http: Client<HttpConnector, Full<Bytes>>,
@@ -137,6 +138,11 @@ impl KeelClient {
         builder: hyper::http::request::Builder,
         body: Bytes,
     ) -> Result<hyper::Response<hyper::body::Incoming>, KeelClientError> {
+        // The server can close while rejecting an unread oversized upload,
+        // racing its 413 response with a transport error. Check wire bytes here.
+        if body.len() > crate::MAX_BODY {
+            return Err(KeelClientError::PayloadTooLarge);
+        }
         let req = self
             .with_secret(builder)
             .body(Full::new(body))
@@ -367,6 +373,34 @@ fn path_url(base: &str, path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn encoded_body_limit_does_not_depend_on_an_http_response() {
+        // No server can reject the body here. Oversize must be rejected locally;
+        // bodies at or below the protocol limit must still attempt transport.
+        let client = KeelClient::without_secret("http://127.0.0.1:0").unwrap();
+        for size in [crate::MAX_BODY + 1, crate::MAX_BODY, crate::MAX_BODY - 1] {
+            let result = client
+                .send(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("http://127.0.0.1:0/complete"),
+                    Bytes::from(vec![b' '; size]),
+                )
+                .await;
+            if size > crate::MAX_BODY {
+                assert!(
+                    matches!(result, Err(KeelClientError::PayloadTooLarge)),
+                    "{result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(KeelClientError::Transport(_))),
+                    "{result:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn decision_maps_onto_resume() {
