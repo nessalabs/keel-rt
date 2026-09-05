@@ -10,11 +10,24 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt -p keel-rt-wasm -p keel-rt-wasm-consumer-test --check
+      - run: cargo clippy --locked -p keel-rt-wasm -p keel-rt-wasm-consumer-test --all-targets -- -D warnings
+      - run: cargo test --locked -p keel-rt-wasm -p keel-rt-wasm-consumer-test -- --test-threads=1
+      - run: cargo run --locked -p keel-rt-wasm --example echo
+
   clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy
       - run: cargo clippy --workspace --lib -- -D warnings
@@ -23,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: Default suite (no 100k, no resume_stress)
         run: |
           cargo test -p keel-rt --lib \
@@ -41,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: Adversarial + resume hunt
         run: |
           cargo test -p keel-rt --test adversarial -- --test-threads=1
@@ -66,7 +79,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@v2
@@ -94,7 +107,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: Sqlite resume stress
         run: cargo test -p keel-rt-sqlite --test resume_stress -- --test-threads=1 --nocapture
 
@@ -103,7 +116,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: 100k scale (no coverage instrumentation)
         # Release: debug wide_100k is ~57s locally / can exceed the 90s
         # hang-bound on GHA; release is ~4s and keeps the same assertions.
@@ -114,6 +127,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: Standing sqlite chaos / crash-inject
         run: cargo test -p keel-rt-sqlite --test chaos --test crash_inject -- --test-threads=1 --nocapture

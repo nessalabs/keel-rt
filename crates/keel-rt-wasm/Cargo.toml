@@ -1,0 +1,19 @@
+[package]
+name = "keel-rt-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "User-defined WebAssembly Component executors for keel-rt"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+keel-rt = { path = "../.." }
+tokio = { version = "1.43", features = ["rt", "macros", "time"] }
+wasmtime = { version = "48.0.0", default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "runtime", "std", "wat"] }
+
+[dev-dependencies]
+async-trait = "0.1"
+bytes = "1.9"
+tokio-util = "0.7"

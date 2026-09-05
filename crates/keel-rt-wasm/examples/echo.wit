@@ -1,0 +1,6 @@
+package example:echo;
+
+// This contract belongs to the application, not to Keel or its Wasm adapter.
+world echo {
+    export run: func(input: list<u8>) -> list<u8>;
+}

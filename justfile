@@ -7,6 +7,11 @@ test:
 http:
     cargo test -p keel-rt-http -- --test-threads=1
 
+# Optional Wasmtime adapter and consumer regression fixture.
+wasm:
+    cargo test --locked -p keel-rt-wasm -p keel-rt-wasm-consumer-test -- --test-threads=1
+    cargo run --locked -p keel-rt-wasm --example echo
+
 clippy:
     cargo clippy --workspace --lib -- -D warnings
 

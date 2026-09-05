@@ -2,6 +2,7 @@
 name = "keel-rt-http"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "HTTP adapter: POST /start + GET /inspect + POST /complete and KeelClient (not the kernel)"
 license = "MIT"
 publish = false

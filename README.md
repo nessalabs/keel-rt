@@ -4,6 +4,9 @@
 (Tokio-style `-rt` = the runtime). In Rust: `use keel_rt::...`.
 Kernel lives on Origin: `nessalabs/keel-rt`. GitHub is not the kernel.
 
+The workspace requires Rust 1.95+. `rust-toolchain.toml` pins development to
+1.95.0; all crates share the root `Cargo.lock` and CI toolchain.
+
 Phase 2: at-least-once **snapshot resume**. If the process dies, call
 `Runtime::resume` with the `ExecutionId` (Failed stay Failed).
 `Runtime::resume_with(id, Recover::RetryFailed)` re-invokes Failed /
@@ -106,6 +109,12 @@ cancels. Drop Runtime releases the lease.**
 `keel-rt-schedule` is a sibling ticker: a 5-field cron + IANA timezone
 calls `Runtime::start` on each fire (new `ExecutionId`). It is not
 kernel `Ready { runnable_at }`. Drop the runner to stop further starts.
+
+[`keel-rt-wasm`](crates/keel-rt-wasm/README.md) is an optional sibling executor
+for user-defined WebAssembly Components. Applications own their WIT interface,
+host imports, and outcome mapping; the adapter handles fresh instances, resource
+limits, and cancellation. It is part of the workspace (`just wasm` runs its
+tests and example); the kernel does not depend on Wasmtime.
 
 `start` returns a handle when you need `wait_stable` + token `resume` or
 inspect. `wait()` is terminal only; Waiting is not done.
