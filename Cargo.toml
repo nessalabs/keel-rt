@@ -3,10 +3,14 @@ members = [".", "crates/keel-rt-sqlite", "crates/keel-rt-http", "crates/keel-rt-
 exclude = ["benches/jemalloc_compare"]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.95"
+
 [package]
 name = "keel-rt"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "small DAG workflow execution kernel"
 license = "MIT"
 readme = "README.md"
@@ -26,8 +30,6 @@ thiserror = "2.0.9"
 tokio = { version = "1.43", features = ["full"] }
 tokio-util = { version = "0.7.13", features = ["rt"] }
 tracing = "0.1.41"
-# Rust 1.83 cannot parse edition2024 manifests pulled by latest indexmap.
-indexmap = "=2.7.1"
 getrandom = "0.2"
 
 [dev-dependencies]

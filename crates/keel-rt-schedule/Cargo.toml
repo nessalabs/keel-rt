@@ -2,6 +2,7 @@
 name = "keel-rt-schedule"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "in-process cron ticker: each tick Runtime::start (not the kernel)"
 license = "MIT"
 publish = false

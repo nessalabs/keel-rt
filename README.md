@@ -4,6 +4,9 @@
 (Tokio-style `-rt` = the runtime). In Rust: `use keel_rt::...`.
 Kernel lives on Origin: `nessalabs/keel-rt`. GitHub is not the kernel.
 
+The workspace requires Rust 1.95+. `rust-toolchain.toml` pins development to
+1.95.0; all crates share the root `Cargo.lock` and CI toolchain.
+
 Phase 2: at-least-once **snapshot resume**. If the process dies, call
 `Runtime::resume` with the `ExecutionId` (Failed stay Failed).
 `Runtime::resume_with(id, Recover::RetryFailed)` re-invokes Failed /
