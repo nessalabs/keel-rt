@@ -10,6 +10,19 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt -p keel-rt-wasm -p keel-rt-wasm-consumer-test --check
+      - run: cargo clippy --locked -p keel-rt-wasm -p keel-rt-wasm-consumer-test --all-targets -- -D warnings
+      - run: cargo test --locked -p keel-rt-wasm -p keel-rt-wasm-consumer-test -- --test-threads=1
+      - run: cargo run --locked -p keel-rt-wasm --example echo
+
   clippy:
     runs-on: ubuntu-latest
     steps:

@@ -110,6 +110,12 @@ cancels. Drop Runtime releases the lease.**
 calls `Runtime::start` on each fire (new `ExecutionId`). It is not
 kernel `Ready { runnable_at }`. Drop the runner to stop further starts.
 
+[`keel-rt-wasm`](crates/keel-rt-wasm/README.md) is an optional sibling executor
+for user-defined WebAssembly Components. Applications own their WIT interface,
+host imports, and outcome mapping; the adapter handles fresh instances, resource
+limits, and cancellation. It is part of the workspace (`just wasm` runs its
+tests and example); the kernel does not depend on Wasmtime.
+
 `start` returns a handle when you need `wait_stable` + token `resume` or
 inspect. `wait()` is terminal only; Waiting is not done.
 Unknown executor ids fail at `start` (named in the error) — nothing runs.

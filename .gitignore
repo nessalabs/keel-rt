@@ -1,4 +1,5 @@
 /target
+/crates/keel-rt-wasm/target
 **/*.rs.bk
 /coverage/lcov.info
 /coverage/html/
