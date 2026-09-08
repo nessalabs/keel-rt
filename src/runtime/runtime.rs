@@ -10,11 +10,15 @@ use crate::runtime::handle::{ActiveGuard, ActiveSet, ExecutionHandle, LeaseGate}
 use crate::runtime::inject::{self, Event, EventRx, EventTx};
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::sink::{EventSink, NoopSink};
-use crate::runtime::store::{ClaimError, MemoryStore, OwnerId, StateStore, StoreError};
+use crate::runtime::spawn::CatchUnwind;
+use crate::runtime::store::{
+    ClaimError, InitializeError, MemoryStore, OwnerId, StateStore, StoreError,
+};
 use crate::runtime::time::{Clock, SystemClock};
 use crate::runtime::wait::Wait;
 use std::collections::HashSet;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +32,15 @@ use tokio_util::sync::CancellationToken;
 pub enum StartError {
     #[error("unregistered executor id(s): {0}")]
     UnregisteredExecutors(UnregisteredExecutors),
+}
+
+/// [`Runtime::start_durable`] failed before launching any executor.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum DurableStartError {
+    #[error("unregistered executor id(s): {0}")]
+    UnregisteredExecutors(UnregisteredExecutors),
+    #[error(transparent)]
+    Initialization(#[from] InitializeError),
 }
 
 /// `Runtime::resume` rejected the snapshot before any node ran.
@@ -352,6 +365,45 @@ impl Runtime {
         Ok(self.start(definition)?.wait().await)
     }
 
+    /// Commit a recoverable initial snapshot and definition before launching
+    /// any executor or returning a handle. Requires an adapter that explicitly
+    /// implements [`StateStore::initialize`]; memory/noop stores are unsupported.
+    /// Existing [`Self::start`] and [`Self::run`] semantics are unchanged.
+    ///
+    /// Cancellation or a lost reply after commit may leave an execution whose
+    /// lease expires normally. Retrying this call creates a new ID, not an
+    /// idempotent submission. Later execution remains at-least-once, with the
+    /// same persistence-error and handle Drop-cancels behavior as `start`.
+    pub async fn start_durable(
+        &self,
+        definition: WorkflowDefinition,
+    ) -> Result<ExecutionHandle, DurableStartError> {
+        if let Some(missing) = self.missing_executors(&definition) {
+            return Err(DurableStartError::UnregisteredExecutors(missing));
+        }
+        let mut exec = Execution::new(definition);
+        // Reserve locally before the store can expose this ID to a concurrent
+        // resume. ActiveGuard removes the reservation on error or cancellation.
+        let (tx, rx) = inject::channel();
+        let active = self
+            .claim_active(exec.id(), tx.clone())
+            .expect("ExecutionId::new is unique on this Runtime");
+        let epoch = CatchUnwind(AssertUnwindSafe(self.store.initialize(
+            &exec,
+            &self.owner,
+            self.clock.now(),
+        )))
+        .await
+        .unwrap_or_else(|_| {
+            Err(InitializeError::Store(StoreError::Message(
+                "durable initialization panicked".into(),
+            )))
+        })?;
+        exec.set_fence_epoch(epoch.0);
+        // Start claims ownership and reloads the durable snapshot at dispatch.
+        Ok(self.spawn_execution(exec, active, tx, rx, Event::Start))
+    }
+
     /// Rebuild from the store snapshot. At-least-once: a node that was Running
     /// is restored Ready and re-invoked (attempt + 1 at dispatch). Succeeded
     /// nodes never re-run. Failed stay Failed. `start` still always creates
@@ -425,6 +477,18 @@ impl Runtime {
             // Persist recovered snapshot before dispatch. CAS still applies.
             self.store.persist(&exec).await?;
         }
+        Ok(self.spawn_execution(exec, active, tx, rx, Event::Restore))
+    }
+
+    fn spawn_execution(
+        &self,
+        exec: Execution,
+        active: ActiveGuard,
+        tx: EventTx,
+        rx: EventRx,
+        first_event: Event,
+    ) -> ExecutionHandle {
+        let execution_id = exec.id().clone();
         let (state_tx, state_rx) = watch::channel(exec.state());
         let cancel = CancellationToken::new();
         let scheduler = Scheduler::from_execution(
@@ -440,7 +504,7 @@ impl Runtime {
             state_tx,
             self.owner.clone(),
         );
-        let _ = tx.send(Event::Restore);
+        let _ = tx.send(first_event);
         tokio::spawn(drive(
             scheduler,
             rx,
@@ -450,8 +514,8 @@ impl Runtime {
             self.active.clone(),
             execution_id.clone(),
         ));
-        Ok(ExecutionHandle {
-            execution_id: execution_id.clone(),
+        ExecutionHandle {
+            execution_id,
             tx,
             cancel,
             state: state_rx,
@@ -459,7 +523,7 @@ impl Runtime {
             consumed: false,
             _active: active,
             lease: self.lease.clone(),
-        })
+        }
     }
 
     fn claim_active(&self, id: &ExecutionId, tx: EventTx) -> Option<ActiveGuard> {

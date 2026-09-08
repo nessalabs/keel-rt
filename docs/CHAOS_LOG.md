@@ -164,3 +164,23 @@ Those tests still exist (`just chaos-sqlite`). They did not find this defect.
    refute from the code.
 2. Do not weaken fail-fast or AND-join.
 3. Kernel `src/` changes: coverage 100%. No HTTP/Agent. No persist queue.
+
+## Durable startup takeover hunt
+
+The isolated adversarial review reproduced five failing tests representing two
+root causes: dispatching stale Created state after recovery, and SQLite reusing
+lease epochs after release. The permanent pack is
+`crates/keel-rt-sqlite/tests/adversarial_durable_review.rs`, included in
+`just chaos-sqlite` and CI.
+
+| Attack | Test |
+|---|---|
+| Pause acknowledged starter; successor finishes; restart original | `acknowledged_sqlite_start_must_not_rerun_recovered_succeeded_nodes` |
+| Successor persists Succeeded predecessor and Waiting child; lease expires | `acknowledged_start_must_preserve_succeeded_predecessor_after_waiting_takeover` |
+| Delay initialization reply while successor completes or cancels | `delayed_durable_start_must_not_rerun_nodes_completed_by_recovery`, `delayed_durable_start_must_not_resurrect_cancelled_execution` |
+| Reuse expired token after successor release | `released_successor_must_not_make_old_lease_epoch_valid_again` |
+| Released token writes, heartbeats, or releases a new owner | `released_leases_reject_writes_and_cannot_release_successors` |
+| Abort 20 committed startup futures and repeatedly recover | `attack_abort_after_commit_repeatedly_recovers_without_losing_execution` |
+| 32 concurrent workflows with 64 nodes each | `attack_durable_burst_fanout_and_terminal_recovery` |
+| Live foreign owner prevents delayed dispatch | `attack_live_other_owner_blocks_delayed_start` |
+| Inject 20 SQLite node-insert aborts, then retry | `attack_initialization_write_failure_is_atomic_and_retryable` |

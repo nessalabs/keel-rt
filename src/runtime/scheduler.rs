@@ -177,10 +177,31 @@ impl Scheduler {
     pub(crate) async fn handle_event(&mut self, event: Event) -> bool {
         match event {
             Event::Start => {
+                // Durable starts already have a snapshot. A paused starter may
+                // have lost its lease while another runtime advanced that snapshot.
+                let durable = self.epoch.is_some();
                 if !self.claim_lease().await {
                     return true;
                 }
-                self.apply_cmd(ApplyCmd::Start);
+                if durable {
+                    let Ok(Some(snapshot)) = self.store.get(self.exec.id()).await else {
+                        return true;
+                    };
+                    self.last_persisted = snapshot.revision;
+                    let Ok(mut restored) =
+                        Execution::from_snapshot(self.exec.definition().clone(), snapshot)
+                    else {
+                        return true;
+                    };
+                    restored.set_fence_epoch(self.epoch.unwrap().0);
+                    self.exec = restored;
+                }
+                if self.exec.state() == ExecutionState::Created {
+                    self.apply_cmd(ApplyCmd::Start);
+                } else {
+                    self.enqueue_dispatchable();
+                    let _ = self.state_tx.send(self.exec.state());
+                }
                 self.dispatch();
                 self.persist_then_emit().await;
             }

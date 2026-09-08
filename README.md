@@ -122,6 +122,15 @@ Unknown executor ids fail at `start` (named in the error) — nothing runs.
 `start` always creates a **new** execution. After death, `rt.resume(&id)`
 loads the last durable snapshot (not event replay).
 
+`rt.start_durable(def).await?` commits a recoverable `Created` snapshot and workflow
+definition before either dispatching executors or returning a handle.
+It requires an explicit durable initializer (`SqliteStore` supports it;
+`MemoryStore` and `NoopStore` return `InitializeError::Unsupported`). The existing
+`start` / `run` APIs keep their behavior. Cancellation or a lost acknowledgement
+after commit can leave a resumable execution; retrying startup creates a new ID.
+Executor effects still require application idempotency. See
+[durable startup acceptance](docs/adr/0005-durable-start.md).
+
 `ExecutionSnapshot::iter_nodes()` walks **definition order**. `HashMap` lookup
 via `.node(id)` is unchanged. `running_count()` / `waiting_count()` are the
 in-flight observability (Running holds a permit; Waiting does not).

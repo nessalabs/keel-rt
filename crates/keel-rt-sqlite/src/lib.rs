@@ -30,15 +30,18 @@
 
 use async_trait::async_trait;
 use keel_rt::{
-    ClaimError, Event, Execution, ExecutionId, ExecutionSnapshot, LeaseEpoch, NodeSnapshot,
-    NodeState, OwnerId, StateStore, StoreError, Timestamp, WorkflowDefinition, DEFAULT_LEASE_TTL,
-    SCHEMA_VERSION,
+    ClaimError, Event, Execution, ExecutionId, ExecutionSnapshot, InitializeError, LeaseEpoch,
+    NodeSnapshot, NodeState, OwnerId, StateStore, StoreError, Timestamp, WorkflowDefinition,
+    DEFAULT_LEASE_TTL, SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[cfg(test)]
+mod startup_tests;
 
 /// Test-only: next N `wal_checkpoint(TRUNCATE)` calls return SQLITE_BUSY.
 /// Production persist must still treat COMMIT as Ok (checkpoint is best-effort).
@@ -261,14 +264,7 @@ impl SqliteStore {
         let r = (|| {
             reject_fence(conn, exec)?;
             insert_definition(conn, Some(exec.definition()))?;
-            let found: Option<i64> = conn
-                .query_row(
-                    "SELECT revision FROM executions WHERE id = ?1",
-                    params![exec.id().as_str()],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(store_err)?;
+            let found = snapshot_revision(conn, exec.id())?;
             match found {
                 Some(found) if found as u64 > exec.revision() => Err(StoreError::Stale {
                     found: found as u64,
@@ -353,15 +349,16 @@ fn lease_live_ms(until: Option<i64>, now: Timestamp) -> bool {
 }
 
 fn reject_fence(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
-    let epoch: Option<Option<i64>> = conn
+    let epoch: Option<(Option<i64>, bool)> = conn
+        .prepare_cached("SELECT epoch, owner IS NOT NULL FROM executions WHERE id = ?1")
+        .map_err(store_err)?
         .query_row(
-            "SELECT epoch FROM executions WHERE id = ?1",
             params![exec.id().as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(store_err)?;
-    let Some(Some(found)) = epoch else {
+    let Some((Some(found), owned)) = epoch else {
         return Ok(());
     };
     if found <= 0 {
@@ -369,7 +366,7 @@ fn reject_fence(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
     }
     let found = found as u64;
     let attempted = exec.fence_epoch().unwrap_or(0);
-    if attempted != found {
+    if attempted != found || !owned {
         return Err(StoreError::StaleEpoch { found, attempted });
     }
     Ok(())
@@ -431,8 +428,7 @@ fn claim_conn(
     })();
     match r {
         Ok(epoch) => {
-            conn.execute("COMMIT", [])
-                .map_err(|e| ClaimError::Store(store_err(e)))?;
+            finish_tx(conn, Ok(()))?;
             Ok(epoch)
         }
         Err(e) => {
@@ -453,7 +449,7 @@ fn heartbeat_conn(
     let r = (|| {
         let n = conn
             .execute(
-                "UPDATE executions SET lease_until = ?3 WHERE id = ?1 AND epoch = ?2",
+                "UPDATE executions SET lease_until = ?3 WHERE id = ?1 AND epoch = ?2 AND owner IS NOT NULL",
                 params![id.as_str(), epoch.0 as i64, lease_until_ms(now)],
             )
             .map_err(store_err)?;
@@ -476,17 +472,19 @@ fn heartbeat_conn(
     }
 }
 
+// Keep the generation after release: resetting it would let an old token
+// become valid again when a future owner claims this execution.
 fn release_conn(conn: &Connection, id: &ExecutionId, epoch: LeaseEpoch) {
     let _ = conn.execute(
-        "UPDATE executions SET owner = NULL, epoch = 0, lease_until = NULL
-         WHERE id = ?1 AND epoch = ?2",
+        "UPDATE executions SET owner = NULL, lease_until = NULL
+         WHERE id = ?1 AND epoch = ?2 AND owner IS NOT NULL",
         params![id.as_str(), epoch.0 as i64],
     );
 }
 
 fn release_owner_conn(conn: &Connection, owner: &OwnerId) {
     let _ = conn.execute(
-        "UPDATE executions SET owner = NULL, epoch = 0, lease_until = NULL
+        "UPDATE executions SET owner = NULL, lease_until = NULL
          WHERE owner = ?1",
         params![owner.as_str()],
     );
@@ -565,11 +563,10 @@ fn json_err(e: serde_json::Error) -> StoreError {
 }
 
 fn finish_tx(conn: &Connection, r: Result<(), StoreError>) -> Result<bool, StoreError> {
-    match r {
-        Ok(()) => {
-            conn.execute("COMMIT", []).map_err(store_err)?;
-            Ok(true)
-        }
+    // Some COMMIT errors leave the transaction open. Roll back those too so a
+    // failed first persist cannot expose uncommitted state on this connection.
+    match r.and_then(|()| conn.execute("COMMIT", []).map(|_| ()).map_err(store_err)) {
+        Ok(()) => Ok(true),
         Err(e) => {
             let _ = conn.execute("ROLLBACK", []);
             Err(e)
@@ -654,7 +651,8 @@ fn upsert_execution_row(conn: &Connection, snapshot: &ExecutionSnapshot) -> Resu
            workflow_id = excluded.workflow_id,
            state = excluded.state,
            node_order = excluded.node_order
-         WHERE executions.revision < excluded.revision",
+         WHERE executions.revision < excluded.revision
+            OR (executions.revision = 0 AND executions.definition_hash = '')",
         params![
             snapshot.execution_id.as_str(),
             snapshot.revision as i64,
@@ -690,14 +688,7 @@ fn upsert_execution_meta(conn: &Connection, exec: &Execution) -> Result<(), Stor
 }
 
 fn upsert_full_snapshot(conn: &Connection, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
-    let found: Option<i64> = conn
-        .query_row(
-            "SELECT revision FROM executions WHERE id = ?1",
-            params![snapshot.execution_id.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(store_err)?;
+    let found = snapshot_revision(conn, &snapshot.execution_id)?;
     match found {
         Some(found) if found as u64 > snapshot.revision => Err(StoreError::Stale {
             found: found as u64,
@@ -715,7 +706,7 @@ fn upsert_full_snapshot(conn: &Connection, snapshot: &ExecutionSnapshot) -> Resu
             Ok(())
         }
         None => Err(StoreError::Message(
-            "put requires an existing execution (persist first)".into(),
+            "put requires an initialized execution (persist first)".into(),
         )),
     }
 }
@@ -767,11 +758,30 @@ fn upsert_dirty_nodes(conn: &Connection, exec: &Execution) -> Result<(), StoreEr
     Ok(())
 }
 
-fn load_snapshot(
-    conn: &Connection,
-    id: &ExecutionId,
-) -> Result<Option<ExecutionSnapshot>, StoreError> {
-    let row: Option<(i64, i64, String, String, String, String)> = conn
+type SnapshotRow = (i64, i64, String, String, String, String);
+
+// Keep the incremental write path cheap: do not load the whole node order just
+// to compare revisions. Reservations need the full validation below once.
+fn snapshot_revision(conn: &Connection, id: &ExecutionId) -> Result<Option<i64>, StoreError> {
+    let row: Option<(i64, bool)> = conn
+        .prepare_cached("SELECT revision, definition_hash = '' FROM executions WHERE id = ?1")
+        .map_err(store_err)?
+        .query_row(
+            params![id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(store_err)?;
+    match row {
+        Some((_, true)) => Ok(snapshot_row(conn, id)?.map(|row| row.0)),
+        other => Ok(other.map(|(revision, _)| revision)),
+    }
+}
+
+/// Lease reservation rows are not snapshots. Only the exact empty reservation
+/// shape is absent; malformed or partially initialized rows remain errors.
+fn snapshot_row(conn: &Connection, id: &ExecutionId) -> Result<Option<SnapshotRow>, StoreError> {
+    let row: Option<SnapshotRow> = conn
         .query_row(
             "SELECT revision, schema_version, definition_hash, workflow_id, state, node_order
              FROM executions WHERE id = ?1",
@@ -789,7 +799,41 @@ fn load_snapshot(
         )
         .optional()
         .map_err(store_err)?;
-    let Some((revision, schema_version, definition_hash, workflow_id, state, order)) = row else {
+    if let Some((revision, schema, hash, workflow, state, order)) = &row {
+        if hash.is_empty() {
+            let empty_children: bool = conn
+                .query_row(
+                    "SELECT NOT EXISTS (SELECT 1 FROM nodes WHERE execution_id = ?1)
+                    AND NOT EXISTS (SELECT 1 FROM events WHERE execution_id = ?1)",
+                    params![id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(store_err)?;
+            if *revision == 0
+                && *schema == SCHEMA_VERSION as i64
+                && workflow.is_empty()
+                && serde_json::from_str::<keel_rt::ExecutionState>(state).map_err(json_err)?
+                    == keel_rt::ExecutionState::Created
+                && serde_json::from_str::<Vec<keel_rt::NodeId>>(order)
+                    .map_err(json_err)?
+                    .is_empty()
+                && empty_children
+            {
+                return Ok(None);
+            }
+            return Err(StoreError::Message("invalid lease placeholder".into()));
+        }
+    }
+    Ok(row)
+}
+
+fn load_snapshot(
+    conn: &Connection,
+    id: &ExecutionId,
+) -> Result<Option<ExecutionSnapshot>, StoreError> {
+    let Some((revision, schema_version, definition_hash, workflow_id, state, order)) =
+        snapshot_row(conn, id)?
+    else {
         return Ok(None);
     };
     let mut stmt = conn
@@ -819,14 +863,63 @@ fn load_snapshot(
 
 #[async_trait]
 impl StateStore for SqliteStore {
+    async fn initialize(
+        &self,
+        exec: &Execution,
+        owner: &OwnerId,
+        now: Timestamp,
+    ) -> Result<LeaseEpoch, InitializeError> {
+        if exec.revision() != 0 || exec.state() != keel_rt::ExecutionState::Created {
+            return Err(StoreError::Message(
+                "initialize requires a fresh Created execution".into(),
+            )
+            .into());
+        }
+        // Hashing is CPU work and must not lengthen the SQLite write lock.
+        let _ = exec.definition().content_hash();
+        let snapshot = exec.snapshot();
+        let mut conn = self.lock()?;
+        if conn.path().is_none_or(str::is_empty) {
+            return Err(InitializeError::Unsupported);
+        }
+        // Transaction Drop rolls back on error, panic, or a failed COMMIT.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(store_err)?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM executions WHERE id = ?1)",
+                params![exec.id().as_str()],
+                |row| row.get(0),
+            )
+            .map_err(store_err)?;
+        if exists {
+            return Err(InitializeError::AlreadyExists);
+        }
+        insert_definition(&tx, Some(exec.definition()))?;
+        insert_new_snapshot(&tx, &snapshot)?;
+        tx.execute(
+            "UPDATE executions SET owner = ?2, epoch = 1, lease_until = ?3 WHERE id = ?1",
+            params![exec.id().as_str(), owner.as_str(), lease_until_ms(now)],
+        )
+        .map_err(store_err)?;
+        tx.commit().map_err(store_err)?;
+        Ok(LeaseEpoch(1))
+    }
+
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
         let conn = self.lock()?;
         Self::write_snapshot(&conn, snapshot, None)
     }
 
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
-        let conn = self.lock()?;
-        load_snapshot(&conn, id)
+        let mut conn = self.lock()?;
+        // Metadata, reservation validation, and node rows must describe one
+        // committed revision even when another connection initializes/writes.
+        let tx = conn.transaction().map_err(store_err)?;
+        let snapshot = load_snapshot(&tx, id)?;
+        tx.commit().map_err(store_err)?;
+        Ok(snapshot)
     }
 
     async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
@@ -849,19 +942,12 @@ impl StateStore for SqliteStore {
         &self,
         id: &ExecutionId,
     ) -> Result<Option<WorkflowDefinition>, StoreError> {
-        let conn = self.lock()?;
-        let hash: Option<String> = conn
-            .query_row(
-                "SELECT definition_hash FROM executions WHERE id = ?1",
-                params![id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(store_err)?;
-        let Some(hash) = hash else {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(store_err)?;
+        let Some((_, _, hash, _, _, _)) = snapshot_row(&tx, id)? else {
             return Ok(None);
         };
-        let body: Vec<u8> = conn
+        let body: Vec<u8> = tx
             .query_row(
                 "SELECT body FROM definitions WHERE hash = ?1",
                 params![hash],
@@ -870,9 +956,11 @@ impl StateStore for SqliteStore {
             .optional()
             .map_err(store_err)?
             .ok_or_else(|| StoreError::Message("definition body missing".into()))?;
-        WorkflowDefinition::from_durable_bytes(&body)
-            .map(Some)
-            .map_err(|e| StoreError::Message(e.to_string()))
+        tx.commit().map_err(store_err)?;
+        drop(conn);
+        let definition = WorkflowDefinition::from_durable_bytes(&body)
+            .map_err(|e| StoreError::Message(e.to_string()))?;
+        Ok(Some(definition))
     }
 
     async fn claim(

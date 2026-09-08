@@ -55,6 +55,17 @@ pub enum StoreError {
     StaleEpoch { found: u64, attempted: u64 },
 }
 
+/// An opt-in durable store could not initialize a new execution.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum InitializeError {
+    #[error("store does not support durable initialization")]
+    Unsupported,
+    #[error("execution already exists")]
+    AlreadyExists,
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
 fn reject_stale(found: u64, attempted: u64) -> Result<(), StoreError> {
     if found > attempted {
         Err(StoreError::Stale { found, attempted })
@@ -74,7 +85,30 @@ fn lease_live(until: Timestamp, now: Timestamp) -> bool {
 #[async_trait]
 pub trait StateStore: Send + Sync {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError>;
+    /// Last persisted snapshot. A lease reserved before its first snapshot is
+    /// absent (`None`), not a malformed snapshot. Absence does not release its
+    /// lease or prove that an executor has never run.
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError>;
+
+    /// Atomically reserve a fresh execution ID and commit its Created snapshot,
+    /// all nodes, and workflow definition, returning the owner's lease epoch.
+    /// Success guarantees recovery after process death under the adapter's
+    /// documented durability mode. Existing IDs must return `AlreadyExists`.
+    /// Default is unsupported; `persist` alone cannot promise durable recovery.
+    ///
+    /// Implementations must roll back an incomplete transaction on error/panic
+    /// or cancellation. If commit happened before cancellation or a lost reply,
+    /// retain the recoverable snapshot; its lease may expire normally. Never
+    /// spawn background initialization that outlives the cancelled future.
+    async fn initialize(
+        &self,
+        exec: &Execution,
+        owner: &OwnerId,
+        now: Timestamp,
+    ) -> Result<LeaseEpoch, InitializeError> {
+        let _ = (exec, owner, now);
+        Err(InitializeError::Unsupported)
+    }
 
     /// Cheap skip for `snapshot()` + `put` on the apply path.
     fn is_noop(&self) -> bool {
@@ -102,7 +136,9 @@ pub trait StateStore: Send + Sync {
         self.persist(exec).await
     }
 
-    /// Definition last persisted with this execution. Default: none.
+    /// Definition last persisted with this execution. A lease-only reservation
+    /// has no definition. A missing definition for a real snapshot is an error
+    /// in adapters that persist definitions. Default: none.
     /// The store does not interpret DAG readiness; it returns the bytes' DAG.
     async fn workflow_definition(
         &self,
@@ -371,6 +407,15 @@ impl StateStore for Arc<dyn StateStore> {
 
     async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
         (**self).get(id).await
+    }
+
+    async fn initialize(
+        &self,
+        exec: &Execution,
+        owner: &OwnerId,
+        now: Timestamp,
+    ) -> Result<LeaseEpoch, InitializeError> {
+        (**self).initialize(exec, owner, now).await
     }
 
     fn is_noop(&self) -> bool {
