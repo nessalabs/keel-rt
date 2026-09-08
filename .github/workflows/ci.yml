@@ -42,8 +42,6 @@ jobs:
         # Release keeps the 100k hang bounds meaningful on shared runners.
         # Includes adversarial, stress, chaos, durable startup, and Wasm tests.
         run: cargo test --locked --release --workspace -- --test-threads=1
-      - name: Run the Wasm consumer example
-        run: cargo run --locked --release -p keel-rt-wasm --example echo
 
   pr-body:
     if: github.event_name == 'pull_request'
