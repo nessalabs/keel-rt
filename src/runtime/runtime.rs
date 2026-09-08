@@ -6,7 +6,7 @@ use crate::domain::snapshot::{ExecutionSnapshot, SnapshotError};
 use crate::domain::state::{ApplyCmd, ApplyError, Execution, ExecutionState};
 use crate::domain::time::Timestamp;
 use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry, FunctionExecutor};
-use crate::runtime::handle::{ActiveGuard, ActiveSet, ExecutionHandle, LeaseGate};
+use crate::runtime::handle::{forget_active, ActiveGuard, ActiveSet, ExecutionHandle, LeaseGate};
 use crate::runtime::inject::{self, Event, EventRx, EventTx};
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::sink::{EventSink, NoopSink};
@@ -266,10 +266,7 @@ async fn drive(
         let drop_live = matches!(event, Event::Start | Event::Heartbeat);
         if scheduler.handle_event(event).await {
             if drop_live {
-                active
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&execution_id);
+                forget_active(&active, &execution_id, &tx);
             }
             break;
         }
@@ -531,8 +528,8 @@ impl Runtime {
         if g.contains_key(id) {
             return None;
         }
-        g.insert(id.clone(), tx);
-        Some(ActiveGuard::new(id.clone(), self.active.clone()))
+        g.insert(id.clone(), tx.clone());
+        Some(ActiveGuard::new(id.clone(), self.active.clone(), tx))
     }
 
     fn live_tx(&self, id: &ExecutionId) -> Option<EventTx> {
@@ -561,7 +558,7 @@ impl Runtime {
     pub async fn complete(&self, token: ResumeToken, resume: Resume) -> Result<(), CompleteError> {
         let id = token.execution_id();
         if let Some(tx) = self.live_tx(id) {
-            match self.lease.claim_or_forget(id).await {
+            match self.lease.claim_or_forget(id, &tx).await {
                 Ok(()) => {
                     return self
                         .map_complete_apply(inject::inject_resume(&tx, token, resume).await);
@@ -578,7 +575,7 @@ impl Runtime {
     /// A stolen lease is [`CancelError::ClaimedElsewhere`] — do not inject.
     pub async fn cancel(&self, execution_id: &ExecutionId) -> Result<(), CancelError> {
         if let Some(tx) = self.live_tx(execution_id) {
-            match self.lease.claim_or_forget(execution_id).await {
+            match self.lease.claim_or_forget(execution_id, &tx).await {
                 Ok(()) => return inject::inject_cancel(&tx).await.map_err(CancelError::Apply),
                 Err(e) => return Err(e.into()),
             }

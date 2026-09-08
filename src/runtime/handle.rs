@@ -48,19 +48,20 @@ impl LeaseGate {
             .cloned()
     }
 
-    pub(crate) fn forget_live(&self, id: &ExecutionId) {
-        self.active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(id);
+    pub(crate) fn forget_live(&self, id: &ExecutionId, tx: &EventTx) {
+        forget_active(&self.active, id, tx);
     }
 
     /// Refresh this owner's lease, or refuse and drop live_tx.
-    pub(crate) async fn claim_or_forget(&self, id: &ExecutionId) -> Result<(), ClaimError> {
+    pub(crate) async fn claim_or_forget(
+        &self,
+        id: &ExecutionId,
+        tx: &EventTx,
+    ) -> Result<(), ClaimError> {
         match self.store.claim(id, &self.owner, self.clock.now()).await {
             Ok(_) => Ok(()),
             Err(ClaimError::ClaimedElsewhere) => {
-                self.forget_live(id);
+                self.forget_live(id, tx);
                 Err(ClaimError::ClaimedElsewhere)
             }
             Err(e) => Err(e),
@@ -87,27 +88,39 @@ pub struct ExecutionHandle {
     pub(crate) state: watch::Receiver<ExecutionState>,
     pub(crate) dropped: Arc<AtomicBool>,
     pub(crate) consumed: bool,
-    /// Unregisters this id from [`crate::Runtime`] on Drop (structural cleanup).
+    /// Unregisters this handle's inbox from [`crate::Runtime`] on Drop.
     pub(crate) _active: ActiveGuard,
     pub(crate) lease: Arc<LeaseGate>,
 }
 
-/// One live handle per execution id on a Runtime. Drop removes the id.
+/// Remove only this inbox's registration. A stopped drive or handle may
+/// outlive its replacement under the same execution ID.
+pub(crate) fn forget_active(active: &Mutex<ActiveSet>, id: &ExecutionId, tx: &EventTx) {
+    let mut entries = active.lock().unwrap_or_else(|p| p.into_inner());
+    if entries
+        .get(id)
+        .is_some_and(|current| current.same_channel(tx))
+    {
+        entries.remove(id);
+    }
+}
+
+/// One live handle per execution id on a Runtime. Drop removes its own inbox.
 pub(crate) struct ActiveGuard {
     id: ExecutionId,
+    tx: EventTx,
     active: Arc<Mutex<ActiveSet>>,
 }
 
 impl ActiveGuard {
-    pub(crate) fn new(id: ExecutionId, active: Arc<Mutex<ActiveSet>>) -> Self {
-        Self { id, active }
+    pub(crate) fn new(id: ExecutionId, active: Arc<Mutex<ActiveSet>>, tx: EventTx) -> Self {
+        Self { id, active, tx }
     }
 }
 
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        let mut g = self.active.lock().unwrap_or_else(|p| p.into_inner());
-        g.remove(&self.id);
+        forget_active(&self.active, &self.id, &self.tx);
     }
 }
 
@@ -122,7 +135,11 @@ impl ExecutionHandle {
     }
 
     pub async fn resume(&self, token: ResumeToken, resume: Resume) -> Result<(), ApplyError> {
-        match self.lease.claim_or_forget(token.execution_id()).await {
+        match self
+            .lease
+            .claim_or_forget(token.execution_id(), &self.tx)
+            .await
+        {
             Ok(()) => inject::inject_resume(&self.tx, token, resume).await,
             Err(ClaimError::ClaimedElsewhere) => {
                 Err(ApplyError::Illegal("execution claimed elsewhere".into()))
@@ -226,12 +243,12 @@ mod tests {
         drop(state_tx);
         let handle = ExecutionHandle {
             execution_id: id.clone(),
-            tx,
+            tx: tx.clone(),
             cancel: CancellationToken::new(),
             state: state_rx,
             dropped: Arc::new(AtomicBool::new(false)),
             consumed: true,
-            _active: ActiveGuard::new(id.clone(), Arc::new(Mutex::new(HashMap::new()))),
+            _active: ActiveGuard::new(id.clone(), Arc::new(Mutex::new(HashMap::new())), tx),
             lease: LeaseGate::new(
                 Arc::new(MemoryStore::new()),
                 OwnerId::new(),
@@ -245,17 +262,15 @@ mod tests {
     #[test]
     fn active_guard_recovers_from_poison_and_unregisters() {
         let id = ExecutionId::parse("exec-active").unwrap();
-        let set = Arc::new(Mutex::new(HashMap::from([(
-            id.clone(),
-            crate::runtime::inject::channel().0,
-        )])));
+        let tx = crate::runtime::inject::channel().0;
+        let set = Arc::new(Mutex::new(HashMap::from([(id.clone(), tx.clone())])));
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _g = set.lock().unwrap();
             panic!("poison active set");
         }));
         assert!(poisoned.is_err());
         {
-            let guard = ActiveGuard::new(id.clone(), set.clone());
+            let guard = ActiveGuard::new(id.clone(), set.clone(), tx);
             drop(guard);
         }
         assert!(!set
@@ -294,5 +309,30 @@ mod tests {
             state_after_watch_closed(ExecutionState::Waiting),
             ExecutionState::Cancelled
         );
+    }
+
+    #[tokio::test]
+    async fn stale_lease_failure_preserves_successor_registration() {
+        let store = Arc::new(MemoryStore::new());
+        let clock = Arc::new(SystemClock);
+        let id = ExecutionId::new();
+        store
+            .claim(&id, &OwnerId::new(), clock.now())
+            .await
+            .unwrap();
+        let old = inject::channel().0;
+        let successor = inject::channel().0;
+        let active = Arc::new(Mutex::new(HashMap::from([(id.clone(), successor.clone())])));
+        let gate = LeaseGate::new(store, OwnerId::new(), clock, active.clone());
+        assert_eq!(
+            gate.claim_or_forget(&id, &old).await,
+            Err(ClaimError::ClaimedElsewhere)
+        );
+        assert!(gate.live_tx(&id).unwrap().same_channel(&successor));
+        assert_eq!(
+            gate.claim_or_forget(&id, &successor).await,
+            Err(ClaimError::ClaimedElsewhere)
+        );
+        assert!(gate.live_tx(&id).is_none());
     }
 }

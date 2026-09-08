@@ -397,3 +397,83 @@ async fn durable_dispatch_reloads_a_cancelled_snapshot() {
     );
     assert_eq!(runs.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn dropping_stopped_durable_handle_preserves_its_live_successor() {
+    for fault in 1..=4 {
+        tokio::time::timeout(BOUND, async {
+            let store = ControlledStore::new(Boundary::AfterCommit);
+            let clock = Arc::new(FakeClock::new());
+            let runs = Arc::new(AtomicUsize::new(0));
+            let rt = Arc::new(
+                Runtime::builder()
+                    .store(store.clone() as Arc<dyn StateStore>)
+                    .clock(clock.clone())
+                    .register_fn("a", {
+                        let runs = runs.clone();
+                        move |ctx| {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                NodeOutcome::Waiting {
+                                    token: ctx.resume_token,
+                                }
+                            }
+                        }
+                    })
+                    .build(),
+            );
+            let starter = tokio::spawn({
+                let rt = rt.clone();
+                async move { rt.start_durable(definition()).await }
+            });
+            store.entered.notified().await;
+            let foreign_epoch = if fault == 4 {
+                clock.advance(Duration::from_secs(31));
+                Some(
+                    store
+                        .claim(&store.id(), &OwnerId::new(), Timestamp(31_000))
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                store.read_fault.store(fault, Ordering::SeqCst);
+                None
+            };
+            store.proceed.notify_one();
+            let stale = starter.await.unwrap().unwrap();
+            assert_eq!(stale.wait_stable().await, ExecutionState::Cancelled);
+            store.read_fault.store(0, Ordering::SeqCst);
+            if let Some(epoch) = foreign_epoch {
+                store.release(&store.id(), epoch).await.unwrap();
+            }
+            let successor = rt.resume(&store.id()).await.unwrap();
+            assert_eq!(successor.wait_stable().await, ExecutionState::Waiting);
+            let token = successor
+                .inspect()
+                .await
+                .node(&keel_rt::NodeId::new("a"))
+                .unwrap()
+                .resume_token
+                .clone()
+                .unwrap();
+            drop(stale);
+            assert!(
+                matches!(
+                    rt.resume(&store.id()).await,
+                    Err(ResumeError::AlreadyActive)
+                ),
+                "stale handle unregistered its successor after startup fault {fault}"
+            );
+            rt.complete(
+                token,
+                keel_rt::Resume::Complete(NodeOutcome::Succeeded(Default::default())),
+            )
+            .await
+            .unwrap();
+            assert_eq!(successor.wait().await, ExecutionState::Succeeded);
+            assert_eq!(runs.load(Ordering::SeqCst), 1);
+        })
+        .await
+        .expect("bounded stale handle recovery");
+    }
+}

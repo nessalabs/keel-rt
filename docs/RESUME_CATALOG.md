@@ -191,3 +191,4 @@ other binary does not open the sqlite file while A lives. ADR 0004.
 | A delayed acknowledged starter preserves recovered successes and Waiting progress | `test: acknowledged_sqlite_start_must_not_rerun_recovered_succeeded_nodes`, `test: acknowledged_start_must_preserve_succeeded_predecessor_after_waiting_takeover` |
 | A delayed starter respects persisted cancellation | `test: delayed_durable_start_must_not_resurrect_cancelled_execution` |
 | Released SQLite tokens cannot regain authority or release successors | `test: released_successor_must_not_make_old_lease_epoch_valid_again`, `test: released_leases_reject_writes_and_cannot_release_successors` |
+| A stopped handle cannot unregister a newer live drive for the same execution | `test: dropping_stopped_durable_handle_preserves_its_live_successor` |
