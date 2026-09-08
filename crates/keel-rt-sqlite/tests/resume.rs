@@ -220,6 +220,38 @@ struct StallAfterFirstPersist {
 
 #[async_trait::async_trait]
 impl StateStore for StallAfterFirstPersist {
+    // The fault gate must preserve the real adapter's lease operations;
+    // default no-op claims cannot authorize writes to a previously leased row.
+    async fn claim(
+        &self,
+        id: &ExecutionId,
+        owner: &OwnerId,
+        now: Timestamp,
+    ) -> Result<LeaseEpoch, keel_rt::ClaimError> {
+        self.inner.claim(id, owner, now).await
+    }
+
+    async fn heartbeat(
+        &self,
+        id: &ExecutionId,
+        epoch: LeaseEpoch,
+        now: Timestamp,
+    ) -> Result<(), keel_rt::ClaimError> {
+        self.inner.heartbeat(id, epoch, now).await
+    }
+
+    async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
+        self.inner.release(id, epoch).await
+    }
+
+    fn release_now(&self, id: &ExecutionId, epoch: LeaseEpoch) {
+        self.inner.release_now(id, epoch);
+    }
+
+    fn release_owner_now(&self, owner: &OwnerId) {
+        self.inner.release_owner_now(owner);
+    }
+
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
         self.inner.put(snapshot).await
     }

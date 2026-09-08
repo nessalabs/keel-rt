@@ -54,13 +54,13 @@ pub use domain::time::Timestamp;
 pub use runtime::executor::{ExecutionContext, Executor, FunctionExecutor};
 pub use runtime::handle::ExecutionHandle;
 pub use runtime::runtime::{
-    CancelError, CompleteError, ResumeError, Runtime, RuntimeBuilder, StartError,
-    UnregisteredExecutors, DEFAULT_CANCEL_BOUND,
+    CancelError, CompleteError, DurableStartError, ResumeError, Runtime, RuntimeBuilder,
+    StartError, UnregisteredExecutors, DEFAULT_CANCEL_BOUND,
 };
 pub use runtime::sink::{EventSink, FnSink, SinkError};
 pub use runtime::store::{
-    ClaimError, LeaseEpoch, MemoryStore, NoopStore, OwnerId, StateStore, StoreError,
-    DEFAULT_LEASE_TTL,
+    ClaimError, InitializeError, LeaseEpoch, MemoryStore, NoopStore, OwnerId, StateStore,
+    StoreError, DEFAULT_LEASE_TTL,
 };
 pub use runtime::time::Clock;
 pub use runtime::wait::{Wait, WAIT_ID};

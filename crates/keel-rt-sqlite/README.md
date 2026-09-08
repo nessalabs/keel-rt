@@ -40,6 +40,38 @@ let fast = SqliteStore::open_fast("/tmp/keel-fast.db")?; // NORMAL
   snapshot, never inside the transaction. Checkpoint `Err` does not fail
   persist. Equal-revision persist does not insert event rows.
 
+## Startup and recovery
+
+`Runtime::start_durable(definition).await` uses `StateStore::initialize` to commit
+the new execution's lease, `Created` snapshot, every node, and definition in one
+transaction before any executor launches. Both FULL and NORMAL support process
+crash recovery; their power-loss guarantees remain those in the table above.
+Temporary and in-memory databases cannot acknowledge durable initialization.
+Existing IDs return `InitializeError::AlreadyExists` and are never overwritten.
+
+The existing `Runtime::start` path can leave a lease reservation if interrupted
+before its first snapshot. `get` and `workflow_definition` return `None` for that
+specific record; `Runtime::resume` returns `UnknownExecution`. These reads do not
+release ownership. Lease expiry/takeover and fencing still apply. Malformed rows
+and missing definitions for real snapshots remain errors.
+
+`persist` initializes a reservation even at revision zero. `put` only updates an
+initialized execution; use `persist` first so the definition is stored too.
+No snapshot does not prove no executor ran on the ordinary `start` path. Callers
+retain submission inputs and stable business operation IDs for safe retries,
+including replacement executions with new IDs. Keel does not deduplicate external
+effects or automatically restart an unknown execution.
+
+Startup regressions include actual subprocess death before the initial commit,
+after commit without acknowledgement, and immediately after acknowledgement.
+Run `cargo test -p keel-rt-sqlite --lib --test startup -- --test-threads=1`.
+
 Standing load / messy-user attacks (not coverage):
 `cargo test -p keel-rt-sqlite --test chaos -- --test-threads=1 --nocapture`
 and [`docs/CHAOS_LOG.md`](../../docs/CHAOS_LOG.md).
+
+Durable dispatch claims the lease and reloads the committed snapshot before
+running nodes. A delayed starter therefore respects progress and cancellation
+recorded by a recovering runtime. SQLite retains the lease generation across
+release and owner cleanup; released tokens cannot heartbeat or persist, and a
+subsequent claim receives a greater generation.
