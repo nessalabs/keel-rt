@@ -4,67 +4,53 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
-  wasm:
+  clippy:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
         with:
           components: clippy, rustfmt
       - run: cargo fmt -p keel-rt-wasm -p keel-rt-wasm-consumer-test --check
+      - run: cargo clippy --locked --workspace --lib -- -D warnings
       - run: cargo clippy --locked -p keel-rt-wasm -p keel-rt-wasm-consumer-test --all-targets -- -D warnings
-      - run: cargo test --locked -p keel-rt-wasm -p keel-rt-wasm-consumer-test -- --test-threads=1
-      - run: cargo run --locked -p keel-rt-wasm --example echo
-
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: clippy
-      - run: cargo clippy --workspace --lib -- -D warnings
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Default suite (no 100k, no resume_stress)
-        run: |
-          cargo test -p keel-rt --lib \
-            --test adversarial --test catalog --test consumer --test events \
-            --test graph --test resilience --test resume --test timers \
-            --test scenarios --test stress --test stress_uneven --test structure \
-            --test workloads \
-            -- --test-threads=1
-          cargo test -p keel-rt-sqlite --lib --test resume --test structure \
-            -- --test-threads=1
-          cargo test -p keel-rt-http -- --test-threads=1
-          cargo test -p keel-rt-schedule -- --test-threads=1
-
-  adversarial:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Adversarial + resume hunt
-        run: |
-          cargo test -p keel-rt --test adversarial -- --test-threads=1
-          cargo test -p keel-rt-sqlite --test resume -- --test-threads=1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Run every workspace suite once
+        # Release keeps the 100k hang bounds meaningful on shared runners.
+        # Includes adversarial, stress, chaos, durable startup, and Wasm tests.
+        run: cargo test --locked --release --workspace -- --test-threads=1
+      - name: Run the Wasm consumer example
+        run: cargo run --locked --release -p keel-rt-wasm --example echo
 
   pr-body:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Mermaid + When a caller + base main
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -76,25 +62,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
         with:
           tool: cargo-llvm-cov@0.6.16
       - name: Kernel coverage gate
         env:
-          COVERAGE_DIFF_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'origin/main' }}
+          COVERAGE_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || 'HEAD^' }}
         run: |
-          git fetch --no-tags origin main 2>/dev/null || true
-          chmod +x scripts/coverage.sh
+          git rev-parse --verify "${COVERAGE_DIFF_BASE}^{commit}"
           ./scripts/coverage.sh
       - name: Upload lcov
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lcov
           path: |
@@ -102,31 +87,36 @@ jobs:
             coverage/BASELINE
           if-no-files-found: warn
 
-  stress-resume:
+  workflow-lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Sqlite resume stress
-        run: cargo test -p keel-rt-sqlite --test resume_stress -- --test-threads=1 --nocapture
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
+        with:
+          tool: actionlint@1.7.12
+      - run: actionlint
 
-  stress-100k:
+  ci-pass:
+    if: always()
+    needs: [clippy, test, pr-body, coverage, workflow-lint]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: 100k scale (no coverage instrumentation)
-        # Release: debug wide_100k is ~57s locally / can exceed the 90s
-        # hang-bound on GHA; release is ~4s and keeps the same assertions.
-        run: cargo test --release --test stress_100k -- --test-threads=1 --nocapture
-
-  chaos-sqlite:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Standing sqlite chaos / crash-inject
-        run: cargo test -p keel-rt-sqlite --test chaos --test crash_inject -- --test-threads=1 --nocapture
+      - name: Require every applicable job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, sys
+          failed = []
+          for name, job in json.loads(os.environ["RESULTS"]).items():
+              if name == "pr-body" and os.environ["EVENT"] != "pull_request" and job["result"] == "skipped":
+                  continue
+              if job["result"] != "success":
+                  failed.append(f"{name}: {job['result']}")
+          if failed:
+              sys.exit("CI did not pass: " + ", ".join(failed))
+          print("All applicable CI jobs passed")
+          PYTHON

@@ -295,18 +295,10 @@ fn pr_template_and_agents_require_architecture_and_behavior() {
 }
 
 #[test]
-fn ci_and_agents_name_phase2_review_jobs() {
+fn ci_and_agents_preserve_complete_test_and_review_gates() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
-    for job in [
-        "test:",
-        "adversarial:",
-        "coverage:",
-        "pr-body:",
-        "stress-resume:",
-        "stress-100k:",
-        "chaos-sqlite:",
-    ] {
+    for job in ["test:", "clippy:", "coverage:", "pr-body:", "workflow-lint:", "ci-pass:"] {
         assert!(ci.contains(job), "ci.yml missing job {job}");
     }
     assert!(
@@ -314,28 +306,16 @@ fn ci_and_agents_name_phase2_review_jobs() {
         "ci.yml must not skip a red job"
     );
     assert!(
-        ci.contains("--test chaos"),
-        "chaos-sqlite job must run the sqlite chaos pack"
+        ci.contains("run: cargo test --locked --release --workspace -- --test-threads=1"),
+        "CI must discover every workspace suite, including adversarial, stress, chaos, and durable startup"
+    );
+    assert_eq!(
+        ci.matches("cargo test").count(), 1,
+        "test suites belong in the single workspace test job"
     );
     assert!(
-        ci.contains("--test crash_inject"),
-        "chaos-sqlite job must run the sqlite crash-inject pack"
-    );
-    assert!(
-        ci.contains("--test resume_stress"),
-        "stress-resume job must run the sqlite resume stress pack"
-    );
-    assert!(
-        ci.contains("--test adversarial"),
-        "adversarial job must run the kernel pack"
-    );
-    assert!(
-        ci.contains("--test events"),
-        "test job must run the events pack"
-    );
-    assert!(
-        ci.contains("--test timers"),
-        "test job must run the Phase 5 timers pack"
+        !ci.contains("--exclude") && !ci.contains("--skip"),
+        "the workspace test job must not omit a crate or test"
     );
     assert!(
         ci.contains("scripts/pr_body_gate.py"),

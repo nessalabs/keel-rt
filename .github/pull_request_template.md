@@ -34,8 +34,9 @@ classDiagram
 
 - [ ] Named crash-resume test on a real sqlite file (or this PR does not
       change persist/resume behavior).
-- [ ] CI jobs green: `test`, `adversarial`, `coverage`, `stress-resume`
-      (`stress-100k` is separate; `chaos-sqlite` is the standing sqlite
-      load breaker). No `continue-on-error`.
+- [ ] CI jobs green: `test`, `clippy`, `coverage`, `workflow-lint`,
+      `pr-body`, and aggregate `ci-pass`. The one workspace test job includes
+      adversarial, stress-resume, stress-100k, chaos-sqlite, and durable-start
+      suites. No `continue-on-error`.
 - [ ] `docs/RESUME_CATALOG.md` row updated (`test:` name, not MISSING).
 - [ ] `docs/CHAOS_LOG.md` attack → test name if this PR hunts sqlite load.
