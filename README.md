@@ -360,14 +360,14 @@ resume). `.start()` returns immediately for mid-run inspect.
 ## Inject faults
 
 ```rust
-use keel_rt::testing::{enable, FailingStore, ScriptedExecutor};
+use keel_rt::testing::{FailingStore, ScriptedExecutor};
 
-// Named failpoints (remaining-hit counter). Checked by test doubles.
-enable("store.put", 1);
-enable("executor.panic", 1);
-
-// Store that fails on the Nth put. In-memory apply still progresses.
+// Named failpoints (remaining-hit counter) live on the test double.
+// Each store and executor has its own registry.
 let store = FailingStore::fail_on_nth_put(2);
+store.failpoints().enable("store.put", 1);
+let exec = ScriptedExecutor::new("x");
+exec.failpoints().enable("executor.panic", 1);
 
 // Executor that panics or hangs.
 ScriptedExecutor::new("x").panic();

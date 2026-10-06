@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use keel_rt::testing::{
-    disable, enable, FailingStore, FakeClock, NoRefreshHeartbeat, ScriptedExecutor, WorkflowTest,
+    FailingStore, FakeClock, NoRefreshHeartbeat, ScriptedExecutor, WorkflowTest,
 };
 use keel_rt::{
     AcceptPolicy, ApplyCmd, CancelError, CompleteError, Event, Execution, ExecutionContext,
@@ -1365,13 +1365,13 @@ async fn resume_with_retry_failed_persist_err_leaves_failed_then_retry_works() {
     let h = rt.start(def).unwrap();
     let id = h.execution_id().clone();
     assert_eq!(within(h.wait()).await, ExecutionState::Failed);
-    enable("store.put", 1);
+    store.failpoints().enable("store.put", 1);
     match rt.resume_with(&id, Recover::RetryFailed).await {
         Err(ResumeError::Store(_)) => {}
         Ok(_) => panic!("recover persist Err must surface"),
         Err(e) => panic!("expected Store, got {e}"),
     }
-    disable("store.put");
+    store.failpoints().disable("store.put");
     let snap = store.get(&id).await.unwrap().unwrap();
     assert_eq!(snap.state, ExecutionState::Failed);
     assert!(matches!(
@@ -2131,7 +2131,7 @@ async fn complete_store_persist_err_is_store() {
         .expect("token");
     std::mem::forget(handle);
     drop(rt);
-    enable("store.put", 1);
+    store.failpoints().enable("store.put", 1);
     let rt = Runtime::builder()
         .store_arc(store.clone() as Arc<dyn StateStore>)
         .build();
@@ -2151,7 +2151,7 @@ async fn complete_store_persist_err_is_store() {
         snap.node(&NodeId::new("hold")).unwrap().state,
         NodeState::Waiting { .. }
     ));
-    disable("store.put");
+    store.failpoints().disable("store.put");
     let id = token.execution_id().clone();
     rt.complete(
         token,
@@ -2195,7 +2195,7 @@ async fn live_complete_persist_err_is_not_ok() {
         .resume_token
         .clone()
         .expect("token");
-    enable("store.put", 1);
+    store.failpoints().enable("store.put", 1);
     match rt
         .complete(
             token.clone(),
@@ -2206,7 +2206,7 @@ async fn live_complete_persist_err_is_not_ok() {
         Err(CompleteError::Apply(_)) => {}
         other => panic!("complete Ok only after persist Ok, got {other:?}"),
     }
-    disable("store.put");
+    store.failpoints().disable("store.put");
     rt.complete(
         token,
         Resume::Complete(NodeOutcome::Succeeded(Bytes::from_static(b"x"))),
@@ -2232,7 +2232,7 @@ async fn live_cancel_persist_err_is_not_ok() {
         .unwrap();
     let id = handle.execution_id().clone();
     within(handle.wait_stable()).await;
-    enable("store.put", 1);
+    store.failpoints().enable("store.put", 1);
     match rt.cancel(&id).await {
         Err(CancelError::Apply(_)) | Err(CancelError::Store(_)) => {}
         other => panic!("cancel Ok only after persist Ok, got {other:?}"),
@@ -2253,7 +2253,7 @@ async fn live_cancel_persist_err_is_not_ok() {
         Some(ExecutionState::Waiting),
         "Runtime::inspect live must match store, not in-memory Cancelled"
     );
-    disable("store.put");
+    store.failpoints().disable("store.put");
     rt.cancel(&id).await.expect("retry after persist Ok");
     within(async {
         loop {
@@ -2283,7 +2283,7 @@ async fn live_cancel_persist_err_inspect_is_waiting() {
         .unwrap();
     let id = handle.execution_id().clone();
     within(handle.wait_stable()).await;
-    enable("store.put", 1);
+    store.failpoints().enable("store.put", 1);
     match rt.cancel(&id).await {
         Err(CancelError::Apply(_)) | Err(CancelError::Store(_)) => {}
         other => panic!("cancel Ok only after persist Ok, got {other:?}"),
@@ -2308,7 +2308,7 @@ async fn live_cancel_persist_err_inspect_is_waiting() {
         rt.inspect(&id).await.map(|s| s.state),
         Some(ExecutionState::Waiting)
     );
-    disable("store.put");
+    store.failpoints().disable("store.put");
     handle.cancel().await;
     within(handle.wait()).await;
 }
@@ -2330,7 +2330,7 @@ async fn handle_cancel_persist_err_inspect_is_waiting() {
         .unwrap();
     let id = handle.execution_id().clone();
     within(handle.wait_stable()).await;
-    enable("store.put", 1);
+    store.failpoints().enable("store.put", 1);
     handle.cancel().await;
     within(async {
         for _ in 0..64 {
@@ -2348,7 +2348,7 @@ async fn handle_cancel_persist_err_inspect_is_waiting() {
         ExecutionState::Waiting
     );
     assert_eq!(handle.inspect().await.state, ExecutionState::Waiting);
-    disable("store.put");
+    store.failpoints().disable("store.put");
     handle.cancel().await;
     within(async {
         loop {
@@ -2379,7 +2379,7 @@ async fn runtime_cancel_store_persist_err_is_store() {
     within(handle.wait_stable()).await;
     std::mem::forget(handle);
     drop(rt);
-    enable("store.put", 1);
+    store.failpoints().enable("store.put", 1);
     let rt = Runtime::builder()
         .store_arc(store.clone() as Arc<dyn StateStore>)
         .build();
@@ -2389,7 +2389,7 @@ async fn runtime_cancel_store_persist_err_is_store() {
     }
     let snap = store.get(&id).await.unwrap().unwrap();
     assert_eq!(snap.state, ExecutionState::Waiting);
-    disable("store.put");
+    store.failpoints().disable("store.put");
     rt.cancel(&id).await.unwrap();
     assert_eq!(
         store.get(&id).await.unwrap().unwrap().state,

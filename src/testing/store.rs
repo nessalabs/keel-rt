@@ -3,7 +3,7 @@ use crate::domain::ids::ExecutionId;
 use crate::domain::snapshot::ExecutionSnapshot;
 use crate::domain::state::Execution;
 use crate::runtime::store::{ClaimError, LeaseEpoch, MemoryStore, OwnerId, StateStore, StoreError};
-use crate::testing::failpoint;
+use crate::testing::failpoint::Failpoints;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,26 +14,32 @@ pub struct FailingStore {
     fail_on_nth_put: usize,
     fail_all: bool,
     puts: AtomicUsize,
+    failpoints: Arc<Failpoints>,
 }
 
 impl FailingStore {
     pub fn fail_on_nth_put(n: usize) -> Self {
-        Self {
-            inner: MemoryStore::new(),
-            fail_on_nth_put: n,
-            fail_all: false,
-            puts: AtomicUsize::new(0),
-        }
+        Self::new(n, false)
     }
 
     /// Every `put` fails. In-memory apply must still progress.
     pub fn fail_all() -> Self {
+        Self::new(0, true)
+    }
+
+    fn new(fail_on_nth_put: usize, fail_all: bool) -> Self {
         Self {
             inner: MemoryStore::new(),
-            fail_on_nth_put: 0,
-            fail_all: true,
+            fail_on_nth_put,
+            fail_all,
             puts: AtomicUsize::new(0),
+            failpoints: Arc::new(Failpoints::new()),
         }
+    }
+
+    /// Registry checked by this store's `put` and `persist`.
+    pub fn failpoints(&self) -> Arc<Failpoints> {
+        Arc::clone(&self.failpoints)
     }
 
     pub fn inner(&self) -> &MemoryStore {
@@ -48,7 +54,7 @@ impl FailingStore {
 #[async_trait]
 impl StateStore for FailingStore {
     async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
-        if failpoint::take("store.put") {
+        if self.failpoints.take("store.put") {
             return Err(StoreError::Message("failpoint store.put".into()));
         }
         let n = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
@@ -71,7 +77,7 @@ impl StateStore for FailingStore {
         exec: &Execution,
         events: &[crate::domain::events::Event],
     ) -> Result<(), StoreError> {
-        if failpoint::take("store.put") {
+        if self.failpoints.take("store.put") {
             return Err(StoreError::Message("failpoint store.put".into()));
         }
         let n = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
