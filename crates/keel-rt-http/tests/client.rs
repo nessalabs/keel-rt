@@ -2,7 +2,7 @@
 //! Same protocol as `complete.rs`. No wall sleep.
 
 use bytes::Bytes;
-use keel_rt::testing::{disable, enable, FailingStore, NoRefreshHeartbeat};
+use keel_rt::testing::{FailingStore, NoRefreshHeartbeat};
 use keel_rt::{
     ExecutionContext, ExecutionId, ExecutionState, FakeClock, Join, MemoryStore, NodeId,
     NodeOutcome, NodeState, OnFailure, Resume, ResumeToken, Runtime, StateStore,
@@ -4313,6 +4313,7 @@ async fn client_live_approve_after_ttl_steal_is_claimed_elsewhere() {
 #[tokio::test(flavor = "current_thread")]
 async fn client_live_approve_persist_err_is_not_ok() {
     let store = Arc::new(FailingStore::fail_on_nth_put(0));
+    let failpoints = store.failpoints();
     let rt = Arc::new(
         Runtime::builder()
             .clock(Arc::new(FakeClock::new()))
@@ -4325,12 +4326,12 @@ async fn client_live_approve_persist_err_is_not_ok() {
     let (handle, token) = park_wait(&rt).await;
     let id = handle.execution_id().clone();
     let (addr, server) = serve_ephemeral(rt.clone(), secret()).await.unwrap();
-    enable("store.put", 1);
+    failpoints.enable("store.put", 1);
     let err = client_at(addr)
         .approve(token.clone(), Bytes::from_static(b"x"))
         .await
         .unwrap_err();
-    disable("store.put");
+    failpoints.disable("store.put");
     assert!(
         matches!(err, KeelClientError::BadRequest),
         "persist Err is CompleteError::Apply → 400, not 200: {err:?}"

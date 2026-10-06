@@ -13,7 +13,7 @@ pub mod scripted;
 pub mod store;
 
 pub use clock::FakeClock;
-pub use failpoint::{disable, enable, remaining, reset, take};
+pub use failpoint::Failpoints;
 pub use faults::{FaultySink, FlakyThen, NetFault};
 pub use harness::{TestRun, WorkflowTest};
 pub use recording::RecordingSink;

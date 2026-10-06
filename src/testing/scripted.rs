@@ -1,7 +1,7 @@
 use crate::domain::ids::ExecutorId;
 use crate::domain::outcome::{NodeError, NodeOutcome};
 use crate::runtime::executor::{ExecutionContext, Executor};
-use crate::testing::failpoint;
+use crate::testing::failpoint::Failpoints;
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -37,6 +37,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct ScriptedExecutor {
     inner: Arc<Inner>,
+    failpoints: Arc<Failpoints>,
 }
 
 impl ScriptedExecutor {
@@ -51,7 +52,13 @@ impl ScriptedExecutor {
                 hanging: AtomicBool::new(false),
                 released: AtomicBool::new(false),
             }),
+            failpoints: Arc::new(Failpoints::new()),
         }
+    }
+
+    /// Registry checked at the start of each execute.
+    pub fn failpoints(&self) -> Arc<Failpoints> {
+        Arc::clone(&self.failpoints)
     }
 
     pub fn then(self, action: ScriptedAction) -> Self {
@@ -137,7 +144,7 @@ impl Executor for ScriptedExecutor {
 
 impl ScriptedExecutor {
     async fn run(&self, ctx: ExecutionContext) -> NodeOutcome {
-        if failpoint::take("executor.panic") {
+        if self.failpoints.take("executor.panic") {
             panic!("failpoint executor.panic");
         }
         self.inner
