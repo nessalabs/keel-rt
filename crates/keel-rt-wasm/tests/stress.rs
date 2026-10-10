@@ -151,7 +151,7 @@ fn runtime(
     store: MemoryStore,
     events: Arc<Mutex<Vec<Event>>>,
 ) -> Runtime {
-    let wasm = WasmExecutor::new(
+    let wasm = WasmExecutor::new_trusted(
         "wasm",
         COMPONENT,
         Work { counts, trap_first },

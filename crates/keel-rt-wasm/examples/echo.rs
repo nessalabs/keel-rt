@@ -39,9 +39,10 @@ impl ComponentTask for Echo {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let wasm = WasmExecutor::new("echo", include_bytes!("echo.wat"), Echo, Limits::default())?;
+    let wasm =
+        WasmExecutor::new_trusted("echo", include_bytes!("echo.wat"), Echo, Limits::default())?;
     // To load an application-selected component:
-    // let wasm = WasmExecutor::from_file("echo", "my-component.wasm", Echo, Limits::default())?;
+    // let wasm = WasmExecutor::from_trusted_file("echo", "my-component.wasm", Echo, Limits::default())?;
     let rt = Runtime::builder()
         .register_fn("source", |_| async {
             NodeOutcome::succeeded(b"hello from Keel".to_vec())
