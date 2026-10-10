@@ -390,6 +390,11 @@ struct App {
 /// `GET /executors`, `POST /complete`, `POST /approve`, `POST /reject`,
 /// `POST /cancel/:id`.
 pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
+    let app = App {
+        runtime,
+        secret,
+        started: Arc::new(Mutex::new(Vec::new())),
+    };
     Router::new()
         .route("/start", post(start_handler))
         .route("/complete", post(complete_handler))
@@ -402,11 +407,23 @@ pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
             post(cancel_handler).layer(DefaultBodyLimit::max(0)),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(App {
-            runtime,
-            secret,
-            started: Arc::new(Mutex::new(Vec::new())),
-        })
+        .route_layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            authenticate,
+        ))
+        .with_state(app)
+}
+
+// Runs before handler extraction, including JSON parsing and body buffering.
+async fn authenticate(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if authorize(&app, request.headers()).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
 }
 
 fn provided_secret(headers: &HeaderMap) -> Option<&[u8]> {

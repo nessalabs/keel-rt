@@ -4405,3 +4405,26 @@ async fn chunked_response_is_bounded_without_content_length() {
     server.await.unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn unauthenticated_routes_reject_before_reading_any_body() {
+    let rt = Arc::new(Runtime::builder().build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    for route in ["start", "complete", "approve", "reject", "cancel/exec-x"] {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let headers = format!("POST /{route} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1);
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        // No body arrives. Authentication must complete without body extraction.
+        let mut response = [0; 1024];
+        let n = tokio::time::timeout(BOUND, stream.read(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 401"),
+            "{route}: {}",
+            String::from_utf8_lossy(&response[..n])
+        );
+    }
+    server.abort();
+}
+
