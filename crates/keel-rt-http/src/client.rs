@@ -132,12 +132,12 @@ impl KeelClient {
         builder
     }
 
-    /// Headers + hang-bound. Callers map status.
+    /// One deadline and byte cap cover headers and the complete response body.
     async fn send(
         &self,
         builder: hyper::http::request::Builder,
         body: Bytes,
-    ) -> Result<hyper::Response<hyper::body::Incoming>, KeelClientError> {
+    ) -> Result<hyper::Response<Bytes>, KeelClientError> {
         // The server can close while rejecting an unread oversized upload,
         // racing its 413 response with a transport error. Check wire bytes here.
         if body.len() > crate::MAX_BODY {
@@ -147,11 +147,27 @@ impl KeelClient {
             .with_secret(builder)
             .body(Full::new(body))
             .map_err(|e| KeelClientError::Transport(e.to_string()))?;
-        match tokio::time::timeout(self.hang_bound, self.http.request(req)).await {
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(e)) => Err(KeelClientError::Transport(e.to_string())),
-            Err(_) => Err(KeelClientError::Hung),
-        }
+        tokio::time::timeout(self.hang_bound, async {
+            let resp = self
+                .http
+                .request(req)
+                .await
+                .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+            let (parts, mut body) = resp.into_parts();
+            let mut bytes = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|e| KeelClientError::Transport(e.to_string()))?;
+                if let Ok(data) = frame.into_data() {
+                    if data.len() > crate::MAX_BODY - bytes.len() {
+                        return Err(KeelClientError::PayloadTooLarge);
+                    }
+                    bytes.extend_from_slice(&data);
+                }
+            }
+            Ok(hyper::Response::from_parts(parts, Bytes::from(bytes)))
+        })
+        .await
+        .map_err(|_| KeelClientError::Hung)?
     }
 
     /// `POST /start` — same secret and hang-bound as inspect / complete.
@@ -174,12 +190,7 @@ impl KeelClient {
             .await?;
         match resp.status().as_u16() {
             200 => {
-                let bytes = resp
-                    .into_body()
-                    .collect()
-                    .await
-                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
-                    .to_bytes();
+                let bytes = resp.into_body();
                 let view: StartView = serde_json::from_slice(&bytes)
                     .map_err(|e| KeelClientError::Transport(e.to_string()))?;
                 Ok(view.execution_id)
@@ -187,12 +198,7 @@ impl KeelClient {
             401 => Err(KeelClientError::Unauthorized),
             413 => Err(KeelClientError::PayloadTooLarge),
             400 => {
-                let bytes = resp
-                    .into_body()
-                    .collect()
-                    .await
-                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
-                    .to_bytes();
+                let bytes = resp.into_body();
                 if let Ok(body) = serde_json::from_slice::<UnregisteredBody>(&bytes) {
                     if body.error == "unregistered" && !body.executors.is_empty() {
                         return Err(KeelClientError::Unregistered {
@@ -218,12 +224,7 @@ impl KeelClient {
             .await?;
         match resp.status().as_u16() {
             200 => {
-                let bytes = resp
-                    .into_body()
-                    .collect()
-                    .await
-                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
-                    .to_bytes();
+                let bytes = resp.into_body();
                 let view: ExecutorsView = serde_json::from_slice(&bytes)
                     .map_err(|e| KeelClientError::Transport(e.to_string()))?;
                 Ok(view.executors)
@@ -249,12 +250,7 @@ impl KeelClient {
             .await?;
         match resp.status().as_u16() {
             200 => {
-                let bytes = resp
-                    .into_body()
-                    .collect()
-                    .await
-                    .map_err(|e| KeelClientError::Transport(e.to_string()))?
-                    .to_bytes();
+                let bytes = resp.into_body();
                 serde_json::from_slice(&bytes)
                     .map_err(|e| KeelClientError::Transport(e.to_string()))
             }
