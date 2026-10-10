@@ -258,16 +258,19 @@ async fn drive(
         let timer = scheduler.next_deadline();
         let heartbeat = scheduler.next_heartbeat();
         let event = next_drive_event(&mut rx, clock.as_ref(), timer, heartbeat).await;
+        if heartbeat.is_some_and(|at| at <= clock.now())
+            && !matches!(event, Event::Heartbeat | Event::Shutdown)
+            && scheduler.handle_event(Event::Heartbeat).await
+        {
+            forget_active(&active, &execution_id, &tx);
+            break;
+        }
         if matches!(event, Event::Cancel { .. }) {
             cancel_bound_guard.arm(tx.clone(), cancel_bound);
         }
-        // Start/Heartbeat returning true is a lost claim — drop live_tx so
-        // a later complete goes through the store/claim path, not inject.
-        let drop_live = matches!(event, Event::Start | Event::Heartbeat);
+        // A stopped drive must not remain an injection target.
         if scheduler.handle_event(event).await {
-            if drop_live {
-                forget_active(&active, &execution_id, &tx);
-            }
+            forget_active(&active, &execution_id, &tx);
             break;
         }
     }
@@ -439,41 +442,57 @@ impl Runtime {
         tx: EventTx,
         rx: EventRx,
     ) -> Result<ExecutionHandle, ResumeError> {
-        let snap = self
-            .store
+        // Existence preflight must not claim or release a lease-only reservation.
+        // This snapshot is discarded; authoritative state is loaded after claim.
+        self.store
             .get(execution_id)
             .await?
             .ok_or(ResumeError::UnknownExecution)?;
-        let definition = self
-            .store
-            .workflow_definition(execution_id)
-            .await?
-            .ok_or(ResumeError::DefinitionMissing)?;
-        let mut exec = Execution::from_snapshot(definition, snap)?;
-        if let Some(missing) = self.missing_executors(exec.definition()) {
-            return Err(ResumeError::UnregisteredExecutors(missing));
-        }
         let epoch = self
             .store
             .claim(execution_id, &self.owner, self.clock.now())
             .await?;
-        exec.set_fence_epoch(epoch.0);
-        if recover == Recover::RetryFailed {
-            match exec.apply(
-                ApplyCmd::RetryFailed,
-                self.policy.as_ref(),
-                self.clock.now(),
-            ) {
-                Ok(_) => {}
-                Err(ApplyError::Illegal(_)) => {
-                    let _ = self.store.release(execution_id, epoch).await;
-                    return Err(ResumeError::NotFailed);
-                }
-                Err(e) => unreachable!("RetryFailed apply returns only Illegal, got {e}"),
+        let prepared = async {
+            let snap = self
+                .store
+                .get(execution_id)
+                .await?
+                .ok_or(ResumeError::UnknownExecution)?;
+            let definition = self
+                .store
+                .workflow_definition(execution_id)
+                .await?
+                .ok_or(ResumeError::DefinitionMissing)?;
+            let mut exec = Execution::from_snapshot(definition, snap)?;
+            if let Some(missing) = self.missing_executors(exec.definition()) {
+                return Err(ResumeError::UnregisteredExecutors(missing));
             }
-            // Persist recovered snapshot before dispatch. CAS still applies.
-            self.store.persist(&exec).await?;
+            exec.set_fence_epoch(epoch.0);
+            if recover == Recover::RetryFailed {
+                match exec.apply(
+                    ApplyCmd::RetryFailed,
+                    self.policy.as_ref(),
+                    self.clock.now(),
+                ) {
+                    Ok(_) => {}
+                    Err(ApplyError::Illegal(_)) => {
+                        return Err(ResumeError::NotFailed);
+                    }
+                    Err(e) => unreachable!("RetryFailed apply returns only Illegal, got {e}"),
+                }
+                // Persist recovered snapshot before dispatch. CAS still applies.
+                self.store.persist(&exec).await?;
+            }
+            Ok::<_, ResumeError>(exec)
         }
+        .await;
+        let exec = match prepared {
+            Ok(exec) => exec,
+            Err(e) => {
+                let _ = self.store.release(execution_id, epoch).await;
+                return Err(e);
+            }
+        };
         Ok(self.spawn_execution(exec, active, tx, rx, Event::Restore))
     }
 
@@ -584,31 +603,41 @@ impl Runtime {
     }
 
     async fn cancel_from_store(&self, id: &ExecutionId) -> Result<(), CancelError> {
-        let snap = self
-            .store
+        // Existence preflight must not claim or release a lease-only reservation.
+        // This snapshot is discarded; authoritative state is loaded after claim.
+        self.store
             .get(id)
             .await?
             .ok_or(CancelError::UnknownExecution)?;
-        if snap.state.is_terminal() {
-            return Ok(());
-        }
-        let definition = self
-            .store
-            .workflow_definition(id)
-            .await?
-            .ok_or(CancelError::UnknownExecution)?;
-        let mut exec = Execution::from_snapshot(definition, snap)?;
-        if exec.state().is_terminal() {
-            return Ok(());
-        }
         let epoch = self.store.claim(id, &self.owner, self.clock.now()).await?;
-        exec.set_fence_epoch(epoch.0);
-        let _ = exec.apply(ApplyCmd::Cancel, self.policy.as_ref(), self.clock.now());
-        if let Err(e) = self.store.persist(&exec).await {
-            let _ = self.store.release(id, epoch).await;
-            return Err(CancelError::Store(e));
+        let prepared = async {
+            let snap = self
+                .store
+                .get(id)
+                .await?
+                .ok_or(CancelError::UnknownExecution)?;
+            if snap.state.is_terminal() {
+                return Ok(None);
+            }
+            let definition = self
+                .store
+                .workflow_definition(id)
+                .await?
+                .ok_or(CancelError::UnknownExecution)?;
+            let mut exec = Execution::from_snapshot(definition, snap)?;
+            if exec.state().is_terminal() {
+                return Ok(None);
+            }
+            exec.set_fence_epoch(epoch.0);
+            let _ = exec.apply(ApplyCmd::Cancel, self.policy.as_ref(), self.clock.now());
+            if let Err(e) = self.store.persist(&exec).await {
+                return Err(CancelError::Store(e));
+            }
+            Ok::<_, CancelError>(Some(exec))
         }
+        .await;
         let _ = self.store.release(id, epoch).await;
+        let _ = prepared?;
         Ok(())
     }
 
@@ -629,43 +658,59 @@ impl Runtime {
         resume: Resume,
     ) -> Result<(), CompleteError> {
         let id = token.execution_id().clone();
-        let snap = self
-            .store
+        // Existence preflight must not claim or release a lease-only reservation.
+        // This snapshot is discarded; authoritative state is loaded after claim.
+        self.store
             .get(&id)
             .await?
             .ok_or(CompleteError::UnknownToken)?;
-        if snap.state == ExecutionState::Cancelled {
-            return Err(CompleteError::Cancelled);
-        }
-        let definition = self
-            .store
-            .workflow_definition(&id)
-            .await?
-            .ok_or(CompleteError::UnknownToken)?;
-        if let Some(missing) = self.missing_executors(&definition) {
-            return Err(CompleteError::UnregisteredExecutors(missing));
-        }
-        let mut exec = Execution::from_snapshot(definition, snap)?;
-        if exec.state() == ExecutionState::Cancelled {
-            return Err(CompleteError::Cancelled);
-        }
         let epoch = self.store.claim(&id, &self.owner, self.clock.now()).await?;
-        exec.set_fence_epoch(epoch.0);
-        let applied = exec.apply(
-            ApplyCmd::Resume {
-                token: token.clone(),
-                resume: resume.clone(),
-            },
-            self.policy.as_ref(),
-            self.clock.now(),
-        );
-        if let Err(e) = applied {
-            let _ = self.store.release(&id, epoch).await;
-            return self.map_complete_apply(Err(e));
+        let prepared = async {
+            let snap = self
+                .store
+                .get(&id)
+                .await?
+                .ok_or(CompleteError::UnknownToken)?;
+            if snap.state == ExecutionState::Cancelled {
+                return Err(CompleteError::Cancelled);
+            }
+            let definition = self
+                .store
+                .workflow_definition(&id)
+                .await?
+                .ok_or(CompleteError::UnknownToken)?;
+            if let Some(missing) = self.missing_executors(&definition) {
+                return Err(CompleteError::UnregisteredExecutors(missing));
+            }
+            let mut exec = Execution::from_snapshot(definition, snap)?;
+            if exec.state() == ExecutionState::Cancelled {
+                return Err(CompleteError::Cancelled);
+            }
+            exec.set_fence_epoch(epoch.0);
+            let applied = exec.apply(
+                ApplyCmd::Resume {
+                    token: token.clone(),
+                    resume: resume.clone(),
+                },
+                self.policy.as_ref(),
+                self.clock.now(),
+            );
+            if let Err(e) = applied {
+                return self.map_complete_apply(Err(e)).map(|()| exec);
+            }
+            if let Err(e) = self.store.persist(&exec).await {
+                return Err(CompleteError::Store(e));
+            }
+            Ok::<_, CompleteError>(exec)
         }
-        if let Err(e) = self.store.persist(&exec).await {
-            return Err(CompleteError::Store(e));
-        }
+        .await;
+        let exec = match prepared {
+            Ok(exec) => exec,
+            Err(e) => {
+                let _ = self.store.release(&id, epoch).await;
+                return Err(e);
+            }
+        };
         if exec.state().is_terminal() {
             let _ = self.store.release(&id, epoch).await;
             return Ok(());

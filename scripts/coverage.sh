@@ -33,6 +33,7 @@ TESTS=(
   --test durable_start
   --test events
   --test graph
+  --test lease_security
   --test resilience
   --test resume
   --test timers
