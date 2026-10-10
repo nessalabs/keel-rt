@@ -192,3 +192,25 @@ other binary does not open the sqlite file while A lives. ADR 0004.
 | A delayed starter respects persisted cancellation | `test: delayed_durable_start_must_not_resurrect_cancelled_execution` |
 | Released SQLite tokens cannot regain authority or release successors | `test: released_successor_must_not_make_old_lease_epoch_valid_again`, `test: released_leases_reject_writes_and_cannot_release_successors` |
 | A stopped handle cannot unregister a newer live drive for the same execution | `test: dropping_stopped_durable_handle_preserves_its_live_successor` |
+
+## Security recovery ordering
+
+The drive validates a due heartbeat after waking and before advancing an inbox
+event. It persists the Running batch before invoking executors. Epoch, revision,
+and equal-content conflicts stop the drive and remove its injection target.
+Generic store outages retain the existing in-memory progress contract, but
+launches require lease validation after the failed persistence attempt. Such
+outages do not promise a durable Running record.
+
+Resume, offline completion, and offline cancellation discard their existence
+preflight snapshot and reload state and definition under the acquired lease.
+Equal-revision writes are retries only if their complete snapshot content
+matches; otherwise both stores return `StoreError::Conflict`.
+
+| Guarantee | Proof |
+|---|---|
+| Running persists before executor invocation | `test: running_transition_is_stored_before_executor_invocation` |
+| Queued completion cannot bypass due heartbeat | `test: queued_completion_after_due_heartbeat_cannot_launch_successor` |
+| Stale persistence stops successor launch | `test: stale_persist_stops_before_successor_without_due_heartbeat` |
+| Resume and completion reload cancellation at claim | `test: resume_reads_cancellation_committed_at_claim`, `test: offline_complete_reads_cancellation_committed_at_claim`, `test: crash_resume_observes_cancellation_committed_at_claim` (real SQLite file) |
+| Equal revision requires identical content | `test: memory_equal_revision_requires_identical_content`, `test: equal_revision_conflict_is_rejected_on_real_file` |

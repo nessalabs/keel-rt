@@ -8,7 +8,7 @@ Implement `ComponentTask`, load the component, and register the resulting
 `WasmExecutor` like any other executor:
 
 ```rust,ignore
-let wasm = WasmExecutor::from_file("transform", "user-component.wasm", MyBindings, Limits::default())?;
+let wasm = WasmExecutor::from_trusted_file("transform", "user-component.wasm", MyBindings, Limits::default())?;
 let rt = Runtime::builder().register(wasm).build();
 let state = rt.run(definition).await?;
 ```
@@ -46,7 +46,7 @@ check workflow and verifies that predecessor bytes survive the component call.
 [`examples/echo.wit`](examples/echo.wit) defines that application's interface.
 [`examples/echo.wat`](examples/echo.wat) is a runnable implementation, so the
 example needs no extra guest compiler. A compiled `.wasm` component implementing
-the same world can replace it with `from_file`.
+the same world can replace it with `from_trusted_file`.
 
 For your own component, compile your language's implementation into a Component
 Model binary exporting your chosen WIT world. A core Wasm module alone is not a
@@ -100,6 +100,22 @@ should bound payloads and any host-side work they expose.
 Return `Waiting { token: ctx.resume_token }` to park a node and use Keel's normal
 completion APIs. Return `Failed`, `TimedOut`, or `Succeeded` to apply the
 application's outcome semantics. The adapter does not reinterpret guest values.
+
+## Construction trust boundary
+
+`new_trusted` and `from_trusted_file` replace `new` and `from_file`: callers must
+explicitly restrict construction to trusted, pre-vetted application components.
+Both reject source larger than `MAX_COMPONENT_BYTES` (1 MiB) before compilation.
+File loading requires a regular file, checks its size before allocating, and
+bounds the read even if the file grows. Invocation `Limits` cover guest
+initialization and execution, not component parsing or compilation.
+
+Do not pass tenant uploads or user-selected components to these constructors.
+A service accepting less-trusted components must compile in a separate process
+with an OS memory/CPU budget and a wall-clock deadline. Running compilation on
+a background thread or timing out its future does not stop the compiler or
+bound its allocations. This adapter intentionally offers no untrusted-input
+constructor or native compiled artifact deserialization.
 
 ## Development
 

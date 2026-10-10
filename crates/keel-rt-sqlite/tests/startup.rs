@@ -464,3 +464,101 @@ async fn failed_initial_snapshot_transaction_preserves_placeholder() {
         exec.snapshot()
     );
 }
+
+#[tokio::test]
+async fn equal_revision_conflict_is_rejected_on_real_file() {
+    let db = Database::new();
+    let store = db.open();
+    let mut original = execution();
+    original
+        .apply(ApplyCmd::Start, &AcceptPolicy, Timestamp(0))
+        .unwrap();
+    store.persist(&original).await.unwrap();
+    let snapshot = original.snapshot();
+    store.put(&snapshot).await.unwrap();
+    let mut conflicting = snapshot.clone();
+    conflicting.state = ExecutionState::Cancelled;
+    assert_eq!(
+        store.put(&conflicting).await,
+        Err(StoreError::Conflict {
+            revision: snapshot.revision
+        })
+    );
+    let restored = Execution::from_snapshot(original.definition().clone(), conflicting).unwrap();
+    assert_eq!(
+        store.persist(&restored).await,
+        Err(StoreError::Conflict {
+            revision: snapshot.revision
+        })
+    );
+    drop(store);
+    assert_eq!(
+        db.open().get(original.id()).await.unwrap().unwrap(),
+        snapshot
+    );
+}
+
+#[tokio::test]
+async fn crash_resume_observes_cancellation_committed_at_claim() {
+    use async_trait::async_trait;
+    use keel_rt::{ExecutionSnapshot, LeaseEpoch};
+    struct CancelAtClaim(SqliteStore);
+    #[async_trait]
+    impl StateStore for CancelAtClaim {
+        async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+            self.0.put(snapshot).await
+        }
+        async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
+            self.0.get(id).await
+        }
+        async fn workflow_definition(
+            &self,
+            id: &ExecutionId,
+        ) -> Result<Option<WorkflowDefinition>, StoreError> {
+            self.0.workflow_definition(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            self.0.persist(exec).await
+        }
+        async fn claim(
+            &self,
+            id: &ExecutionId,
+            owner: &OwnerId,
+            now: Timestamp,
+        ) -> Result<LeaseEpoch, ClaimError> {
+            let epoch = self.0.claim(id, owner, now).await?;
+            let snap = self.0.get(id).await?.unwrap();
+            let mut exec =
+                Execution::from_snapshot(self.0.workflow_definition(id).await?.unwrap(), snap)
+                    .unwrap();
+            exec.set_fence_epoch(epoch.0);
+            exec.apply(ApplyCmd::Cancel, &AcceptPolicy, now).unwrap();
+            self.0.persist(&exec).await?;
+            Ok(epoch)
+        }
+    }
+    let db = Database::new();
+    let store = db.open();
+    let original = execution();
+    let id = original.id().clone();
+    store.persist(&original).await.unwrap();
+    drop(store);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observe = calls.clone();
+    let runtime = Runtime::builder()
+        .store(CancelAtClaim(db.open()))
+        .register_fn("a", move |_| {
+            observe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { keel_rt::NodeOutcome::succeeded(Vec::new()) }
+        })
+        .build();
+    assert_eq!(
+        runtime.resume(&id).await.unwrap().wait().await,
+        ExecutionState::Cancelled
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        db.open().get(&id).await.unwrap().unwrap().state,
+        ExecutionState::Cancelled
+    );
+}

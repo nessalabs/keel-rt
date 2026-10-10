@@ -4350,3 +4350,103 @@ async fn client_live_approve_persist_err_is_not_ok() {
     let _ = id;
     server.abort();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn response_body_stall_shares_request_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        stream.read(&mut request).await.unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let client = client_at(addr).hang_bound(Duration::from_millis(30));
+    let err = tokio::time::timeout(BOUND, client.executors())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(err, KeelClientError::Hung), "{err:?}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chunked_response_is_bounded_without_content_length() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        stream.read(&mut request).await.unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        let chunk = vec![b'x'; 8192];
+        for _ in 0..=(MAX_BODY / chunk.len()) {
+            if stream.write_all(b"2000\r\n").await.is_err() {
+                return;
+            }
+            if stream.write_all(&chunk).await.is_err() {
+                return;
+            }
+            if stream.write_all(b"\r\n").await.is_err() {
+                return;
+            }
+        }
+        let _ = stream.write_all(b"0\r\n\r\n").await;
+    });
+    let err = client_at(addr).executors().await.unwrap_err();
+    assert!(matches!(err, KeelClientError::PayloadTooLarge), "{err:?}");
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unauthenticated_routes_reject_before_reading_any_body() {
+    let rt = Arc::new(Runtime::builder().build());
+    let (addr, server) = serve_ephemeral(rt, secret()).await.unwrap();
+    for route in ["start", "complete", "approve", "reject", "cancel/exec-x"] {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let headers = format!("POST /{route} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1);
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        // No body arrives. Authentication must complete without body extraction.
+        let mut response = [0; 1024];
+        let n = tokio::time::timeout(BOUND, stream.read(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 401"),
+            "{route}: {}",
+            String::from_utf8_lossy(&response[..n])
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn plaintext_transport_rejects_non_loopback_addresses() {
+    for base in [
+        "http://192.0.2.1:80",
+        "http://example.com",
+        "http://localhost",
+        "https://127.0.0.1",
+        "http://0.0.0.0",
+        "http://[::]",
+    ] {
+        assert!(KeelClient::new(base, secret()).is_err(), "{base}");
+    }
+    assert!(KeelClient::new("http://[::1]:1", secret()).is_ok());
+    let err = keel_rt_http::serve_on(
+        Arc::new(Runtime::builder().build()),
+        secret(),
+        "0.0.0.0:0".parse().unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}

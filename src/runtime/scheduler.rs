@@ -10,7 +10,9 @@ use crate::runtime::executor::{ExecutionContext, Executor, ExecutorRegistry};
 use crate::runtime::inject::{Event, EventTx};
 use crate::runtime::sink::EventSink;
 use crate::runtime::spawn::{CatchUnwind, SpawnSet};
-use crate::runtime::store::{ClaimError, LeaseEpoch, OwnerId, StateStore, DEFAULT_LEASE_TTL};
+use crate::runtime::store::{
+    ClaimError, LeaseEpoch, OwnerId, StateStore, StoreError, DEFAULT_LEASE_TTL,
+};
 use crate::runtime::time::{Clock, Timestamp};
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
@@ -38,6 +40,7 @@ pub(crate) struct Scheduler {
     owner: OwnerId,
     epoch: Option<LeaseEpoch>,
     last_heartbeat: Timestamp,
+    lost_lease: bool,
 }
 
 /// Extra persist attempts on `Event::Shutdown` after the command that produced
@@ -89,6 +92,7 @@ impl Scheduler {
             owner,
             epoch: None,
             last_heartbeat,
+            lost_lease: false,
         }
     }
 
@@ -137,6 +141,7 @@ impl Scheduler {
             owner,
             epoch,
             last_heartbeat,
+            lost_lease: false,
         }
     }
 
@@ -202,8 +207,7 @@ impl Scheduler {
                     self.enqueue_dispatchable();
                     let _ = self.state_tx.send(self.exec.state());
                 }
-                self.dispatch();
-                self.persist_then_emit().await;
+                self.dispatch().await;
             }
             Event::Restore => {
                 if self.exec.state() == ExecutionState::Created {
@@ -211,8 +215,7 @@ impl Scheduler {
                 } else {
                     self.enqueue_dispatchable();
                 }
-                self.dispatch();
-                self.persist_then_emit().await;
+                self.dispatch().await;
             }
             Event::NodeFinished {
                 slot,
@@ -238,8 +241,7 @@ impl Scheduler {
                         });
                     }
                 }
-                self.dispatch();
-                self.persist_then_emit().await;
+                self.dispatch().await;
             }
             Event::Resume {
                 token,
@@ -249,8 +251,7 @@ impl Scheduler {
                 let r = self.apply_cmd_result(ApplyCmd::Resume { token, resume });
                 match r {
                     Ok(()) => {
-                        self.dispatch();
-                        if self.persist_then_emit().await {
+                        if self.dispatch().await {
                             let _ = reply.send(Ok(()));
                         } else {
                             let _ = reply.send(Err(crate::domain::state::ApplyError::Illegal(
@@ -307,8 +308,7 @@ impl Scheduler {
                     }
                     self.apply_cmd(ApplyCmd::RetryDue { node_id: id });
                 }
-                self.dispatch();
-                self.persist_then_emit().await;
+                self.dispatch().await;
             }
             Event::ForceCancelBound => {
                 warn!("cancel bound elapsed; aborting remaining execute tasks");
@@ -334,7 +334,7 @@ impl Scheduler {
                 return true;
             }
         }
-        false
+        self.lost_lease
     }
 
     fn apply_cmd(&mut self, cmd: ApplyCmd) {
@@ -356,7 +356,8 @@ impl Scheduler {
         Ok(())
     }
 
-    fn dispatch(&mut self) {
+    async fn dispatch(&mut self) -> bool {
+        let mut launches = Vec::new();
         while self.available > 0 {
             let Some(slot) = self.ready.pop_front() else {
                 break;
@@ -371,8 +372,21 @@ impl Scheduler {
             });
             self.available -= 1;
             self.held[slot.0] = 1;
-            self.launch_slot(slot, id);
+            launches.push((slot, id));
         }
+        // Fence every Running transition before invoking application code.
+        let persisted = self.persist_then_emit().await;
+        // Generic backend outages retain the existing in-memory progress
+        // contract, but cannot bypass lease validation before external effects.
+        if !launches.is_empty() && !persisted && !self.lost_lease && !self.extend_lease().await {
+            self.lost_lease = true;
+        }
+        if !self.lost_lease {
+            for (slot, id) in launches {
+                self.launch_slot(slot, id);
+            }
+        }
+        persisted
     }
 
     /// Persist the durable snapshot, then announce. A failed persist keeps
@@ -396,9 +410,17 @@ impl Scheduler {
                 self.emit_events(&events);
                 return true;
             }
+            if self.lost_lease {
+                break;
+            }
             // Persist Err/panic: keep pending_events. Taking them on failure
             // dropped ExecutionStarted after a later persist Ok of the same
             // snapshot (and Shutdown retried with an empty slice).
+        }
+        if self.exec.state().is_terminal() {
+            if let Some(epoch) = self.epoch.take() {
+                let _ = self.store.release(self.exec.id(), epoch).await;
+            }
         }
         false
     }
@@ -429,11 +451,17 @@ impl Scheduler {
                 return true;
             }
         }
+        let previous_epoch = self.epoch;
         // Drop Runtime releases; the drive may still be running (temporary
         // Runtime in tests). Re-claim as the same owner. Another owner
         // with a live lease is ClaimedElsewhere — stop without cancel.
         match self.store.claim(self.exec.id(), &self.owner, now).await {
             Ok(epoch) => {
+                if previous_epoch != Some(epoch) {
+                    let _ = self.store.release(self.exec.id(), epoch).await;
+                    self.epoch = None;
+                    return false;
+                }
                 self.epoch = Some(epoch);
                 self.exec.set_fence_epoch(epoch.0);
                 self.last_heartbeat = now;
@@ -470,6 +498,14 @@ impl Scheduler {
                 true
             }
             Ok(Err(e)) => {
+                if matches!(
+                    e,
+                    StoreError::StaleEpoch { .. }
+                        | StoreError::Stale { .. }
+                        | StoreError::Conflict { .. }
+                ) {
+                    self.lost_lease = true;
+                }
                 debug!(error = %e, "StateStore::put failed; in-memory state kept");
                 // Do not advance last_persisted: the next persist_then_emit
                 // (including Shutdown) must retry this revision. Treating Err

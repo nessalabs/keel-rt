@@ -12,7 +12,7 @@ A **shared secret is required** on every route. Send
 or wrong secret is **401**. Query-string secrets are ignored.
 
 Default bind is **`127.0.0.1`** (`DEFAULT_BIND` / `serve` / `serve_ephemeral`).
-`0.0.0.0` only via explicit `serve_on`. Request JSON larger than **1 MiB**
+`serve_on` rejects non-loopback addresses; remote access requires protected transport. Request JSON larger than **1 MiB**
 (`MAX_BODY`) is **413** and does not call start or complete. Inspect JSON
 larger than **1 MiB** is the same **413** — compact base64 is not a cap.
 
@@ -108,3 +108,17 @@ client.cancel(&id).await?; // one execution; later approve is 409
 
 Serve `keel_rt_http::router(Arc<Runtime>, secret)` or `serve` / `serve_on` /
 `serve_ephemeral`. Delete this crate without editing `scheduler.rs`.
+
+## Transport and body bounds
+
+The built-in plaintext server only binds literal loopback addresses, and
+`KeelClient` only connects to literal loopback HTTP URLs (IPv4 or IPv6). Hostnames
+are rejected to avoid DNS resolving outside loopback. Use a local TLS tunnel for
+a remote client, or serve `router` behind a TLS proxy. Applications embedding
+`router` own their TLS configuration. Non-loopback `serve_on` returns
+`InvalidInput` before opening a listener.
+
+Authentication runs before request-body buffering or JSON extraction. The client
+uses one deadline for headers and all response frames, with a `MAX_BODY` byte
+cap even on chunked responses and error bodies. A stalled response is `Hung`;
+an oversized response is `PayloadTooLarge`.
