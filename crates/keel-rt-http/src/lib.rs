@@ -694,12 +694,18 @@ pub async fn serve(runtime: Arc<Runtime>, secret: CompleteSecret) -> std::io::Re
     serve_on(runtime, secret, DEFAULT_BIND).await
 }
 
-/// Explicit address. `0.0.0.0` only if the caller passes it.
+/// Plaintext serving requires loopback. Use a TLS proxy for remote access.
 pub async fn serve_on(
     runtime: Arc<Runtime>,
     secret: CompleteSecret,
     addr: SocketAddr,
 ) -> std::io::Result<()> {
+    if !addr.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "plaintext HTTP serving requires loopback; use a TLS proxy for remote access",
+        ));
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(runtime, secret)).await
 }

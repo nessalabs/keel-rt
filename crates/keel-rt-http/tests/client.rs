@@ -4428,3 +4428,25 @@ async fn unauthenticated_routes_reject_before_reading_any_body() {
     server.abort();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn plaintext_transport_rejects_non_loopback_addresses() {
+    for base in [
+        "http://192.0.2.1:80",
+        "http://example.com",
+        "http://localhost",
+        "https://127.0.0.1",
+        "http://0.0.0.0",
+        "http://[::]",
+    ] {
+        assert!(KeelClient::new(base, secret()).is_err(), "{base}");
+    }
+    assert!(KeelClient::new("http://[::1]:1", secret()).is_ok());
+    let err = keel_rt_http::serve_on(
+        Arc::new(Runtime::builder().build()),
+        secret(),
+        "0.0.0.0:0".parse().unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}

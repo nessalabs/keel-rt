@@ -99,6 +99,19 @@ impl KeelClient {
     }
 
     fn build(base_url: &str, secret: Option<CompleteSecret>) -> Result<Self, KeelClientError> {
+        let uri = base_url
+            .parse::<Uri>()
+            .map_err(|e| KeelClientError::Transport(e.to_string()))?;
+        let loopback = uri.host().is_some_and(|host| {
+            host.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        });
+        if uri.scheme_str() != Some("http") || !loopback {
+            return Err(KeelClientError::Transport(
+                "plaintext HTTP client requires a literal loopback address; use a local TLS tunnel for remote servers".into(),
+            ));
+        }
         Ok(Self {
             http: Client::builder(TokioExecutor::new()).build_http(),
             base: base_url.trim_end_matches('/').to_string(),
