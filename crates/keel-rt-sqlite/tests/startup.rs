@@ -562,3 +562,107 @@ async fn crash_resume_observes_cancellation_committed_at_claim() {
         ExecutionState::Cancelled
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_commit_then_takeover_cannot_launch_sqlite_successor() {
+    use async_trait::async_trait;
+    use keel_rt::{ExecutionSnapshot, LeaseEpoch, NodeId, NodeState};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    struct TakeoverAfterCommit {
+        inner: SqliteStore,
+        taken: AtomicBool,
+    }
+    #[async_trait]
+    impl StateStore for TakeoverAfterCommit {
+        async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+            self.inner.put(snapshot).await
+        }
+        async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
+            self.inner.get(id).await
+        }
+        async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+            self.inner.persist(exec).await?;
+            if matches!(
+                exec.snapshot().node(&NodeId::new("next")).unwrap().state,
+                NodeState::Running { .. }
+            ) && !self.taken.swap(true, Ordering::SeqCst)
+            {
+                self.inner
+                    .claim(exec.id(), &OwnerId::new(), Timestamp(31_000))
+                    .await
+                    .unwrap();
+            }
+            Ok(())
+        }
+        async fn claim(
+            &self,
+            id: &ExecutionId,
+            owner: &OwnerId,
+            now: Timestamp,
+        ) -> Result<LeaseEpoch, ClaimError> {
+            self.inner.claim(id, owner, now).await
+        }
+        async fn heartbeat(
+            &self,
+            id: &ExecutionId,
+            epoch: LeaseEpoch,
+            now: Timestamp,
+        ) -> Result<(), ClaimError> {
+            self.inner.heartbeat(id, epoch, now).await
+        }
+        async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
+            self.inner.release(id, epoch).await
+        }
+    }
+    let db = Database::new();
+    let store = db.open();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let invoked = calls.clone();
+    let runtime = Runtime::builder()
+        .clock(Arc::new(keel_rt::FakeClock::new()))
+        .store(TakeoverAfterCommit {
+            inner: store.clone(),
+            taken: AtomicBool::new(false),
+        })
+        .register_fn("first", |_| async {
+            keel_rt::NodeOutcome::succeeded(Vec::new())
+        })
+        .register_fn("next", move |_| {
+            invoked.fetch_add(1, Ordering::SeqCst);
+            async { keel_rt::NodeOutcome::succeeded(Vec::new()) }
+        })
+        .build();
+    let handle = runtime
+        .start(
+            WorkflowDefinition::builder("post-commit")
+                .node("first", "first")
+                .node("next", "next")
+                .edge("first", "next")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    let id = handle.execution_id().clone();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "stale owner invoked SQLite successor"
+    );
+    assert!(matches!(
+        db.open()
+            .get(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .node(&NodeId::new("next"))
+            .unwrap()
+            .state,
+        NodeState::Running { .. }
+    ));
+}

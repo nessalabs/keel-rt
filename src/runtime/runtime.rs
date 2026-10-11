@@ -1565,11 +1565,14 @@ mod tests {
         }
         async fn heartbeat(
             &self,
-            _: &ExecutionId,
-            _: crate::runtime::store::LeaseEpoch,
-            _: Timestamp,
+            id: &ExecutionId,
+            epoch: crate::runtime::store::LeaseEpoch,
+            now: Timestamp,
         ) -> Result<(), ClaimError> {
-            Err(ClaimError::ClaimedElsewhere)
+            if now >= Timestamp(0).saturating_add(crate::runtime::store::DEFAULT_LEASE_TTL / 3) {
+                return Err(ClaimError::ClaimedElsewhere);
+            }
+            self.inner.heartbeat(id, epoch, now).await
         }
         fn release_owner_now(&self, owner: &OwnerId) {
             self.inner.release_owner_now(owner);
@@ -1594,13 +1597,22 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
+        let id = handle.execution_id().clone();
         assert_eq!(handle.wait_stable().await, ExecutionState::Waiting);
         *clock.now.lock().unwrap() =
             Timestamp(0).saturating_add(crate::runtime::store::DEFAULT_LEASE_TTL / 3);
         clock.tick.notify_waiters();
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-        drop(handle);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), handle.wait())
+                .await
+                .unwrap(),
+            ExecutionState::Cancelled,
+        );
+        // Closed watch means this drive stopped. It did not apply Cancel.
+        assert_eq!(
+            rt.inspect(&id).await.unwrap().state,
+            ExecutionState::Waiting
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

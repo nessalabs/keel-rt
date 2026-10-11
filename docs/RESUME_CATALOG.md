@@ -199,8 +199,8 @@ The drive validates a due heartbeat after waking and before advancing an inbox
 event. It persists the Running batch before invoking executors. Epoch, revision,
 and equal-content conflicts stop the drive and remove its injection target.
 Generic store outages retain the existing in-memory progress contract, but
-launches require lease validation after the failed persistence attempt. Such
-outages do not promise a durable Running record.
+launches require lease validation after every persistence attempt, including
+successful writes delayed after COMMIT. Such outages do not promise a durable Running record.
 
 Resume, offline completion, and offline cancellation discard their existence
 preflight snapshot and reload state and definition under the acquired lease.
@@ -214,3 +214,4 @@ matches; otherwise both stores return `StoreError::Conflict`.
 | Stale persistence stops successor launch | `test: stale_persist_stops_before_successor_without_due_heartbeat` |
 | Resume and completion reload cancellation at claim | `test: resume_reads_cancellation_committed_at_claim`, `test: offline_complete_reads_cancellation_committed_at_claim`, `test: crash_resume_observes_cancellation_committed_at_claim` (real SQLite file) |
 | Equal revision requires identical content | `test: memory_equal_revision_requires_identical_content`, `test: equal_revision_conflict_is_rejected_on_real_file` |
+| Takeover after successful Running commit cannot invoke stale work | `test: takeover_after_successful_initial_commit_prevents_launch`, `test: takeover_after_successful_successor_commit_prevents_launch`, `test: successful_commit_then_takeover_cannot_launch_sqlite_successor` (real SQLite file) |

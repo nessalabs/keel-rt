@@ -278,3 +278,103 @@ async fn memory_equal_revision_requires_identical_content() {
         })
     );
 }
+
+// A successful store call can return after COMMIT and lease takeover. The
+// scheduler must treat persistence and launch authorization as separate facts.
+struct TakeoverAfterCommit {
+    inner: MemoryStore,
+    target: NodeId,
+    taken: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl StateStore for TakeoverAfterCommit {
+    async fn put(&self, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+        self.inner.put(snapshot).await
+    }
+    async fn get(&self, id: &ExecutionId) -> Result<Option<ExecutionSnapshot>, StoreError> {
+        self.inner.get(id).await
+    }
+    async fn persist(&self, exec: &Execution) -> Result<(), StoreError> {
+        self.inner.persist(exec).await?;
+        if matches!(
+            exec.snapshot().node(&self.target).unwrap().state,
+            NodeState::Running { .. }
+        ) && !self.taken.swap(true, Ordering::SeqCst)
+        {
+            self.inner
+                .claim(exec.id(), &OwnerId::new(), Timestamp(31_000))
+                .await
+                .unwrap();
+        }
+        Ok(())
+    }
+    async fn claim(
+        &self,
+        id: &ExecutionId,
+        owner: &OwnerId,
+        now: Timestamp,
+    ) -> Result<LeaseEpoch, ClaimError> {
+        self.inner.claim(id, owner, now).await
+    }
+    async fn heartbeat(
+        &self,
+        id: &ExecutionId,
+        epoch: LeaseEpoch,
+        now: Timestamp,
+    ) -> Result<(), ClaimError> {
+        self.inner.heartbeat(id, epoch, now).await
+    }
+    async fn release(&self, id: &ExecutionId, epoch: LeaseEpoch) -> Result<(), StoreError> {
+        self.inner.release(id, epoch).await
+    }
+}
+
+async fn verify_takeover_after_commit(successor: bool) {
+    let inner = MemoryStore::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let invoked = calls.clone();
+    let runtime = Runtime::builder()
+        .clock(Arc::new(FakeClock::new()))
+        .store(TakeoverAfterCommit {
+            inner: inner.clone(),
+            target: NodeId::new("target"),
+            taken: std::sync::atomic::AtomicBool::new(false),
+        })
+        .register_fn("first", |_| async { NodeOutcome::succeeded(Vec::new()) })
+        .register_fn("target", move |_| {
+            invoked.fetch_add(1, Ordering::SeqCst);
+            async { NodeOutcome::succeeded(Vec::new()) }
+        })
+        .build();
+    let mut definition = WorkflowDefinition::builder("post-commit").node("target", "target");
+    if successor {
+        definition = definition.node("first", "first").edge("first", "target");
+    }
+    let handle = runtime.start(definition.build().unwrap()).unwrap();
+    let id = handle.execution_id().clone();
+    let _ = tokio::time::timeout(BOUND, handle.wait()).await.unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "stale owner invoked code after successful delayed commit"
+    );
+    let snapshot = inner.get(&id).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.node(&NodeId::new("target")).unwrap().state,
+            NodeState::Running { .. }
+        ),
+        "the Running transition committed before takeover"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn takeover_after_successful_initial_commit_prevents_launch() {
+    verify_takeover_after_commit(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn takeover_after_successful_successor_commit_prevents_launch() {
+    verify_takeover_after_commit(true).await;
+}

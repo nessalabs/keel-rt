@@ -376,9 +376,9 @@ impl Scheduler {
         }
         // Fence every Running transition before invoking application code.
         let persisted = self.persist_then_emit().await;
-        // Generic backend outages retain the existing in-memory progress
-        // contract, but cannot bypass lease validation before external effects.
-        if !launches.is_empty() && !persisted && !self.lost_lease && !self.extend_lease().await {
+        // Persistence may return long after COMMIT. Validate ownership at launch
+        // even when the write succeeded; its epoch may already be superseded.
+        if !launches.is_empty() && !self.lost_lease && !self.extend_lease().await {
             self.lost_lease = true;
         }
         if !self.lost_lease {
