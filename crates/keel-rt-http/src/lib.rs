@@ -390,6 +390,11 @@ struct App {
 /// `GET /executors`, `POST /complete`, `POST /approve`, `POST /reject`,
 /// `POST /cancel/:id`.
 pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
+    let app = App {
+        runtime,
+        secret,
+        started: Arc::new(Mutex::new(Vec::new())),
+    };
     Router::new()
         .route("/start", post(start_handler))
         .route("/complete", post(complete_handler))
@@ -402,11 +407,23 @@ pub fn router(runtime: Arc<Runtime>, secret: CompleteSecret) -> Router {
             post(cancel_handler).layer(DefaultBodyLimit::max(0)),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(App {
-            runtime,
-            secret,
-            started: Arc::new(Mutex::new(Vec::new())),
-        })
+        .route_layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            authenticate,
+        ))
+        .with_state(app)
+}
+
+// Runs before handler extraction, including JSON parsing and body buffering.
+async fn authenticate(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if authorize(&app, request.headers()).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
 }
 
 fn provided_secret(headers: &HeaderMap) -> Option<&[u8]> {
@@ -677,12 +694,18 @@ pub async fn serve(runtime: Arc<Runtime>, secret: CompleteSecret) -> std::io::Re
     serve_on(runtime, secret, DEFAULT_BIND).await
 }
 
-/// Explicit address. `0.0.0.0` only if the caller passes it.
+/// Plaintext serving requires loopback. Use a TLS proxy for remote access.
 pub async fn serve_on(
     runtime: Arc<Runtime>,
     secret: CompleteSecret,
     addr: SocketAddr,
 ) -> std::io::Result<()> {
+    if !addr.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "plaintext HTTP serving requires loopback; use a TLS proxy for remote access",
+        ));
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(runtime, secret)).await
 }
