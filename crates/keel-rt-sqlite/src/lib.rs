@@ -275,7 +275,7 @@ impl SqliteStore {
                     // has no identity key). Shutdown retry / a second Runtime
                     // would otherwise duplicate ExecutionSucceeded.
                     let _ = events;
-                    Ok(())
+                    reject_conflict(conn, &exec.snapshot())
                 }
                 Some(_) => {
                     upsert_execution_meta(conn, exec)?;
@@ -352,10 +352,9 @@ fn reject_fence(conn: &Connection, exec: &Execution) -> Result<(), StoreError> {
     let epoch: Option<(Option<i64>, bool)> = conn
         .prepare_cached("SELECT epoch, owner IS NOT NULL FROM executions WHERE id = ?1")
         .map_err(store_err)?
-        .query_row(
-            params![exec.id().as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .query_row(params![exec.id().as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .optional()
         .map_err(store_err)?;
     let Some((Some(found), owned)) = epoch else {
@@ -687,6 +686,16 @@ fn upsert_execution_meta(conn: &Connection, exec: &Execution) -> Result<(), Stor
     upsert_execution_row(conn, &meta)
 }
 
+fn reject_conflict(conn: &Connection, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
+    if load_snapshot(conn, &snapshot.execution_id)?.as_ref() == Some(snapshot) {
+        Ok(())
+    } else {
+        Err(StoreError::Conflict {
+            revision: snapshot.revision,
+        })
+    }
+}
+
 fn upsert_full_snapshot(conn: &Connection, snapshot: &ExecutionSnapshot) -> Result<(), StoreError> {
     let found = snapshot_revision(conn, &snapshot.execution_id)?;
     match found {
@@ -694,7 +703,7 @@ fn upsert_full_snapshot(conn: &Connection, snapshot: &ExecutionSnapshot) -> Resu
             found: found as u64,
             attempted: snapshot.revision,
         }),
-        Some(found) if found as u64 == snapshot.revision => Ok(()),
+        Some(found) if found as u64 == snapshot.revision => reject_conflict(conn, snapshot),
         Some(_) => {
             upsert_execution_row(conn, snapshot)?;
             conn.execute(
@@ -766,10 +775,7 @@ fn snapshot_revision(conn: &Connection, id: &ExecutionId) -> Result<Option<i64>,
     let row: Option<(i64, bool)> = conn
         .prepare_cached("SELECT revision, definition_hash = '' FROM executions WHERE id = ?1")
         .map_err(store_err)?
-        .query_row(
-            params![id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .query_row(params![id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
         .optional()
         .map_err(store_err)?;
     match row {

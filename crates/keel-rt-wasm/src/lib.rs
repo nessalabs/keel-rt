@@ -5,12 +5,15 @@
 
 use anyhow::{ensure, Context, Result};
 use keel_rt::{ExecutionContext, Executor, ExecutorId, NodeOutcome};
-use std::{future::Future, path::Path, pin::Pin, time::Duration};
+use std::{future::Future, io::Read, path::Path, pin::Pin, time::Duration};
 use wasmtime::component::{Component, Instance, InstancePre, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
 // Consumers can use exactly the version used by this adapter for their bindings.
 pub use wasmtime;
+
+/// Maximum source size accepted before parsing or compilation (binary or WAT).
+pub const MAX_COMPONENT_BYTES: usize = 1024 * 1024;
 
 /// Limits apply to each invocation, including component initialization.
 #[derive(Clone, Debug)]
@@ -87,14 +90,24 @@ pub struct WasmExecutor<T: ComponentTask> {
 }
 
 impl<T: ComponentTask> WasmExecutor<T> {
-    /// Compile a component binary (or component WAT) and resolve its imports.
-    /// Compilation is synchronous: construct before starting the Runtime.
-    pub fn new(
+    /// Compile a trusted, pre-vetted component binary or WAT and resolve imports.
+    ///
+    /// Only use for application-owned components. Compilation is synchronous and
+    /// invocation limits do not constrain compiler CPU or host memory. Never pass
+    /// tenant uploads or other less-trusted input; those require compilation in a
+    /// separate process with OS memory/CPU limits and a wall-clock deadline.
+    /// Source bytes are capped by [`MAX_COMPONENT_BYTES`] before compilation.
+    pub fn new_trusted(
         id: impl Into<ExecutorId>,
         component: impl AsRef<[u8]>,
         task: T,
         limits: Limits,
     ) -> Result<Self> {
+        let component = component.as_ref();
+        ensure!(
+            component.len() <= MAX_COMPONENT_BYTES,
+            "component exceeds byte limit"
+        );
         let id = id.into();
         ensure!(!id.as_str().is_empty(), "executor id must not be empty");
         ensure!(limits.fuel > 0, "fuel must be positive");
@@ -120,16 +133,31 @@ impl<T: ComponentTask> WasmExecutor<T> {
         })
     }
 
-    /// Load user-selected component bytes; never deserialize native compiled code.
-    pub fn from_file(
+    /// Load a trusted application-owned regular file, bounded before compilation.
+    /// The same trust requirement as [`Self::new_trusted`] applies to its contents.
+    /// Paths alone do not establish trust. Never deserialize native compiled code.
+    pub fn from_trusted_file(
         id: impl Into<ExecutorId>,
         path: impl AsRef<Path>,
         task: T,
         limits: Limits,
     ) -> Result<Self> {
-        let bytes = std::fs::read(path.as_ref())
+        let file = std::fs::File::open(path.as_ref())
+            .with_context(|| format!("open component {}", path.as_ref().display()))?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "component must be a regular file"
+        );
+        ensure!(
+            file.metadata()?.len() <= MAX_COMPONENT_BYTES as u64,
+            "component exceeds byte limit"
+        );
+        // Read through a bound even if the file grows after metadata was checked.
+        let mut bytes = Vec::new();
+        file.take(MAX_COMPONENT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
             .with_context(|| format!("read component {}", path.as_ref().display()))?;
-        Self::new(id, bytes, task, limits)
+        Self::new_trusted(id, bytes, task, limits)
     }
 
     async fn invoke(&self, ctx: ExecutionContext) -> Result<NodeOutcome> {

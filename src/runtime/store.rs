@@ -53,6 +53,8 @@ pub enum StoreError {
     Stale { found: u64, attempted: u64 },
     #[error("stale lease epoch: store has {found}, attempted {attempted}")]
     StaleEpoch { found: u64, attempted: u64 },
+    #[error("conflicting snapshot at revision {revision}")]
+    Conflict { revision: u64 },
 }
 
 /// An opt-in durable store could not initialize a new execution.
@@ -64,6 +66,19 @@ pub enum InitializeError {
     AlreadyExists,
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+fn reject_conflict(
+    stored: &ExecutionSnapshot,
+    attempted: &ExecutionSnapshot,
+) -> Result<(), StoreError> {
+    if stored == attempted {
+        Ok(())
+    } else {
+        Err(StoreError::Conflict {
+            revision: attempted.revision,
+        })
+    }
 }
 
 fn reject_stale(found: u64, attempted: u64) -> Result<(), StoreError> {
@@ -246,7 +261,7 @@ impl StateStore for MemoryStore {
         if let Some(stored) = g.snaps.get(&snapshot.execution_id) {
             reject_stale(stored.snap.revision, snapshot.revision)?;
             if stored.snap.revision == snapshot.revision {
-                return Ok(());
+                return reject_conflict(&stored.snap, snapshot);
             }
         }
         match g.snaps.get_mut(&snapshot.execution_id) {
@@ -273,7 +288,7 @@ impl StateStore for MemoryStore {
         if let Some(stored) = g.snaps.get(exec.id()) {
             reject_stale(stored.snap.revision, exec.revision())?;
             if stored.snap.revision == exec.revision() {
-                return Ok(());
+                return reject_conflict(&stored.snap, &exec.snapshot());
             }
         }
         match g.snaps.get_mut(exec.id()) {
