@@ -4,6 +4,9 @@
 (Tokio-style `-rt` = the runtime). In Rust: `use keel_rt::...`.
 Kernel lives on Origin: `nessalabs/keel-rt`. GitHub is not the kernel.
 
+For task-oriented lifecycle maps, recovery decisions and current test/model
+evidence, start with the [state atlas](docs/state/README.md).
+
 The workspace requires Rust 1.95+. `rust-toolchain.toml` pins development to
 1.95.0; all crates share the root `Cargo.lock` and CI toolchain.
 
@@ -12,7 +15,9 @@ Phase 2: at-least-once **snapshot resume**. If the process dies, call
 `Runtime::resume_with(id, Recover::RetryFailed)` re-invokes Failed /
 TimedOut nodes. A node
 that was Running is re-invoked (side effects may run twice — make the
-executor idempotent if you need exactly-once). Succeeded nodes never re-run.
+executor idempotent if you need exactly-once). Ordinary resume preserves Succeeded
+nodes. Explicit RetryFailed recovery can reset a succeeded AllDone join when a
+direct failed input is retried; see [recovery](docs/state/recovery.md).
 Waiting keeps the same token. File persistence is a sibling crate
 (`keel-rt-sqlite`), not the kernel. Default sqlite open is
 `synchronous=FULL` (process kill and power loss of the last txn).

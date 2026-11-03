@@ -1,0 +1,514 @@
+{
+  "date": "2026-11-03T08:57:07.484Z",
+  "documents": 14,
+  "baselines": [
+    {
+      "owner": "failure-policy",
+      "id": "0641c5a0-e1ae-4935-a48b-4b600ef6d049",
+      "state": "passed",
+      "message": "Every rule held. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:08.149Z",
+        "config": "tla/RetryDeadline.cfg",
+        "modelDigest": "063ecc195ea34e9683aca3f21f24efbc7a8ee56f2e51f26189f1c708caade434",
+        "states": 15,
+        "held": [
+          "NotBeforeDeadline",
+          "NoCancelledDispatch"
+        ],
+        "broke": [],
+        "unchecked": []
+      }
+    },
+    {
+      "owner": "graph",
+      "id": "63cc0b0b-e552-4123-a68f-f89b196e28d1",
+      "state": "passed",
+      "message": "Every rule held. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:11.543Z",
+        "config": "tla/DependencyJoin.cfg",
+        "modelDigest": "5edc649e3a4e94e81eec55186c5d305a30db5f4c1e9c1e917e1d76c665816bbd",
+        "states": 41,
+        "held": [
+          "JoinBeforeStart",
+          "PermitBound"
+        ],
+        "broke": [],
+        "unchecked": []
+      }
+    },
+    {
+      "owner": "leases",
+      "id": "542a0c12-287f-405b-add9-ac69d1541d14",
+      "state": "passed",
+      "message": "Every rule held. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:14.959Z",
+        "config": "tla/LeaseFence.cfg",
+        "modelDigest": "5e2d3c2415cdb422def5ad106311384ddf61a17ca3ec7626bcb4aa7be91b5560",
+        "states": 13,
+        "held": [
+          "CurrentWriteOnly",
+          "CurrentLaunchCheckOnly"
+        ],
+        "broke": [],
+        "unchecked": []
+      }
+    },
+    {
+      "owner": "persistence",
+      "id": "7a6085a1-a2a0-4a25-8396-280516e28554",
+      "state": "passed",
+      "message": "Every rule held. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:18.347Z",
+        "config": "tla/PersistEmit.cfg",
+        "modelDigest": "c9d3a6c0cbd8efdb1fa52c9aef012104ec2f7ba85a76d15007a62da1eaea0c90",
+        "states": 4,
+        "held": [
+          "PersistBeforeEmit",
+          "SinkCannotUndoPersist"
+        ],
+        "broke": [],
+        "unchecked": []
+      }
+    },
+    {
+      "owner": "startup",
+      "id": "906c46c9-7924-4cd0-b860-b4083421ea3e",
+      "state": "passed",
+      "message": "Every rule held. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:21.732Z",
+        "config": "tla/DurableStart.cfg",
+        "modelDigest": "f3493098367131c3a6a05248d84a395b1183cb5c141f5b75dc26c79b80b0640f",
+        "states": 8,
+        "held": [
+          "AcknowledgeAfterCommit",
+          "LaunchAfterCommit"
+        ],
+        "broke": [],
+        "unchecked": []
+      }
+    },
+    {
+      "owner": "waiting",
+      "id": "9b399b31-37f9-4eef-996d-decd0836ed5b",
+      "state": "passed",
+      "message": "Every rule held. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:25.142Z",
+        "config": "tla/WaitToken.cfg",
+        "modelDigest": "1acf54ca9ea3520214321611ec302a5a9147e0d106ee419e28754472e8ac307e",
+        "states": 10,
+        "held": [
+          "CurrentTokenOnly",
+          "NoAcceptAfterCancel"
+        ],
+        "broke": [],
+        "unchecked": []
+      }
+    }
+  ],
+  "controls": [
+    {
+      "name": "clear-deadline-too-early",
+      "owner": "failure-policy",
+      "expected": "NotBeforeDeadline",
+      "passed": true,
+      "id": "a2e24c2d-b03c-4802-bf8c-e5ad71881502",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:09.481Z",
+        "config": "tla/RetryDeadline.cfg",
+        "modelDigest": "fc9e88d94b7939b6a91d2df3845b8f9c87f30d295cc07b44860cfa0006ce9815",
+        "states": 26,
+        "held": [
+          "NoCancelledDispatch"
+        ],
+        "broke": [
+          {
+            "rule": "NotBeforeDeadline",
+            "path": [
+              "Start with launched is FALSE, cancelled is FALSE, now is 0, acceptedCancelled is FALSE, launchedAt is 0, ready is FALSE.",
+              "Due: launched is FALSE, cancelled is FALSE, now is 0, acceptedCancelled is FALSE, launchedAt is 0, ready is TRUE.",
+              "Dispatch: launched is TRUE, cancelled is FALSE, now is 0, acceptedCancelled is FALSE, launchedAt is 0, ready is TRUE."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "dispatch-cancelled-retry",
+      "owner": "failure-policy",
+      "expected": "NoCancelledDispatch",
+      "passed": true,
+      "id": "f9eedc4a-641a-4a48-9b92-5a55d308c6c5",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:10.856Z",
+        "config": "tla/RetryDeadline.cfg",
+        "modelDigest": "2929177c02e91ee3716b3fc2991272026b27fbe64b886200eeace74479bb1a73",
+        "states": 18,
+        "held": [
+          "NotBeforeDeadline"
+        ],
+        "broke": [
+          {
+            "rule": "NoCancelledDispatch",
+            "path": [
+              "Start with launched is FALSE, cancelled is FALSE, now is 0, acceptedCancelled is FALSE, launchedAt is 0, ready is FALSE.",
+              "Tick: launched is FALSE, cancelled is FALSE, now is 1, acceptedCancelled is FALSE, launchedAt is 0, ready is FALSE.",
+              "Tick: launched is FALSE, cancelled is FALSE, now is 2, acceptedCancelled is FALSE, launchedAt is 0, ready is FALSE.",
+              "Due: launched is FALSE, cancelled is FALSE, now is 2, acceptedCancelled is FALSE, launchedAt is 0, ready is TRUE.",
+              "Cancel: launched is FALSE, cancelled is TRUE, now is 2, acceptedCancelled is FALSE, launchedAt is 0, ready is TRUE.",
+              "Dispatch: launched is TRUE, cancelled is TRUE, now is 2, acceptedCancelled is TRUE, launchedAt is 2, ready is TRUE."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "start-before-all-predecessors",
+      "owner": "graph",
+      "expected": "JoinBeforeStart",
+      "passed": true,
+      "id": "e91b2085-1fd5-492d-80f9-8af2272d5957",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:12.908Z",
+        "config": "tla/DependencyJoin.cfg",
+        "modelDigest": "adeae32e48d400f667e84bc93d7685c0f5df7b12cd9b4d226de858efc5109a9b",
+        "states": 54,
+        "held": [
+          "PermitBound"
+        ],
+        "broke": [
+          {
+            "rule": "JoinBeforeStart",
+            "path": [
+              "Start with peer is FALSE, join is AllSucceeded, pred is <<\"Pending\", \"Pending\">>, dependent is FALSE.",
+              "StartDependent: peer is FALSE, join is AllSucceeded, pred is <<\"Pending\", \"Pending\">>, dependent is TRUE."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "ignore-running-peer",
+      "owner": "graph",
+      "expected": "PermitBound",
+      "passed": true,
+      "id": "55b29ec4-424f-4b90-b59e-87ea1fa5cff7",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:14.269Z",
+        "config": "tla/DependencyJoin.cfg",
+        "modelDigest": "14016a322f8fc21c5527e0db4cc89828e8d34989a5501e614dbdd116bdce7b2e",
+        "states": 46,
+        "held": [
+          "JoinBeforeStart"
+        ],
+        "broke": [
+          {
+            "rule": "PermitBound",
+            "path": [
+              "Start with peer is FALSE, join is AllSucceeded, pred is <<\"Pending\", \"Pending\">>, dependent is FALSE.",
+              "StartPeer: peer is TRUE, join is AllSucceeded, pred is <<\"Pending\", \"Pending\">>, dependent is FALSE.",
+              "Finish: peer is TRUE, join is AllSucceeded, pred is <<\"Succeeded\", \"Pending\">>, dependent is FALSE.",
+              "Finish: peer is TRUE, join is AllSucceeded, pred is <<\"Succeeded\", \"Succeeded\">>, dependent is FALSE.",
+              "StartDependent: peer is TRUE, join is AllSucceeded, pred is <<\"Succeeded\", \"Succeeded\">>, dependent is TRUE."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "write-with-stale-epoch",
+      "owner": "leases",
+      "expected": "CurrentWriteOnly",
+      "passed": true,
+      "id": "0bd1faac-41a9-4b1d-8334-8834e09e6ad5",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:16.317Z",
+        "config": "tla/LeaseFence.cfg",
+        "modelDigest": "bc1ef310fa133f4f4d1b8e1f2e352550c950459a590507936bd8153a7b2b52dd",
+        "states": 15,
+        "held": [
+          "CurrentLaunchCheckOnly"
+        ],
+        "broke": [
+          {
+            "rule": "CurrentWriteOnly",
+            "path": [
+              "Start with offered is 1, epoch is 1, wrote is FALSE, launchChecked is FALSE, writeCurrent is 0, launchEpoch is 0, launchCurrent is 0, writeEpoch is 0.",
+              "Takeover: offered is 1, epoch is 2, wrote is FALSE, launchChecked is FALSE, writeCurrent is 0, launchEpoch is 0, launchCurrent is 0, writeEpoch is 0.",
+              "Write: offered is 1, epoch is 2, wrote is TRUE, launchChecked is FALSE, writeCurrent is 2, launchEpoch is 0, launchCurrent is 0, writeEpoch is 1."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "authorize-launch-with-stale-epoch",
+      "owner": "leases",
+      "expected": "CurrentLaunchCheckOnly",
+      "passed": true,
+      "id": "99a3f79b-a731-4f0b-a78d-b4c3b28f1fde",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:17.678Z",
+        "config": "tla/LeaseFence.cfg",
+        "modelDigest": "bcc66851f0553a3a18ae8baadf8c00ab9d076607d9e99b78af718271da6acba7",
+        "states": 15,
+        "held": [
+          "CurrentWriteOnly"
+        ],
+        "broke": [
+          {
+            "rule": "CurrentLaunchCheckOnly",
+            "path": [
+              "Start with offered is 1, epoch is 1, wrote is FALSE, launchChecked is FALSE, writeCurrent is 0, launchEpoch is 0, launchCurrent is 0, writeEpoch is 0.",
+              "Takeover: offered is 1, epoch is 2, wrote is FALSE, launchChecked is FALSE, writeCurrent is 0, launchEpoch is 0, launchCurrent is 0, writeEpoch is 0.",
+              "CheckLaunch: offered is 1, epoch is 2, wrote is FALSE, launchChecked is TRUE, writeCurrent is 0, launchEpoch is 1, launchCurrent is 2, writeEpoch is 0."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "announce-unsaved-fact",
+      "owner": "persistence",
+      "expected": "PersistBeforeEmit",
+      "passed": true,
+      "id": "74b4a733-62fb-457f-a5e8-2028691d6c7a",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:19.698Z",
+        "config": "tla/PersistEmit.cfg",
+        "modelDigest": "d724ae1fdfd8fd0c5da7603cc53230b48b7beaa5b09b1d64f7c25507b33d2f76",
+        "states": 6,
+        "held": [
+          "SinkCannotUndoPersist"
+        ],
+        "broke": [
+          {
+            "rule": "PersistBeforeEmit",
+            "path": [
+              "Start with persisted is FALSE, emitted is FALSE, sinkFailed is FALSE, everPersisted is FALSE.",
+              "Emit: persisted is FALSE, emitted is TRUE, sinkFailed is FALSE, everPersisted is FALSE."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "rollback-on-sink-failure",
+      "owner": "persistence",
+      "expected": "SinkCannotUndoPersist",
+      "passed": true,
+      "id": "22d60768-bc69-4471-9b6f-7767955ac078",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:21.057Z",
+        "config": "tla/PersistEmit.cfg",
+        "modelDigest": "920f3c3e9283979b1882ea793662e85b21e6eabbee83557786592465c1d68866",
+        "states": 5,
+        "held": [
+          "PersistBeforeEmit"
+        ],
+        "broke": [
+          {
+            "rule": "SinkCannotUndoPersist",
+            "path": [
+              "Start with persisted is FALSE, emitted is FALSE, sinkFailed is FALSE, everPersisted is FALSE.",
+              "Persist: persisted is TRUE, emitted is FALSE, sinkFailed is FALSE, everPersisted is TRUE.",
+              "Emit: persisted is TRUE, emitted is TRUE, sinkFailed is FALSE, everPersisted is TRUE.",
+              "SinkFailure: persisted is FALSE, emitted is TRUE, sinkFailed is TRUE, everPersisted is TRUE."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "acknowledge-before-commit",
+      "owner": "startup",
+      "expected": "AcknowledgeAfterCommit",
+      "passed": true,
+      "id": "6fd03855-c23d-42ea-a9a7-86e660782286",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:23.102Z",
+        "config": "tla/DurableStart.cfg",
+        "modelDigest": "808d8608f24938f2de180901ef5373ea04865b0e73c6cac2ecb9061ef5fa0ed2",
+        "states": 9,
+        "held": [
+          "LaunchAfterCommit"
+        ],
+        "broke": [
+          {
+            "rule": "AcknowledgeAfterCommit",
+            "path": [
+              "Start with launched is FALSE, abandoned is FALSE, committed is FALSE, acknowledged is FALSE.",
+              "Acknowledge: launched is FALSE, abandoned is FALSE, committed is FALSE, acknowledged is TRUE."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "launch-before-commit",
+      "owner": "startup",
+      "expected": "LaunchAfterCommit",
+      "passed": true,
+      "id": "cc50cb58-5194-4b0f-a723-3d638b352ee5",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:24.456Z",
+        "config": "tla/DurableStart.cfg",
+        "modelDigest": "174a722c01a44adf126f48a608682bd966b22779bedff20432ec2228bb6d3549",
+        "states": 10,
+        "held": [
+          "AcknowledgeAfterCommit"
+        ],
+        "broke": [
+          {
+            "rule": "LaunchAfterCommit",
+            "path": [
+              "Start with launched is FALSE, abandoned is FALSE, committed is FALSE, acknowledged is FALSE.",
+              "Launch: launched is TRUE, abandoned is FALSE, committed is FALSE, acknowledged is FALSE."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "accept-foreign-token",
+      "owner": "waiting",
+      "expected": "CurrentTokenOnly",
+      "passed": true,
+      "id": "50e4edd2-6502-4c58-82e0-e8e2d45a93d3",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:26.515Z",
+        "config": "tla/WaitToken.cfg",
+        "modelDigest": "dafaf0676fb7871013807748b39b39e734a6d5891b317e5d32801b0098e95f83",
+        "states": 12,
+        "held": [
+          "NoAcceptAfterCancel"
+        ],
+        "broke": [
+          {
+            "rule": "CurrentTokenOnly",
+            "path": [
+              "Start with offered is 2, cancelled is FALSE, acceptedCancelled is FALSE, current is 1, accepted is FALSE, acceptedToken is 0.",
+              "Complete: offered is 2, cancelled is FALSE, acceptedCancelled is FALSE, current is 1, accepted is TRUE, acceptedToken is 2."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    },
+    {
+      "name": "accept-after-cancel",
+      "owner": "waiting",
+      "expected": "NoAcceptAfterCancel",
+      "passed": true,
+      "id": "0459d4fe-fc1f-4186-8615-4501e212431f",
+      "state": "broke",
+      "message": "A rule broke. This checks the design, not the code.",
+      "result": {
+        "sourceRevision": "dbb8eceb94ff666824e6365b40171a78f71199cb",
+        "checker": "tlc-1.7.4",
+        "date": "2026-11-03T08:57:27.882Z",
+        "config": "tla/WaitToken.cfg",
+        "modelDigest": "b91fbe301dc4be1a25d415a1c23c55982ce33487f41e38b6406adc04857d024b",
+        "states": 12,
+        "held": [
+          "CurrentTokenOnly"
+        ],
+        "broke": [
+          {
+            "rule": "NoAcceptAfterCancel",
+            "path": [
+              "Start with offered is 1, cancelled is FALSE, acceptedCancelled is FALSE, current is 1, accepted is FALSE, acceptedToken is 0.",
+              "Cancel: offered is 1, cancelled is TRUE, acceptedCancelled is FALSE, current is 1, accepted is FALSE, acceptedToken is 0.",
+              "Complete: offered is 1, cancelled is TRUE, acceptedCancelled is TRUE, current is 1, accepted is TRUE, acceptedToken is 1."
+            ],
+            "states": []
+          }
+        ],
+        "unchecked": []
+      }
+    }
+  ],
+  "ok": true
+}
