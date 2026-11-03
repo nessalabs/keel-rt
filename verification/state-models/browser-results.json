@@ -1,0 +1,83 @@
+{
+  "ok": true,
+  "browser": "156.0.8078.80",
+  "viewport": {
+    "width": 1440,
+    "height": 1000
+  },
+  "pages": 14,
+  "diagrams": 12,
+  "errors": [],
+  "results": [
+    {
+      "id": "keel",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "cancellation",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "failure-policy",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "graph",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "http",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "inventory",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "leases",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "persistence",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "recovery",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "schedule",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "startup",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "verification",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "waiting",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "wasm",
+      "figures": 1,
+      "failed": 0
+    }
+  ]
+}

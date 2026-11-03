@@ -1,0 +1,812 @@
+ Downloading crates ...
+  Downloaded cranelift-control v0.135.1
+  Downloaded cranelift-codegen-shared v0.135.1
+  Downloaded cobs v0.3.0
+  Downloaded cranelift-bitset v0.135.1
+  Downloaded cranelift-native v0.135.1
+  Downloaded fnv v1.0.7
+  Downloaded siphasher v1.0.3
+  Downloaded equivalent v1.0.2
+  Downloaded mime v0.3.17
+  Downloaded wasmtime-internal-component-util v48.0.1
+  Downloaded embedded-io v0.4.0
+  Downloaded heck v0.5.0
+  Downloaded phf_shared v0.12.1
+  Downloaded wat v1.258.0
+  Downloaded pulley-macros v48.0.1
+  Downloaded wasmtime-internal-jit-debug v48.0.1
+  Downloaded wasmtime-internal-versioned-export-macros v48.0.1
+  Downloaded wasmtime-internal-jit-icache-coherence v48.0.1
+  Downloaded leb128fmt v0.1.0
+  Downloaded cranelift-srcgen v0.135.1
+  Downloaded futures-io v0.3.34
+  Downloaded cranelift-assembler-x64 v0.135.1
+  Downloaded cranelift-entity v0.135.1
+  Downloaded axum-core v0.4.5
+  Downloaded fallible-streaming-iterator v0.1.9
+  Downloaded pkg-config v0.3.34
+  Downloaded rustc-demangle v0.1.28
+  Downloaded target-lexicon v0.13.5
+  Downloaded embedded-io v0.6.1
+  Downloaded serde_path_to_error v0.1.20
+  Downloaded hashlink v0.9.1
+  Downloaded termcolor v1.4.1
+  Downloaded matchit v0.7.3
+  Downloaded id-arena v2.3.0
+  Downloaded wasmtime-internal-unwinder v48.0.1
+  Downloaded fallible-iterator v0.3.0
+  Downloaded wasm-metadata v0.254.0
+  Downloaded ahash v0.8.12
+  Downloaded cranelift-bforest v0.135.1
+  Downloaded iana-time-zone v0.1.65
+  Downloaded mach2 v0.6.0
+  Downloaded croner v2.2.0
+  Downloaded wasmtime-internal-wit-bindgen v48.0.1
+  Downloaded foldhash v0.2.0
+  Downloaded phf v0.12.1
+  Downloaded wasmtime-internal-fiber v48.0.1
+  Downloaded postcard v1.1.3
+  Downloaded allocator-api2 v0.2.21
+  Downloaded anyhow v1.0.104
+  Downloaded arbitrary v1.4.2
+  Downloaded cranelift-frontend v0.135.1
+  Downloaded addr2line v0.26.1
+  Downloaded wasmtime-internal-core v48.0.1
+  Downloaded futures v0.3.34
+  Downloaded wasmprinter v0.254.0
+  Downloaded cranelift-assembler-x64-meta v0.135.1
+  Downloaded pulley-interpreter v48.0.1
+  Downloaded cpp_demangle v0.5.1
+  Downloaded cranelift-isle v0.135.1
+  Downloaded wasm-encoder v0.254.0
+  Downloaded indexmap v2.14.2
+  Downloaded wasm-encoder v0.258.0
+  Downloaded cranelift-codegen-meta v0.135.1
+  Downloaded bumpalo v3.20.3
+  Downloaded hashbrown v0.14.5
+  Downloaded hashbrown v0.16.1
+  Downloaded axum v0.7.9
+  Downloaded hashbrown v0.17.1
+  Downloaded itertools v0.14.0
+  Downloaded libm v0.2.16
+  Downloaded rusqlite v0.32.1
+  Downloaded regalloc2 v0.15.2
+  Downloaded wast v258.0.0
+  Downloaded wit-parser v0.254.0
+  Downloaded chrono v0.4.45
+  Downloaded vcpkg v0.2.15
+  Downloaded wit-component v0.254.0
+  Downloaded wasmtime-internal-component-macro v48.0.1
+  Downloaded zerocopy v0.8.56
+  Downloaded unicode-width v0.2.2
+  Downloaded wasmparser v0.254.0
+  Downloaded wasmtime-internal-cranelift v48.0.1
+  Downloaded wasmparser v0.258.0
+  Downloaded wasmtime-environ v48.0.1
+  Downloaded gimli v0.33.0
+  Downloaded object v0.39.1
+  Downloaded chrono-tz v0.10.4
+  Downloaded wasmtime v48.0.1
+  Downloaded cranelift-codegen v0.135.1
+  Downloaded encoding_rs v0.8.35
+  Downloaded libsqlite3-sys v0.30.1
+   Compiling memchr v2.8.3
+   Compiling syn v2.0.119
+   Compiling foldhash v0.2.0
+   Compiling version_check v0.9.5
+   Compiling serde_json v1.0.151
+   Compiling smallvec v1.16.0
+   Compiling find-msvc-tools v0.1.12
+   Compiling libm v0.2.16
+   Compiling shlex v2.0.1
+   Compiling bitflags v2.13.1
+   Compiling hashbrown v0.17.1
+   Compiling cc v1.4.5
+   Compiling parking_lot_core v0.9.12
+   Compiling equivalent v1.0.2
+   Compiling log v0.4.34
+   Compiling http v1.5.0
+   Compiling parking_lot v0.12.5
+   Compiling anyhow v1.0.104
+   Compiling httparse v1.10.1
+   Compiling tokio v1.53.1
+   Compiling tower-service v0.3.3
+   Compiling wasmtime-internal-core v48.0.1
+   Compiling try-lock v0.2.5
+   Compiling rustversion v1.0.23
+   Compiling http-body v1.1.0
+   Compiling want v0.3.1
+   Compiling generic-array v0.14.7
+   Compiling futures-channel v0.3.34
+   Compiling leb128fmt v0.1.0
+   Compiling httpdate v1.0.3
+   Compiling tower-layer v0.3.3
+   Compiling atomic-waker v1.1.2
+   Compiling sync_wrapper v1.0.2
+   Compiling http-body-util v0.1.5
+   Compiling mime v0.3.17
+   Compiling cranelift-srcgen v0.135.1
+   Compiling typenum v1.20.1
+   Compiling cranelift-assembler-x64-meta v0.135.1
+   Compiling serde_path_to_error v0.1.20
+   Compiling percent-encoding v2.3.2
+   Compiling matchit v0.7.3
+   Compiling cranelift-bitset v0.135.1
+   Compiling base64 v0.22.1
+   Compiling heck v0.5.0
+   Compiling indexmap v2.14.2
+   Compiling target-lexicon v0.13.5
+   Compiling allocator-api2 v0.2.21
+   Compiling axum-core v0.4.5
+   Compiling cranelift-isle v0.135.1
+   Compiling bumpalo v3.20.3
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling cranelift-entity v0.135.1
+   Compiling cobs v0.3.0
+   Compiling digest v0.10.7
+   Compiling cpufeatures v0.2.17
+   Compiling hashbrown v0.16.1
+   Compiling fnv v1.0.7
+   Compiling cranelift-codegen-shared v0.135.1
+   Compiling cranelift-bforest v0.135.1
+   Compiling sha2 v0.10.9
+   Compiling postcard v1.1.3
+   Compiling cranelift-assembler-x64 v0.135.1
+   Compiling semver v1.0.28
+   Compiling zerocopy v0.8.56
+   Compiling gimli v0.33.0
+   Compiling crc32fast v1.5.1
+   Compiling tracing-attributes v0.1.31
+   Compiling pulley-macros v48.0.1
+   Compiling wasmparser v0.254.0
+   Compiling pulley-interpreter v48.0.1
+   Compiling wasmtime-internal-versioned-export-macros v48.0.1
+   Compiling tokio-util v0.7.19
+   Compiling hyper v1.11.1
+   Compiling tower v0.5.3
+   Compiling ahash v0.8.12
+   Compiling tracing v0.1.44
+   Compiling object v0.39.1
+   Compiling rustc-hash v2.1.3
+   Compiling serde v1.0.229
+   Compiling arbitrary v1.4.2
+   Compiling keel-rt v0.1.0 (/Users/nessa/Documents/Codex/2026-11-02/hey-can-you-update-the-nessa/work/org-docs/keel-rt)
+   Compiling hyper-util v0.1.20
+   Compiling cranelift-codegen-meta v0.135.1
+   Compiling cranelift-control v0.135.1
+   Compiling regalloc2 v0.15.2
+   Compiling axum v0.7.9
+   Compiling wasmtime-internal-component-util v48.0.1
+   Compiling vcpkg v0.2.15
+   Compiling cranelift-codegen v0.135.1
+   Compiling termcolor v1.4.1
+   Compiling pkg-config v0.3.34
+   Compiling libsqlite3-sys v0.30.1
+   Compiling wasm-encoder v0.254.0
+   Compiling keel-rt-http v0.1.0 (/Users/nessa/Documents/Codex/2026-11-02/hey-can-you-update-the-nessa/work/org-docs/keel-rt/crates/keel-rt-http)
+   Compiling id-arena v2.3.0
+   Compiling wit-parser v0.254.0
+   Compiling wasm-metadata v0.254.0
+   Compiling hashbrown v0.14.5
+   Compiling rustix v1.1.4
+   Compiling wasmprinter v0.254.0
+   Compiling wasmtime-internal-unwinder v48.0.1
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling wit-component v0.254.0
+   Compiling wasmtime-environ v48.0.1
+   Compiling hashlink v0.9.1
+   Compiling wasmtime-internal-fiber v48.0.1
+   Compiling wasm-encoder v0.258.0
+   Compiling unicode-width v0.2.2
+   Compiling either v1.18.0
+   Compiling fallible-iterator v0.3.0
+   Compiling wasmtime-internal-cranelift v48.0.1
+   Compiling wasmtime-internal-component-macro v48.0.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling wast v258.0.0
+   Compiling rusqlite v0.32.1
+   Compiling itertools v0.14.0
+   Compiling wasmtime-internal-wit-bindgen v48.0.1
+   Compiling wasmtime v48.0.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling iana-time-zone v0.1.65
+   Compiling wasmtime-internal-jit-icache-coherence v48.0.1
+   Compiling encoding_rs v0.8.35
+   Compiling siphasher v1.0.3
+   Compiling mach2 v0.6.0
+   Compiling keel-rt-sqlite v0.1.0 (/Users/nessa/Documents/Codex/2026-11-02/hey-can-you-update-the-nessa/work/org-docs/keel-rt/crates/keel-rt-sqlite)
+   Compiling phf_shared v0.12.1
+   Compiling chrono-tz v0.10.4
+   Compiling phf v0.12.1
+   Compiling chrono v0.4.45
+   Compiling croner v2.2.0
+   Compiling wat v1.258.0
+   Compiling keel-rt-schedule v0.1.0 (/Users/nessa/Documents/Codex/2026-11-02/hey-can-you-update-the-nessa/work/org-docs/keel-rt/crates/keel-rt-schedule)
+   Compiling cranelift-native v0.135.1
+   Compiling cranelift-frontend v0.135.1
+   Compiling keel-rt-wasm v0.1.0 (/Users/nessa/Documents/Codex/2026-11-02/hey-can-you-update-the-nessa/work/org-docs/keel-rt/crates/keel-rt-wasm)
+   Compiling keel-rt-wasm-consumer-test v0.0.0 (/Users/nessa/Documents/Codex/2026-11-02/hey-can-you-update-the-nessa/work/org-docs/keel-rt/crates/keel-rt-wasm/tests/consumer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 34.60s
+     Running unittests src/lib.rs (target/debug/deps/keel_rt_http-30bb7ea30665fe8d)
+
+running 26 tests
+test client::tests::debug_redacts_secret ... ok
+test client::tests::decision_maps_onto_resume ... ok
+test client::tests::encoded_body_limit_does_not_depend_on_an_http_response ... ok
+test client::tests::hang_bound_default_is_five_seconds ... ok
+test client::tests::inspect_shared_errors_display_does_not_say_complete ... ok
+test client::tests::path_url_trims_trailing_slash ... ok
+test client::tests::unregistered_display_names_ids ... ok
+test tests::body_round_trips ... ok
+test tests::claimed_elsewhere_status_is_423_locked_not_409 ... ok
+test tests::complete_body_json_succeeded_is_base64_not_array ... ok
+test tests::default_bind_is_loopback_not_unspecified ... ok
+test tests::drop_held_if_terminal_keeps_waiting ... ok
+test tests::empty_secret_is_rejected ... ok
+test tests::hold_if_live_skips_terminal_snapshot ... ok
+test tests::inspect_view_json_1mib_succeeded_is_compact_base64 ... ok
+test tests::inspect_view_json_has_exactly_one_wait_token ... ok
+test tests::inspect_view_json_non_succeeded_has_no_output_or_error ... ok
+test tests::inspect_view_json_running_pred_does_not_contain_running_token ... ok
+test tests::inspect_view_json_succeeded_owns_output ... ok
+test tests::inspect_view_reads_wait_token_from_snapshot ... ok
+test tests::provided_secret_reads_bearer_or_header ... ok
+test tests::reap_held_terminals_clears_n_finished_keeps_park ... ok
+test tests::resume_token_helper_reads_waiting_state ... ok
+test tests::secrets_equal_rejects_wrong_and_empty ... ok
+test tests::serve_source_does_not_default_to_unspecified ... ok
+test tests::start_body_is_durable_bytes_not_snapshot ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/client.rs (target/debug/deps/client-151a89084e28e0c6)
+
+running 97 tests
+test chunked_response_is_bounded_without_content_length ... ok
+test client_after_drop_handle_is_409_does_not_revive ... ok
+test client_approve_400kib_is_200_not_json_array_413 ... ok
+test client_approve_after_fail_fast_other_node_is_409 ... ok
+test client_approve_after_http_start_server_drop_is_409 ... ok
+test client_approve_after_terminal_handle_drop_is_200_noop ... ok
+test client_approve_issued_token_for_running_node_leaves_wait_parked ... ok
+test client_approve_oversized_body_is_413_does_not_complete ... ok
+test client_approve_then_complete_same_token_is_noop ... ok
+test client_approve_then_reject_does_not_fail_succeeded ... ok
+test client_cancel_already_terminal_is_noop ... ok
+test client_cancel_does_not_follow_redirect_off_loopback ... ok
+test client_cancel_during_approve_does_not_revive ... ok
+test client_cancel_fail_subtree_cancels_running_sibling ... ok
+test client_cancel_in_process_waiting_without_http_hold ... ok
+test client_cancel_one_of_two_http_starts_leaves_other_waiting ... ok
+test client_cancel_other_run_leaves_fail_subtree_sibling_running ... ok
+test client_cancel_succeeds_against_bearer_only_server ... ok
+test client_cancel_unknown_id_is_404 ... ok
+test client_cancel_wire_sends_both_secret_headers ... ok
+test client_cancel_with_body_is_413_does_not_cancel ... ok
+test client_cancel_without_secret_is_401 ... ok
+test client_cancel_wrong_secret_is_401 ... ok
+test client_complete_400kib_is_200_not_json_array_413 ... ok
+test client_complete_issued_token_for_running_node_leaves_wait_parked ... ok
+test client_complete_of_running_handle_token_does_not_unblock_wait ... ok
+test client_complete_succeeds_against_bearer_only_server ... ok
+test client_complete_unblocks_wait_node ... ok
+test client_decision_complete_unblocks_wait_node ... ok
+test client_decision_fail_fails_execution ... ok
+test client_does_not_follow_redirect_off_loopback ... ok
+test client_drop_http_server_after_start_cancels_wait ... ok
+test client_drop_inflight_does_not_complete ... ok
+test client_drop_server_mid_post_is_transport_token_untouched ... ok
+test client_duplicate_approve_is_noop ... ok
+test client_duplicate_cancel_is_noop ... ok
+test client_duplicate_complete_is_noop ... ok
+test client_executors_without_secret_is_401 ... ok
+test client_fail_subtree_reject_returns_and_server_drop_cancels_sibling ... ok
+test client_http_cancel_reaps_handle_server_drop_is_noop ... ok
+test client_hung_cancel_is_hung_not_forever ... ok
+test client_hung_inspect_is_hung_not_forever ... ok
+test client_hung_server_is_hung_not_forever ... ok
+test client_hung_start_is_hung_not_forever ... ok
+test client_inspect_401_error_text_does_not_say_complete ... ok
+test client_inspect_after_drop_handle_is_cancelled_complete_409 ... ok
+test client_inspect_does_not_follow_redirect_off_loopback ... ok
+test client_inspect_during_approve_does_not_double_apply ... ok
+test client_inspect_over_max_body_is_413 ... ok
+test client_inspect_research_hold_write_outputs_are_per_node ... ok
+test client_inspect_succeeds_against_bearer_only_server ... ok
+test client_inspect_then_complete_unblocks_wait ... ok
+test client_inspect_unknown_id_is_404 ... ok
+test client_inspect_wait_sibling_while_running_completes_only_wait ... ok
+test client_inspect_while_running_has_no_token_then_wait_sees_token ... ok
+test client_inspect_wire_sends_both_secret_headers ... ok
+test client_inspect_without_secret_is_401 ... ok
+test client_inspect_wrong_secret_is_401 ... ok
+test client_live_approve_after_ttl_steal_is_claimed_elsewhere ... ok
+test client_live_approve_persist_err_is_not_ok ... ok
+test client_live_cancel_after_ttl_steal_is_claimed_elsewhere ... ok
+test client_n_instant_http_starts_are_reaped_on_next_start ... ok
+test client_oversized_body_is_413_does_not_complete ... ok
+test client_reject_then_approve_does_not_revive ... ok
+test client_start_cycle_is_400_bad_request_not_unregistered ... ok
+test client_start_does_not_follow_redirect_off_loopback ... ok
+test client_start_empty_definition_is_400 ... ok
+test client_start_fail_subtree_keeps_running_sibling ... ok
+test client_start_inspect_approve_unblocks_wait ... ok
+test client_start_inspect_complete_unblocks_wait ... ok
+test client_start_inspect_reject_fails_execution ... ok
+test client_start_oversized_body_is_413 ... ok
+test client_start_reinvoke_old_token_does_not_approve ... ok
+test client_start_succeeds_against_bearer_only_server ... ok
+test client_start_terminal_survives_server_drop ... ok
+test client_start_then_inspect_is_waiting_not_cancelled ... ok
+test client_start_unregistered_is_400_nothing_runs ... ok
+test client_start_wait_cancel_is_cancelled_approve_is_409 ... ok
+test client_start_wait_plus_missing_unregistered_is_exactly_missing ... ok
+test client_start_wire_sends_both_secret_headers ... ok
+test client_start_without_secret_is_401 ... ok
+test client_start_wrong_secret_is_401 ... ok
+test client_two_starts_are_distinct_ids ... ok
+test client_unknown_token_is_unknown ... ok
+test client_wire_is_complete_body_and_secret_header ... ok
+test client_without_secret_is_401 ... ok
+test client_wrong_secret_is_401 ... ok
+test http_start_second_runtime_new_id_is_not_steal ... ok
+test plaintext_transport_rejects_non_loopback_addresses ... ok
+test response_body_stall_shares_request_deadline ... ok
+test two_approves_one_token_downstream_runs_once ... ok
+test two_client_completes_one_token_downstream_runs_once ... ok
+test two_clients_approve_and_complete_one_token_downstream_runs_once ... ok
+test two_clients_inspect_same_token ... ok
+test two_keel_clients_one_token_downstream_runs_once ... ok
+test two_runtimes_inspect_does_not_steal_lease ... ok
+test unauthenticated_routes_reject_before_reading_any_body ... ok
+
+test result: ok. 97 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/complete.rs (target/debug/deps/complete-3708d2875b1751e1)
+
+running 17 tests
+test http_complete_n_parked_waits_reports_ms ... ok
+test post_after_cancel_is_409_does_not_revive ... ok
+test post_approve_empty_body_is_400_does_not_complete ... ok
+test post_approve_oversized_is_413_does_not_complete ... ok
+test post_approve_without_secret_is_401 ... ok
+test post_bearer_secret_is_200 ... ok
+test post_claimed_elsewhere_is_423_locked_not_409 ... ok
+test post_complete_unblocks_wait_node ... ok
+test post_duplicate_complete_is_200_noop ... ok
+test post_oversized_body_is_413_does_not_complete ... ok
+test post_query_secret_is_still_401 ... ok
+test post_reinvoke_then_stale_complete_is_404 ... ok
+test post_unknown_token_is_404 ... ok
+test post_without_secret_is_401 ... ok
+test post_wrong_secret_is_401 ... ok
+test serve_ephemeral_binds_loopback_not_unspecified ... ok
+test two_http_completes_one_token_downstream_runs_once ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/custom_nodes.rs (target/debug/deps/custom_nodes-a1c53a14be6929e4)
+
+running 12 tests
+test custom_adapter_failed_inspect_is_failed_not_succeeded ... ok
+test custom_adapter_panic_inspect_is_failed ... ok
+test custom_cancel_mid_running_is_cancelled ... ok
+test custom_double_register_last_wins_catalog_and_run ... ok
+test custom_drop_http_server_while_running_cancels ... ok
+test custom_empty_bytes_output_inspect_succeeded ... ok
+test custom_empty_register_id_is_not_in_catalog ... ok
+test custom_executor_types_catalog_start_approve_inspect ... ok
+test custom_failed_huge_last_error_inspect_is_200_omits_error ... ok
+test custom_id_case_mismatch_start_is_400_names_the_id ... ok
+test custom_subset_registered_start_is_400_names_missing_only_nothing_runs ... ok
+test custom_waiting_forged_token_complete_is_404_kernel_unblocks ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/profile.rs (target/debug/deps/profile-d3b8595f114b868d)
+
+running 4 tests
+test inspect_view_json_is_not_full_snapshot ... ok
+test profile_cancel_release ... ok
+test profile_inspect_complete_release ... ok
+test profile_start_approve_release ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.24s
+
+     Running tests/sdk_loop.rs (target/debug/deps/sdk_loop-eb9ddb55242a8f90)
+
+running 1 test
+test sdk_loop_approve_then_cancel_is_409 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/structure.rs (target/debug/deps/structure-4815f9660f262ae3)
+
+running 12 tests
+test adapter_depends_on_keel_rt_and_not_sqlite_or_schedule ... ok
+test architecture_mermaid_names_keel_client ... ok
+test baseline_has_numbered_inspect_release_row ... ok
+test client_src_has_no_sqlite_schedule_or_hitl_names ... ok
+test custom_node_authoring_tests_and_absences ... ok
+test kernel_package_does_not_depend_on_this_adapter ... ok
+test kernel_src_still_has_no_http_agent_or_hitl ... ok
+test profile_harness_exists ... ok
+test public_surface_is_complete_resume_token ... ok
+test required_client_tests_exist ... ok
+test sdk_loop_example_and_test_exist ... ok
+test src_is_lib_and_client_only ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running unittests src/lib.rs (target/debug/deps/keel_rt_schedule-581c6540599d9a8e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/profile.rs (target/debug/deps/profile-42823560c4c90ddd)
+
+running 2 tests
+test profile_next_after_and_clone_and_arm ... ok
+test profile_start_and_spawn_wait ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.74s
+
+     Running tests/schedule.rs (target/debug/deps/schedule-7cbc2fd4f51b4b9f)
+
+running 29 tests
+test arm_before_exact_t_then_set_t_fires_once ... ok
+test catch_up_200k_periods_is_one_start ... ok
+test clock_jump_backward_after_fire_does_not_refire ... ok
+test clock_jump_backward_while_armed_does_not_fire ... ok
+test drop_runner_at_exact_t_is_one_start_not_two ... ok
+test drop_runner_stops_further_starts ... ok
+test drop_runtime_arc_while_armed_next_tick_still_starts ... ok
+test drop_without_clock_advance_exits_stuck_armed ... ok
+test executor_panic_ticker_survives ... ok
+test fire_is_start_not_ready_t ... ok
+test jump_to_max_two_jobs_each_one_start ... ok
+test jump_to_timestamp_max_is_one_start_not_due_now ... ok
+test max_starts_per_wake_does_not_drop_fires ... ok
+test monday_nine_fires_exactly_one_start ... ok
+test next_after_every_minute_is_plus_one_period ... ok
+test next_after_max_is_none_not_due_now ... ok
+test next_after_monday_nine_is_the_following_monday ... ok
+test overlap_still_starts ... ok
+test pause_across_two_mondays_is_one_catch_up_start ... ok
+test same_cron_different_definitions_both_start ... ok
+test same_window_does_not_fire_twice ... ok
+test spec_rejects_non_five_field_and_unknown_tz ... ok
+test start_at_exact_monday_nine_skips_this_slot ... ok
+test tick_start_err_does_not_hang_or_skip_sibling ... ok
+test tick_store_put_fail_does_not_kill_ticker ... ok
+test two_running_schedules_on_one_runtime_each_start ... ok
+test two_runtimes_two_schedules_each_start ... ok
+test vancouver_fall_back_picks_next_occurrence_not_both ... ok
+test vancouver_spring_forward_skips_missing_local_minute ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/stress.rs (target/debug/deps/stress-cb4f3e2a51c5853f)
+
+running 14 tests
+test armed_100k_specs_one_fire_each ... ok
+test armed_10k_specs_one_fire_each ... ok
+test drop_runner_after_arming_100k_stops_starts ... ok
+test drop_runtime_arc_while_10k_armed_still_starts ... ok
+test exact_t_then_same_window_10k_does_not_double_fire ... ok
+test executor_panic_mid_farm_ticker_survives ... ok
+test jump_backward_after_10k_fire_does_not_refire ... ok
+test missed_tick_storm_200k_periods_is_one_start ... ok
+test sequential_100k_fires_one_spec ... ok
+test start_err_mid_10k_farm_siblings_still_fire ... ok
+test store_put_fail_mid_farm_does_not_stick_firing ... ok
+test stress_required_names_exist ... ok
+test two_runners_10k_each_no_mutex ... ok
+test vancouver_dst_still_holds_with_10k_armed ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.78s
+
+     Running tests/structure.rs (target/debug/deps/structure-ca2615149cf67a2e)
+
+running 15 tests
+test adapter_depends_on_keel_rt ... ok
+test architecture_mermaid_names_schedule_crate ... ok
+test baseline_has_numbered_schedule_farm_release_row ... ok
+test crate_is_spec_and_runner_only ... ok
+test kernel_package_does_not_depend_on_this_adapter ... ok
+test kernel_src_has_no_cron_types ... ok
+test no_fire_history_vec ... ok
+test public_types_are_exactly_the_ticker ... ok
+test required_schedule_tests_exist ... ok
+test runner_has_no_persist_emit_or_node_ready ... ok
+test runner_is_one_drive_loop_with_a_heap ... ok
+test schedule_src_has_no_http_sqlite_or_hitl ... ok
+test scheduler_does_not_name_cron ... ok
+test spec_has_no_sleep_or_ready_t ... ok
+test src_has_no_second_engine_or_schedule_state ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/keel_rt_sqlite-f590d60bcf3ffa31)
+
+running 36 tests
+test startup_tests::committed_startup_survives_process_exit_before_dispatch_with_or_without_ack ... ok
+test startup_tests::concurrent_initialization_cannot_turn_a_placeholder_read_into_corruption ... ok
+test startup_tests::crash_child ... ok
+test startup_tests::failed_commit_rolls_back_claim_first_snapshot_and_durable_initialization ... ok
+test startup_tests::process_death_after_claim_keeps_absence_and_live_lease ... ok
+test startup_tests::process_kill_inside_first_snapshot_transaction_rolls_back_every_row ... ok
+test tests::checkpoint_runs_only_after_commit_of_terminal ... ok
+test tests::claim_does_not_use_insert_or_replace ... ok
+test tests::corrupt_snapshot_json_is_typed_error ... ok
+test tests::crash_mid_put_rolls_back_uncommitted_and_does_not_invent_terminal ... ok
+test tests::dirty_persist_ready_t_to_t_prime_updates_only_runnable_at ... ok
+test tests::durable_is_synchronous_full ... ok
+test tests::empty_file_opens_as_new_store ... ok
+test tests::equal_revision_persist_with_events_does_not_duplicate_rows ... ok
+test tests::heartbeat_wrong_epoch_is_claimed_elsewhere ... ok
+test tests::incremental_persist_does_not_delete_unchanged_rows ... ok
+test tests::incremental_persist_keeps_pending_nodes ... ok
+test tests::lease_columns_migrate_on_legacy_executions_table ... ok
+test tests::legacy_nested_runnable_at_json_loads_when_column_null ... ok
+test tests::locked_file_is_typed_error_not_panic ... ok
+test tests::open_default_is_synchronous_full ... ok
+test tests::open_fast_is_synchronous_normal ... ok
+test tests::parked_ready_t_uses_column_omits_nested_json_keeps_last_error ... ok
+test tests::persist_keeps_definition_beside_snapshot ... ok
+test tests::persist_under_lock_returns_within_busy_bound ... ok
+test tests::poisoned_mutex_recovers ... ok
+test tests::put_without_persist_errors ... ok
+test tests::reopen_file_sees_the_same_snapshot ... ok
+test tests::same_owner_claim_refreshes_without_bumping_epoch ... ok
+test tests::schema_version_in_json_fail_closed ... ok
+test tests::second_uncommitted_persist_does_not_merge_into_first_commit ... ok
+test tests::stale_put_after_incremental_dirty_rows_loses ... ok
+test tests::stale_put_does_not_clobber ... ok
+test tests::truncated_file_is_typed_error ... ok
+test tests::truncated_wal_does_not_invent_a_terminal ... ok
+test tests::wal_mode_is_enabled ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/adversarial_durable_review.rs (target/debug/deps/adversarial_durable_review-823f5014a61cc172)
+
+running 10 tests
+test acknowledged_sqlite_start_must_not_rerun_recovered_succeeded_nodes ... ok
+test acknowledged_start_must_preserve_succeeded_predecessor_after_waiting_takeover ... ok
+test attack_abort_after_commit_repeatedly_recovers_without_losing_execution ... ok
+test attack_durable_burst_fanout_and_terminal_recovery ... ok
+test attack_initialization_write_failure_is_atomic_and_retryable ... ok
+test attack_live_other_owner_blocks_delayed_start ... ok
+test delayed_durable_start_must_not_rerun_nodes_completed_by_recovery ... ok
+test delayed_durable_start_must_not_resurrect_cancelled_execution ... ok
+test released_leases_reject_writes_and_cannot_release_successors ... ok
+test released_successor_must_not_make_old_lease_epoch_valid_again ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running tests/chaos.rs (target/debug/deps/chaos-96502242cb886b77)
+
+running 16 tests
+test and_join_1pm_waiting_4pm_delay_crash_resume ... ok
+test burst_idle_burst_crash_resume_sqlite ... ok
+test diamond_farm_retry_hitl_shuffled_resume ... ok
+test drop_handle_mid_persist_cancels_not_succeed ... ok
+test executor_panic_sqlite_resume_stays_failed ... ok
+test mixed_fat_and_tiny_payloads_crash_resume ... ok
+test persist_panic_after_sqlite_commit_keeps_succeeded ... ok
+test policy_panic_during_sqlite_put_stays_failed ... ok
+test sink_panic_during_sqlite_persist_still_durable ... ok
+test start_crash_resume_storm_one_file ... ok
+test two_runtimes_diamond_no_silent_wrong_terminal ... ok
+test two_thousand_short_jobs_one_file ... ok
+test two_threads_wide_resume_and_starts_no_wrong_terminal ... ok
+test wide_256_and_join_crash_resume ... ok
+test wide_256_resume_under_concurrent_starts_is_sqlite_bound ... ok
+test wide_2k_and_join_crash_resume_of_ready ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.81s
+
+     Running tests/crash_inject.rs (target/debug/deps/crash_inject-d375c8bc84921cc7)
+
+running 15 tests
+test cancel_persisted_survives_crash_and_resume ... ok
+test clock_jump_backward_after_runnable_at_persist_does_not_fire ... ok
+test clock_jump_forward_over_staggered_retries_sqlite ... ok
+test definition_mismatch_on_resume_fail_closed ... ok
+test duplicate_hitl_complete_after_sqlite_resume ... ok
+test empty_and_64kib_join_inputs_after_resume ... ok
+test fail_subtree_sibling_running_crash_keeps_failed_page ... ok
+test fifo_64_ready_concurrency_1_crash_resume_all_run_join_once ... ok
+test non_terminal_ready_delay_persist_err_then_crash_skips_uncommitted_delay ... ok
+test open_and_open_fast_process_kill_after_running_commit_both_reinvoke ... ok
+test randomized_crash_inject_sqlite ... ok
+test stale_finish_node_after_resume_attempt_bump_is_noop ... ok
+test two_resume_plus_start_same_runtime_already_active ... ok
+test unicode_and_long_node_ids_survive_crash_resume ... ok
+test wal_truncated_after_succeeded_commit_still_succeeded_full ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+     Running tests/http.rs (target/debug/deps/http-66bcad4d9a5e7f02)
+
+running 3 tests
+test http_sqlite_custom_executor_types_inspect_succeeded_bytes ... ok
+test http_sqlite_start_cancel_second_runtime_is_claimed_elsewhere ... ok
+test http_sqlite_start_inspect_complete_two_runtimes_new_id_is_not_steal ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/resume.rs (target/debug/deps/resume-e4356586e115224a)
+
+running 45 tests
+test busy_on_park_persist_rolls_back_then_t_lands ... ok
+test checkpoint_busy_after_commit_is_persist_ok_and_resume_sees_succeeded ... ok
+test checkpoint_busy_after_terminal_commit_does_not_duplicate_events ... ok
+test complete_after_sqlite_kill_new_runtime_unblocks_wait ... ok
+test complete_after_sqlite_kill_reports_ms ... ok
+test concurrent_persist_two_executions_same_file_no_panic ... ok
+test concurrent_resume_same_runtime_one_already_active ... ok
+test crash_after_fail_fast_stays_failed ... ok
+test crash_after_running_persist_releases_lock_and_reinvokes ... ok
+test crash_after_terminal_cas_before_emit_keeps_terminal ... ok
+test crash_after_timeout_persisted_before_dispatch_does_not_double_run ... ok
+test crash_diamond_join_runs_writer_once ... ok
+test crash_during_b_running_reinvokes_b_not_a ... ok
+test crash_during_retry_delay_does_not_fire_early ... ok
+test crash_fail_subtree_pages_stay_failed ... ok
+test crash_hourglass_neck_running_resume_runs_sinks_not_sources ... ok
+test crash_resume_256_parked_advance_once_each_once ... ok
+test crash_resume_full_file_keeps_deadline ... ok
+test crash_while_waiting_keeps_the_same_token ... ok
+test equal_revision_persist_does_not_grow_event_rows ... ok
+test event_rows_in_snapshot_txn_are_not_used_for_resume ... ok
+test fat_bytes_sqlite_round_trip_preserves_bytes ... ok
+test fat_payloads_64kib_times_eight_persist_resume ... ok
+test incremental_fire_does_not_overwrite_sibling_runnable_at ... ok
+test incremental_persist_256_wide_succeeded_does_not_drop_pending ... ok
+test incremental_persist_does_not_drop_runnable_at ... ok
+test many_park_wakes_wal_stays_bounded ... ok
+test persist_resume_256_runnable_at_set_vs_unset ... ok
+test process_restart_is_new_runtime_same_file ... ok
+test reader_lock_does_not_block_park_persist ... ok
+test resume_running_custom_without_adapter_is_unregistered ... ok
+test resume_twice_live_is_already_active ... ok
+test resume_unknown_id_on_file ... ok
+test retry_failed_all_done_map_reduce_recover_persist_kill_before_startnode_many ... ok
+test retry_failed_recover_persist_then_kill_before_startnode_continue_reinvokes ... ok
+test sqlite_deadline_persist_does_not_drop_or_double_fire ... ok
+test sqlite_persist_failed_huge_last_error_is_capped ... ok
+test stale_epoch_persist_is_rejected ... ok
+test transient_cancel_persist_err_shutdown_flushes_sqlite_cancelled ... ok
+test transient_terminal_persist_err_shutdown_flushes_sqlite_succeeded ... ok
+test transient_terminal_persist_err_twice_shutdown_retries_sqlite ... ok
+test two_runtimes_lease_ttl_then_second_claims ... ok
+test two_runtimes_same_file_are_not_fenced ... ok
+test two_runtimes_same_file_both_may_complete ... ok
+test waiting_resume_does_not_append_event_rows ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+
+     Running tests/resume_stress.rs (target/debug/deps/resume_stress-c5760458fa3ade8e)
+
+running 11 tests
+test crash_resume_hourglass_256_within_bound ... ok
+test crash_resume_same_diamond_attempt_climbs_only_on_inflight ... ok
+test fat_payloads_64kib_times_32_persist_resume_within_bound ... ok
+test fifty_start_crash_resume_diamonds_one_file ... ok
+test one_thousand_sequential_dags_resume_last ... ok
+test persist_256_wide_apply_within_bound ... ok
+test resume_256_wide_full_vs_normal ... ok
+test resume_256_wide_snapshot_within_bound ... ok
+test resume_2k_wide_snapshot_debug_within_bound ... ok
+test twenty_diamond_repeat_crash_resume_within_bound ... ok
+test two_hundred_start_crash_resume_wal_bounded ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.77s
+
+     Running tests/startup.rs (target/debug/deps/startup-c240b13b1323be02)
+
+running 15 tests
+test claimed_revision_zero_initializes_and_resumes_with_all_nodes ... ok
+test competing_initializers_commit_one_execution_without_overwriting_the_owner ... ok
+test crash_resume_observes_cancellation_committed_at_claim ... ok
+test durable_ack_has_a_created_snapshot_and_definition_before_dispatch ... ok
+test durable_handle_drop_still_cancels_waiting_execution ... ok
+test durable_initialization_failure_rolls_back_lease_definition_and_nodes ... ok
+test equal_revision_conflict_is_rejected_on_real_file ... ok
+test failed_initial_snapshot_transaction_preserves_placeholder ... ok
+test initialize_rejects_existing_ids_and_non_created_executions ... ok
+test lease_only_reopen_is_absent_without_releasing_ownership ... ok
+test old_owner_cannot_initialize_after_takeover ... ok
+test partial_or_corrupt_placeholders_are_not_hidden_or_overwritten ... ok
+test real_snapshot_with_missing_definition_still_fails_recovery ... ok
+test successful_commit_then_takeover_cannot_launch_sqlite_successor ... ok
+test temporary_and_in_memory_databases_cannot_acknowledge_durability ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/structure.rs (target/debug/deps/structure-b6f3b61fa68f9417)
+
+running 5 tests
+test adapter_depends_on_keel_rt ... ok
+test adapter_has_no_timer_table_and_persists_snapshot_deadline ... ok
+test chaos_log_names_the_standing_pack ... ok
+test kernel_package_does_not_depend_on_this_adapter ... ok
+test scheduler_does_not_name_the_file_store ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/keel_rt_wasm-e5e177b7cc50bcf4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/executor.rs (target/debug/deps/executor-ca1a481024f8dc86)
+
+running 15 tests
+test busy_guest_yields_for_timeout_cancellation_and_siblings ... ok
+test cancelling_or_timing_out_a_suspended_host_import_drops_future_and_store ... ok
+test canonical_post_return_traps_are_not_reported_as_success ... ok
+test component_bytes_and_files_are_bounded_before_compilation ... ok
+test each_invocation_has_fresh_guest_memory_and_can_run_concurrently ... ok
+test file_component_passes_binary_payload_through_a_real_dag ... ok
+test fuel_stops_infinite_guest_and_memory_growth_is_limited ... ok
+test initialization_is_also_metered_and_cancellable ... ok
+test keel_policies_retry_and_snapshot_recovery_reinvokes_the_component ... ok
+test rejects_invalid_components_missing_imports_and_bad_configuration ... ok
+test resource_counts_and_table_growth_are_enforced ... ok
+test traps_and_export_type_errors_become_failures ... ok
+test users_control_outcome_and_wait_token_mapping ... ok
+test users_explicitly_link_capabilities_with_fresh_host_state ... ok
+test waiting_completes_through_keel_and_runtime_cancels_busy_wasm ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/stress.rs (target/debug/deps/stress-0bbc887558bcf46b)
+
+running 2 tests
+test cancel_busy_workflow_preserves_other_runs_and_releases_every_store ... ok
+test mixed_2048_nodes_trap_retry_join_and_persist_without_state_leaks ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running unittests src/lib.rs (target/debug/deps/keel_rt_wasm_consumer_test-d9efd4cf2251dab2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests keel_rt_http
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests keel_rt_schedule
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests keel_rt_sqlite
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests keel_rt_wasm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests keel_rt_wasm_consumer_test
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

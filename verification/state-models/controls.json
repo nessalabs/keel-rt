@@ -1,0 +1,86 @@
+[
+  {
+    "owner": "graph",
+    "name": "start-before-all-predecessors",
+    "to": "/\\ ~dependent /\\ ~peer",
+    "rule": "JoinBeforeStart",
+    "from": "/\\ ~dependent /\\ Satisfied /\\ ~peer"
+  },
+  {
+    "owner": "graph",
+    "name": "ignore-running-peer",
+    "to": "/\\ ~dependent /\\ Satisfied",
+    "rule": "PermitBound",
+    "from": "/\\ ~dependent /\\ Satisfied /\\ ~peer"
+  },
+  {
+    "owner": "startup",
+    "name": "acknowledge-before-commit",
+    "to": "Acknowledge == /\\ ",
+    "rule": "AcknowledgeAfterCommit",
+    "from": "Acknowledge == /\\ committed /\\ "
+  },
+  {
+    "owner": "startup",
+    "name": "launch-before-commit",
+    "to": "Launch == /\\ ",
+    "rule": "LaunchAfterCommit",
+    "from": "Launch == /\\ committed /\\ "
+  },
+  {
+    "owner": "waiting",
+    "name": "accept-foreign-token",
+    "to": "/\\ TRUE",
+    "rule": "CurrentTokenOnly",
+    "from": "/\\ offered = current"
+  },
+  {
+    "owner": "waiting",
+    "name": "accept-after-cancel",
+    "to": "Complete == /\\ ~accepted",
+    "rule": "NoAcceptAfterCancel",
+    "from": "Complete == /\\ ~accepted /\\ ~cancelled"
+  },
+  {
+    "owner": "failure-policy",
+    "name": "clear-deadline-too-early",
+    "to": "/\\ TRUE",
+    "rule": "NotBeforeDeadline",
+    "from": "/\\ now >= 2"
+  },
+  {
+    "owner": "failure-policy",
+    "name": "dispatch-cancelled-retry",
+    "to": "Dispatch == /\\ ready",
+    "rule": "NoCancelledDispatch",
+    "from": "Dispatch == /\\ ready /\\ ~cancelled"
+  },
+  {
+    "owner": "persistence",
+    "name": "announce-unsaved-fact",
+    "to": "Emit == /\\ ",
+    "rule": "PersistBeforeEmit",
+    "from": "Emit == /\\ persisted /\\ "
+  },
+  {
+    "owner": "persistence",
+    "name": "rollback-on-sink-failure",
+    "to": "/\\ persisted' = FALSE /\\ UNCHANGED <<everPersisted,emitted>>",
+    "rule": "SinkCannotUndoPersist",
+    "from": "/\\ UNCHANGED <<persisted,everPersisted,emitted>>"
+  },
+  {
+    "owner": "leases",
+    "name": "write-with-stale-epoch",
+    "to": "Write == /\\ ~wrote",
+    "rule": "CurrentWriteOnly",
+    "from": "Write == /\\ ~wrote /\\ offered = epoch"
+  },
+  {
+    "owner": "leases",
+    "name": "authorize-launch-with-stale-epoch",
+    "to": "CheckLaunch == /\\ ~launchChecked",
+    "rule": "CurrentLaunchCheckOnly",
+    "from": "CheckLaunch == /\\ ~launchChecked /\\ offered = epoch"
+  }
+]

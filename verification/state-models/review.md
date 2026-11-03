@@ -1,0 +1,33 @@
+# Keel independent reader and technical review
+
+Reviewer: workspace_repo_docs, separate from author. 2026-11-03. Markdown reader pass recorded before source inspection; browser not independently inspected here.
+
+## Docs-only tasks
+
+1. Start a workflow whose acceptance must survive a crash. Path root → startup. Use `start_durable` with a supporting store, retaining the handle. Supported by “Use start_durable ... with a store that explicitly supports durable initialization.” An unknown acknowledgement may still leave committed work; another start generates a new ID. The application must retain business IDs and inputs; there is explicitly no automatic lookup when execution ID was lost. No guessed recovery procedure needed.
+2. Pause a publish operation for approval. Root → waiting → startup. Keep the live handle, observe `wait_stable`, retrieve the current waiting token and call complete. Exact attempt token is needed; Reinvoke is different from fresh start. Waiting is nonterminal and wait may remain pending. Caller supplies decision; no kernel approval UI.
+3. Stop observing a run, then cancel it. Root → cancellation. Dropping unused handle requests cancellation, but dropping the consumed wait future does not guarantee cancellation. Use explicit cancel while retaining access; wait observes terminal state, not reversal of external effects. Diagram shows request, cooperative completion or bounded abort. Supported by explicit distinction in “Handle wait and Runtime lifetime.”
+4. Resume after a worker crash. Root → recovery. Use original ID and stored definition; replacement runtime registers executors and claims ownership. Running nodes rerun, Waiting retains token, default terminal outcomes remain. Stable business operation IDs are needed for repeated external effects. A missing snapshot is not safe permission to replace-start.
+5. Retry failures while independent branches continue. Root → failure-policy. Set FailSubtree deliberately; default FailExecution cancels remaining nonterminal work. AllDone joins can complete with mixed outcomes; inspect nodes instead of treating `is_successful_finish()` as universal business success. Delayed retry is Ready at a time, not token Waiting.
+
+All five decision paths answerable without consulting source. No material reader gap found in this sample. Source/model fidelity still pending below.
+
+Additional docs-only task: root → persistence answers whether store error implies no effects: live state can advance, ordinary persistence error can still allow launch after ownership check, sink waits for persisted state, shutdown retries are bounded. No guessed rollback or safe blind retry.
+
+## Source/model adversarial pass
+
+Inspected runtime start/start_durable/resume/complete/cancel, handle wait/drop, scheduler dispatch/persist/lease refresh and domain restore/retry-failed/token handling. Reviewed all six specs/configs and twelve guard/effect mutations.
+
+K1 (material scope correction): leases summary and diagram imply no launch after takeover, while scheduler.rs dispatch first awaits extend_lease and then calls launch_slot separately. LeaseFence atomically checks epoch and records launch; this models acceptance at check, not a distributed atomic check-plus-external-launch. A process pause after successful heartbeat can allow TTL expiry/takeover before application invocation. Document that gap/assumption explicitly and phrase guarantee as stale ownership detected at prelaunch check, not continuous external fencing. Persistence prose saying old epochs cannot authorize launches should likewise qualify the check. No claim that a production race was reproduced; this is a source-visible formal abstraction limit.
+
+K2 (reader evidence correction): handle.rs wait and wait_stable return synthetic Cancelled if watch channel closes while nonterminal. Cancellation prose calls wait terminal observation without this exception. Add the fallback and say it is not proof of a saved Cancelled snapshot or remote cleanup; attach to terminal chart detail.
+
+Other sampled source claims preserve actual ordering: durable initializer precedes spawn; ordinary start is asynchronous; live completion may apply before store error, offline completion persists before following drive; retry-failed resets direct succeeded AllDone consumer of retried failed/timedout predecessors; consumed wait differs from unused-handle drop. Domain graph Waiting→Running is a transient apply-outcome state, not an extra executor launch; chart wording says supplies outcome and own permit section distinguishes waiting capacity.
+
+Models are bounded safety abstractions: DependencyJoin two predecessor outcomes and one running peer; DurableStart one new submission/commit; WaitToken two independently offered/current tokens and preaccept cancellation; RetryDeadline ticks0..3 and deadline2; PersistEmit one revision and sink failure; LeaseFence two epochs. Properties are reachable rather than vacuous and mutations preserve invariants while weakening matching admission/effect. Deadlock disabled allows terminal/saturated finite states; no fairness/liveness result. DurableStart excludes resume after abandoned caller and adapter atomicity; DependencyJoin lacks arbitrary graph/policy failure propagation; PersistEmit deliberately excludes noop adapter and power loss. These exclusions are appropriately explicit. LeaseFence requires K1 qualification above. Final receipts being produced by author; this review does not claim to have rerun TLC or implementation suites.
+
+## Re-review and disposition
+
+K1 closed: leases summary now says stale epochs refused at checks, chart names launch check, Launched inspector opens point-in-time section. Dedicated paragraph explicitly excludes check-to-invocation pause/takeover guarantee. Persistence cross-link carries the same qualification. LeaseFence now names CheckLaunch/CurrentLaunchCheckOnly and constrains issued token <= current epoch, so mutant traces represent stale old generations rather than a future unissued token. The revised guard retains independent offered/current identity and acceptance snapshots. K2 closed: cancellation distinguishes polled vs unpolled consuming wait, Shutdown vs normal Cancel, and synthetic Cancelled watch-close fallback. Terminal inspector links that explanation. Both changes inspected directly after edits.
+
+No unresolved material findings in sampled reader/source paths and six-model scope. Author reports final six baselines/twelve controls pass (91 aggregate states); execution receipts remain author-owned, not an independent rerun. Review establishes bounded property/source alignment and reader decisions, not complete distributed execution safety or live platform qualification.
